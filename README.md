@@ -88,7 +88,8 @@ including when loaded from the JSON state file.
   For the same head and unchanged GitHub results,
   `--checks` shows the same checks section alone or with either diff option.
   If a requested diff or checks fetch fails, the command prints no partial report.
-  Diff output is limited to 8 MiB and terminal control characters are escaped.
+  Diff output is limited to 8 MiB.
+  CRLF line endings are displayed as LF, while other terminal control characters are escaped.
   If GitHub refuses to generate a diff, possibly because of its file or line limits,
   inspect the PR on GitHub.
   The CLI checks the live PR head again before displaying the diff,
@@ -123,6 +124,8 @@ For private repositories or a higher GitHub API rate limit,
 set `REVIEW_PLATFORM_GITHUB_TOKEN_RO` to a token with pull request, contents,
 checks, and commit statuses read access.
 The CLI uses this token only for GitHub reads.
+HTTPS uses the platform's trusted certificates, including organization roots installed for a TLS-intercepting proxy.
+On Linux, `SSL_CERT_FILE` or `SSL_CERT_DIR` can select a PEM certificate bundle or directory instead of the system CA bundle.
 
 This prototype does not discover author review requests, enforce a CI gate, start OpenShell,
 consume an authorized round, or publish reviews.

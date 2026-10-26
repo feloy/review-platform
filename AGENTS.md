@@ -67,6 +67,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Keep secret material out of repository files.
 - Validate external input at its boundary and propagate actionable errors.
   Do not make network calls or run agents from pure domain logic or unit tests.
+- Use platform trust roots for outbound HTTPS so operator-installed certificates work.
+  Keep server certificate verification enabled.
 
 ## Changes and commits
 

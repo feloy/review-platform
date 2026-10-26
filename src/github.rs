@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::io::Read;
 use std::time::Duration;
+use ureq::tls::{RootCerts, TlsConfig};
 
 const API_ROOT: &str = "https://api.github.com";
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
@@ -119,6 +120,11 @@ impl GithubClient {
             .max_redirects(0)
             .http_status_as_error(false)
             .user_agent(concat!("review-platform/", env!("CARGO_PKG_VERSION")))
+            .tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
             .build();
         let agent = ureq::Agent::new_with_config(config);
         Self {

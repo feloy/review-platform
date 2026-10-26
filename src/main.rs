@@ -237,7 +237,7 @@ fn run(cli: Cli) -> Result<()> {
                 if changes.is_empty() {
                     println!("(no changes)");
                 } else {
-                    let safe_changes = escape_terminal_controls(&changes);
+                    let safe_changes = escape_diff_for_terminal(&changes);
                     print!("{safe_changes}");
                     if !safe_changes.ends_with('\n') {
                         println!();
@@ -269,13 +269,17 @@ fn escape_terminal_controls(value: &str) -> String {
     rendered
 }
 
+fn escape_diff_for_terminal(value: &str) -> String {
+    escape_terminal_controls(&value.replace("\r\n", "\n"))
+}
+
 fn escape_terminal_field(value: &str) -> String {
     escape_terminal_controls(value).replace(['\n', '\t'], " ")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_terminal_controls, escape_terminal_field};
+    use super::{escape_diff_for_terminal, escape_terminal_controls, escape_terminal_field};
 
     #[test]
     fn code_changes_cannot_control_the_terminal() {
@@ -286,6 +290,10 @@ mod tests {
         assert_eq!(
             escape_terminal_field("a\n\u{1b}[31m\tjob"),
             "a \\u{1b}[31m job"
+        );
+        assert_eq!(
+            escape_diff_for_terminal("+first\r\n+second\r\n+stray\rtail\n"),
+            "+first\n+second\n+stray\\rtail\n"
         );
     }
 }
