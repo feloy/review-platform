@@ -1,12 +1,11 @@
 //! Operator CLI for local authorization and read-only GitHub PR inspection.
 
-mod github;
 mod storage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use review_platform::{
-    Authorization, AuthorizationScope, HeadSha, PrKey, RecordOutcome, StateError,
+    Authorization, AuthorizationScope, HeadSha, PrKey, RecordOutcome, StateError, github,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
