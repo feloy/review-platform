@@ -13,6 +13,10 @@ pub enum StateError {
     InvalidPrNumber,
     #[error("head SHA must contain 40 or 64 hexadecimal characters")]
     InvalidHeadSha,
+    #[error(
+        "recorded head changed: expected {expected}, found {recorded}; run status and review the current head before authorizing"
+    )]
+    HeadMismatch { expected: String, recorded: String },
     #[error("review request not found: {0}")]
     RequestNotFound(PrKey),
     #[error("duplicate review request in state: {0}")]
@@ -87,6 +91,21 @@ pub enum Authorization {
     AwaitingLead,
     OneRound,
     PrCycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizationScope {
+    OneRound,
+    PrCycle,
+}
+
+impl From<AuthorizationScope> for Authorization {
+    fn from(scope: AuthorizationScope) -> Self {
+        match scope {
+            AuthorizationScope::OneRound => Self::OneRound,
+            AuthorizationScope::PrCycle => Self::PrCycle,
+        }
+    }
 }
 
 impl fmt::Display for Authorization {

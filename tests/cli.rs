@@ -29,7 +29,15 @@ fn local_authorization_survives_process_restart_and_new_head_clears_one_round() 
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
     run(
         &state_file,
-        &["authorize", "owner/repo", "42", "--scope", "one-round"],
+        &[
+            "authorize",
+            "owner/repo",
+            "42",
+            "--scope",
+            "one-round",
+            "--head",
+            HEAD_A,
+        ],
     );
     let status = run(&state_file, &["status", "owner/repo", "42"]);
     assert!(status.contains("authorized for one round"));
@@ -39,6 +47,66 @@ fn local_authorization_survives_process_restart_and_new_head_clears_one_round() 
     let status = run(&state_file, &["status", "owner/repo", "42"]);
     assert!(status.contains("awaiting lead authorization"));
     assert!(status.contains(HEAD_B));
+}
+
+#[test]
+fn authorize_requires_the_head_seen_by_the_lead() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+
+    run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
+    let status = run(&state_file, &["status", "owner/repo", "42"]);
+    assert!(status.contains(HEAD_A));
+
+    let missing_head = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+        .arg("--state-file")
+        .arg(&state_file)
+        .args(["authorize", "owner/repo", "42", "--scope", "one-round"])
+        .output()
+        .unwrap();
+    assert!(!missing_head.status.success());
+    assert!(String::from_utf8_lossy(&missing_head.stderr).contains("--head"));
+
+    run(&state_file, &["request", "owner/repo", "42", HEAD_B]);
+    let stale_head = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+        .arg("--state-file")
+        .arg(&state_file)
+        .args([
+            "authorize",
+            "owner/repo",
+            "42",
+            "--scope",
+            "one-round",
+            "--head",
+            HEAD_A,
+        ])
+        .output()
+        .unwrap();
+    assert!(!stale_head.status.success());
+    let error = String::from_utf8(stale_head.stderr).unwrap();
+    assert!(error.contains(HEAD_A), "{error}");
+    assert!(error.contains(HEAD_B), "{error}");
+    let status = run(&state_file, &["status", "owner/repo", "42"]);
+    assert!(status.contains(HEAD_B));
+    assert!(status.contains("awaiting lead authorization"));
+
+    run(
+        &state_file,
+        &[
+            "authorize",
+            "owner/repo",
+            "42",
+            "--scope",
+            "one-round",
+            "--head",
+            HEAD_B,
+        ],
+    );
+    assert!(run(&state_file, &["status", "owner/repo", "42"]).contains("authorized for one round"));
+    run(&state_file, &["revoke", "owner/repo", "42"]);
+    assert!(
+        run(&state_file, &["status", "owner/repo", "42"]).contains("awaiting lead authorization")
+    );
 }
 
 #[test]
