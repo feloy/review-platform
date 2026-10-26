@@ -73,7 +73,8 @@ including when loaded from the JSON state file.
   Green requires at least one result, every check run completed with success, neutral, or skipped,
   and every commit status successful.
   An unknown GitHub value or incomplete result never appears green.
-  If a change is detected while paginated check runs are fetched, the command asks you to retry.
+  For paginated check runs, the command rereads all pages to compare run IDs.
+  If the IDs or reported count differ, it asks you to retry.
   The command reports an error rather than giving a partial summary if GitHub reports more than 1000 results.
   Add `--diff` to display the full PR code diff against its base for a first review.
   Add `--since HEAD_SHA` to display changes after a previously reviewed commit

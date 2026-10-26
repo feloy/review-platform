@@ -253,16 +253,30 @@ impl GithubClient {
     }
 
     fn check_runs_for_head(&self, key: &PrKey, head: &HeadSha) -> GithubResult<Vec<CheckRun>> {
+        let (runs, ids, pages) = self.collect_check_runs_for_head(key, head)?;
+        if pages > 1 {
+            let (_, refreshed_ids, _) = self.collect_check_runs_for_head(key, head)?;
+            if refreshed_ids != ids {
+                return Err(GithubError::PaginationChanged {
+                    kind: "check runs",
+                    detail: "run IDs changed between page reads".to_owned(),
+                });
+            }
+        }
+        Ok(runs)
+    }
+
+    fn collect_check_runs_for_head(
+        &self,
+        key: &PrKey,
+        head: &HeadSha,
+    ) -> GithubResult<(Vec<CheckRun>, HashSet<u64>, usize)> {
         let mut runs = Vec::new();
         let mut seen_ids = HashSet::new();
         let mut expected_total = None;
-        let mut first_page_snapshot = Vec::new();
         for page in 1..=MAX_PAGES {
             let data = self.check_runs_page(key, head, page)?;
             check_total(&mut expected_total, data.total_count, "check runs")?;
-            if page == 1 {
-                first_page_snapshot = run_snapshot(&data.check_runs);
-            }
             let total_count = data.total_count;
             for run in data.check_runs {
                 if !seen_ids.insert(run.id) {
@@ -274,18 +288,7 @@ impl GithubClient {
                 runs.push(run);
             }
             if runs.len() as u64 == total_count {
-                if page > 1 {
-                    let refreshed = self.check_runs_page(key, head, 1)?;
-                    if refreshed.total_count != total_count
-                        || run_snapshot(&refreshed.check_runs) != first_page_snapshot
-                    {
-                        return Err(GithubError::PaginationChanged {
-                            kind: "check runs",
-                            detail: "first page changed".to_owned(),
-                        });
-                    }
-                }
-                return Ok(runs);
+                return Ok((runs, seen_ids, page));
             }
             if runs.len() as u64 > total_count {
                 return Err(GithubError::PaginationChanged {
@@ -387,12 +390,6 @@ impl GithubClient {
             detail: "not every page was returned".to_owned(),
         })
     }
-}
-
-fn run_snapshot(runs: &[CheckRun]) -> Vec<(u64, CheckRunStatus, Option<CheckConclusion>)> {
-    runs.iter()
-        .map(|run| (run.id, run.status, run.conclusion))
-        .collect()
 }
 
 fn check_total(expected: &mut Option<u64>, actual: u64, what: &'static str) -> GithubResult<()> {

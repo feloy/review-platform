@@ -300,7 +300,7 @@ fn github_error(error: ureq::Error, description: &str, token_configured: bool) -
 
 #[cfg(test)]
 mod tests {
-    use super::checks::CheckSummary;
+    use super::checks::{CheckRunStatus, CheckSummary};
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -355,8 +355,8 @@ mod tests {
         .to_string()
     }
 
-    fn successful_check_runs() -> Vec<serde_json::Value> {
-        (1..=100)
+    fn successful_check_runs(first: u64, last: u64) -> Vec<serde_json::Value> {
+        (first..=last)
             .map(|id| {
                 serde_json::json!({
                     "id": id,
@@ -367,6 +367,15 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    fn check_runs_reply(page: usize, total_count: u64, runs: Vec<serde_json::Value>) -> MockReply {
+        json_reply(
+            format!(
+                "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page={page}&filter=latest"
+            ),
+            serde_json::json!({"total_count": total_count, "check_runs": runs}).to_string(),
+        )
     }
 
     fn serve_once(
@@ -684,7 +693,7 @@ mod tests {
     fn check_run_pagination_includes_failures_after_the_first_page() {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let first_page =
-            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs()})
+            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs(1, 100)})
                 .to_string();
         let second_page = serde_json::json!({
             "total_count": 101,
@@ -716,13 +725,19 @@ mod tests {
                 format!(
                     "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=2&filter=latest"
                 ),
-                second_page,
+                second_page.clone(),
             ),
             json_reply(
                 format!(
                     "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=1&filter=latest"
                 ),
                 first_page,
+            ),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=2&filter=latest"
+                ),
+                second_page,
             ),
             json_reply(
                 format!("/repos/owner/repo/commits/{HEAD}/status?per_page=100&page=1"),
@@ -744,7 +759,7 @@ mod tests {
     fn check_run_pagination_rejects_a_duplicate_with_unchanged_total() {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let first_page =
-            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs()})
+            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs(1, 100)})
                 .to_string();
         let second_page = serde_json::json!({
             "total_count": 101,
@@ -793,7 +808,7 @@ mod tests {
     fn check_run_pagination_rejects_a_replaced_first_page_run() {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let first_page =
-            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs()})
+            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs(1, 100)})
                 .to_string();
         let second_page = serde_json::json!({
             "total_count": 101,
@@ -806,7 +821,7 @@ mod tests {
             }]
         })
         .to_string();
-        let mut changed_runs = successful_check_runs();
+        let mut changed_runs = successful_check_runs(1, 100);
         changed_runs[0] = serde_json::json!({
             "id": 102,
             "name": "job-1",
@@ -828,13 +843,19 @@ mod tests {
                 format!(
                     "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=2&filter=latest"
                 ),
-                second_page,
+                second_page.clone(),
             ),
             json_reply(
                 format!(
                     "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=1&filter=latest"
                 ),
                 refreshed_page,
+            ),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=2&filter=latest"
+                ),
+                second_page,
             ),
         ];
         let (url, handle) = serve_many(replies);
@@ -852,6 +873,81 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn check_run_pagination_rejects_a_skip_after_the_middle_page_changes() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let first_page = successful_check_runs(1, 100);
+        let middle_page = successful_check_runs(101, 200);
+        // Run 150 disappears after page 2 was fetched. Run 201 moves onto page 2,
+        // and a new run 202 fills page 3, leaving the first read with no duplicate.
+        let mut refreshed_middle_page = successful_check_runs(101, 149);
+        refreshed_middle_page.extend(successful_check_runs(151, 201));
+        refreshed_middle_page.last_mut().unwrap()["conclusion"] = "failure".into();
+        let last_page = successful_check_runs(202, 202);
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            check_runs_reply(1, 201, first_page.clone()),
+            check_runs_reply(2, 201, middle_page),
+            check_runs_reply(3, 201, last_page.clone()),
+            check_runs_reply(1, 201, first_page),
+            check_runs_reply(2, 201, refreshed_middle_page),
+            check_runs_reply(3, 201, last_page),
+        ];
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let error = client.checks_for_pull(&key, &pull).err().unwrap();
+        handle.join().unwrap();
+        assert!(
+            matches!(
+                &error,
+                GithubError::PaginationChanged {
+                    kind: "check runs",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn check_run_pagination_allows_status_progress_on_the_same_ids() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut first_page = successful_check_runs(1, 100);
+        first_page[0]["status"] = "in_progress".into();
+        first_page[0]["conclusion"] = serde_json::Value::Null;
+        let mut refreshed_first_page = first_page.clone();
+        refreshed_first_page[0]["status"] = "completed".into();
+        refreshed_first_page[0]["conclusion"] = "success".into();
+        let last_page = successful_check_runs(101, 101);
+        let statuses = serde_json::json!({
+            "sha": HEAD,
+            "state": "pending",
+            "total_count": 0,
+            "statuses": []
+        })
+        .to_string();
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            check_runs_reply(1, 101, first_page),
+            check_runs_reply(2, 101, last_page.clone()),
+            check_runs_reply(1, 101, refreshed_first_page),
+            check_runs_reply(2, 101, last_page),
+            json_reply(
+                format!("/repos/owner/repo/commits/{HEAD}/status?per_page=100&page=1"),
+                statuses,
+            ),
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+        ];
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let report = client.checks_for_pull(&key, &pull).unwrap();
+        handle.join().unwrap();
+        assert_eq!(report.summary(), CheckSummary::Pending);
+        assert_eq!(report.check_runs()[0].status, CheckRunStatus::InProgress);
     }
 
     #[test]
