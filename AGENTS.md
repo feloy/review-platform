@@ -16,6 +16,8 @@ add a dependency or abstraction when a current feature needs it.
   Parse CLI and deserialized data through the same fallible constructors.
   Keep cross-record checks on the containing state.
   Make transitions return useful errors instead of silently changing state.
+- Keep fields private on adapter snapshots whose origin matters.
+  Expose read-only accessors so callers cannot construct or change an inspected value.
 - Prefer borrowing and owned values with clear lifetimes over unnecessary clones, shared mutable state, or elaborate lifetime parameters.
 - Use typed errors at reusable library and adapter boundaries.
   Callers should distinguish failures by variant without parsing error messages.

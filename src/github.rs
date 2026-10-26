@@ -24,16 +24,43 @@ pub struct GithubClient {
     token: Option<String>,
 }
 
+/// GitHub PR metadata obtained through [`GithubClient::pull_request`].
 pub struct PullRequest {
-    pub title: String,
-    pub author: String,
-    pub state: PullRequestState,
-    pub draft: bool,
-    pub head_sha: HeadSha,
-    pub base_sha: HeadSha,
+    title: String,
+    author: String,
+    state: PullRequestState,
+    draft: bool,
+    head_sha: HeadSha,
+    base_sha: HeadSha,
 }
 
-#[derive(Debug, Deserialize)]
+impl PullRequest {
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn author(&self) -> &str {
+        &self.author
+    }
+
+    pub fn state(&self) -> PullRequestState {
+        self.state
+    }
+
+    pub fn draft(&self) -> bool {
+        self.draft
+    }
+
+    pub fn head_sha(&self) -> &HeadSha {
+        &self.head_sha
+    }
+
+    pub fn base_sha(&self) -> &HeadSha {
+        &self.base_sha
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PullRequestState {
     Open,
@@ -482,9 +509,9 @@ mod tests {
             .pull_request(&PrKey::new("OWNER/REPO", 42).unwrap())
             .unwrap();
         handle.join().unwrap();
-        assert_eq!(pull.head_sha.as_str(), HEAD);
-        assert_eq!(pull.author, "author");
-        assert!(matches!(pull.state, PullRequestState::Open));
+        assert_eq!(pull.head_sha().as_str(), HEAD);
+        assert_eq!(pull.author(), "author");
+        assert_eq!(pull.state(), PullRequestState::Open);
     }
 
     #[test]
