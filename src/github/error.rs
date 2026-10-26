@@ -68,6 +68,10 @@ pub enum GithubError {
     DivergentHistory { previous: HeadSha, current: HeadSha },
     #[error("GitHub returned {actual:?} instead of a diff for {key}")]
     UnexpectedDiffMediaType { key: PrKey, actual: String },
+    #[error(
+        "GitHub refused the diff for {key} (HTTP 406, possibly due to file or line limits); inspect the PR on GitHub"
+    )]
+    DiffUnavailable { key: PrKey },
     #[error("GitHub diff for {key} exceeds {max_mib} MiB; inspect it on GitHub")]
     DiffTooLarge { key: PrKey, max_mib: u64 },
     #[error("GitHub diff for {key} is not UTF-8: {source}")]

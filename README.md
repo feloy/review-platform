@@ -88,6 +88,8 @@ including when loaded from the JSON state file.
   `--checks` shows the same checks section alone or with either diff option.
   If a requested diff or checks fetch fails, the command prints no partial report.
   Diff output is limited to 8 MiB and terminal control characters are escaped.
+  If GitHub refuses to generate a diff, possibly because of its file or line limits,
+  inspect the PR on GitHub.
   The CLI checks the live PR head again before displaying the diff,
   and also checks the base SHA for a full PR diff.
   It reports a change during retrieval.
