@@ -225,7 +225,7 @@ impl GithubClient {
             .take(MAX_DIFF_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|source| GithubError::ReadResponse {
-                resource: format!("GitHub diff for {key}"),
+                resource: format!("diff for {key}"),
                 source,
             })?;
         if bytes.len() as u64 > MAX_DIFF_BYTES {
@@ -984,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn check_run_pagination_allows_status_progress_on_the_same_ids() {
+    fn check_run_pagination_returns_fresher_status_on_the_same_ids() {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let mut first_page = successful_check_runs(1, 100);
         first_page[0]["status"] = "in_progress".into();
@@ -1017,8 +1017,8 @@ mod tests {
         let pull = client.pull_request(&key).unwrap();
         let report = client.checks_for_pull(&key, &pull).unwrap();
         handle.join().unwrap();
-        assert_eq!(report.summary(), CheckSummary::Pending);
-        assert_eq!(report.check_runs()[0].status, CheckRunStatus::InProgress);
+        assert_eq!(report.summary(), CheckSummary::Green);
+        assert_eq!(report.check_runs()[0].status, CheckRunStatus::Completed);
     }
 
     #[test]

@@ -83,10 +83,8 @@ including when loaded from the JSON state file.
   after a force push that breaks this history, inspect the full diff again.
   `--diff` and `--since` cannot be combined.
   `--checks` can be used with either diff option.
-  The checks section always refers to the current PR head;
+  The checks section always refers to the current PR head.
   `--diff` and `--since` only change the code diff section.
-  For the same head and unchanged GitHub results,
-  `--checks` shows the same checks section alone or with either diff option.
   If a requested diff or checks fetch fails, the command prints no partial report.
   Diff output is limited to 8 MiB.
   CRLF line endings are displayed as LF, while other terminal control characters are escaped.
@@ -136,7 +134,8 @@ the lead must supply that SHA to `--since` for an incremental comparison.
 Its state is local and intended for one operator process at a time.
 The `--head` check compares local state only;
 it does not verify the live GitHub head or make concurrent CLI writes safe.
-Use `github-pr --diff` or `github-pr --since HEAD_SHA` to inspect the code and live head before recording or authorizing a request;
+Use `github-pr --diff` or `github-pr --since HEAD_SHA` to inspect the code and live head
+before recording or authorizing a request.
 GitHub may still change after that inspection.
 The `--checks` output is a snapshot of reported results,
 not a decision about required checks or permission to start a review round.

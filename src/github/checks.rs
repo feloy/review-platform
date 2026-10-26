@@ -254,16 +254,17 @@ impl GithubClient {
 
     fn check_runs_for_head(&self, key: &PrKey, head: &HeadSha) -> GithubResult<Vec<CheckRun>> {
         let (runs, ids, pages) = self.collect_check_runs_for_head(key, head)?;
-        if pages > 1 {
-            let (_, refreshed_ids, _) = self.collect_check_runs_for_head(key, head)?;
-            if refreshed_ids != ids {
-                return Err(GithubError::PaginationChanged {
-                    kind: "check runs",
-                    detail: "run IDs changed between page reads".to_owned(),
-                });
-            }
+        if pages == 1 {
+            return Ok(runs);
         }
-        Ok(runs)
+        let (refreshed_runs, refreshed_ids, _) = self.collect_check_runs_for_head(key, head)?;
+        if refreshed_ids != ids {
+            return Err(GithubError::PaginationChanged {
+                kind: "check runs",
+                detail: "run IDs changed between page reads".to_owned(),
+            });
+        }
+        Ok(refreshed_runs)
     }
 
     fn collect_check_runs_for_head(
