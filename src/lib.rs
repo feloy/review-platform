@@ -3,5 +3,5 @@
 mod model;
 mod state;
 
-pub use model::{Authorization, PrKey, StateError};
+pub use model::{Authorization, AuthorizationScope, PrKey, StateError};
 pub use state::{RecordOutcome, ReviewRequest, State};

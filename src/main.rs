@@ -4,7 +4,7 @@ mod storage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use review_platform::{Authorization, PrKey, RecordOutcome, StateError};
+use review_platform::{Authorization, AuthorizationScope, PrKey, RecordOutcome, StateError};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -31,12 +31,15 @@ enum Command {
         pr: u64,
         head_sha: String,
     },
-    /// Set the lead's authorization for a recorded PR.
+    /// Authorize the recorded PR head the lead inspected.
     Authorize {
         repository: String,
         pr: u64,
         #[arg(long, value_enum)]
         scope: Scope,
+        /// Head SHA shown by status; must still be the recorded head.
+        #[arg(long, value_name = "HEAD_SHA")]
+        head: String,
     },
     /// Withdraw the lead's authorization for a recorded PR.
     Revoke { repository: String, pr: u64 },
@@ -54,7 +57,7 @@ enum Scope {
     PrCycle,
 }
 
-impl From<Scope> for Authorization {
+impl From<Scope> for AuthorizationScope {
     fn from(scope: Scope) -> Self {
         match scope {
             Scope::OneRound => Self::OneRound,
@@ -102,19 +105,20 @@ fn run(cli: Cli) -> Result<()> {
             repository,
             pr,
             scope,
+            head,
         } => {
             let mut state = storage::load(&state_file)?;
             let key = PrKey::new(repository, pr)?;
-            let authorization = Authorization::from(scope);
-            if state.set_authorization(&key, authorization)? {
+            let scope = AuthorizationScope::from(scope);
+            if state.authorize(&key, &head, scope)? {
                 storage::save(&state_file, &state)?;
             }
-            println!("{key}: {authorization}.");
+            println!("{key}: {}.", Authorization::from(scope));
         }
         Command::Revoke { repository, pr } => {
             let mut state = storage::load(&state_file)?;
             let key = PrKey::new(repository, pr)?;
-            if state.set_authorization(&key, Authorization::AwaitingLead)? {
+            if state.revoke(&key)? {
                 storage::save(&state_file, &state)?;
             }
             println!("{key}: {}.", Authorization::AwaitingLead);

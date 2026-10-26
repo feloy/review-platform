@@ -21,7 +21,8 @@ From the repository root:
 ```sh
 cargo run -- --help
 cargo run -- request owner/repo 42 0123456789abcdef0123456789abcdef01234567
-cargo run -- authorize owner/repo 42 --scope one-round
+cargo run -- status owner/repo 42
+cargo run -- authorize owner/repo 42 --scope one-round --head 0123456789abcdef0123456789abcdef01234567
 cargo run -- status owner/repo 42
 cargo run -- list
 cargo run -- state-path
@@ -39,8 +40,11 @@ and `HEAD_SHA` is a 40- or 64-character hexadecimal commit ID.
   A new request starts in `awaiting lead authorization`.
   Repeating the same head changes nothing.
   Recording a different head clears `one-round` authorization but preserves `pr-cycle` authorization.
-- `authorize REPOSITORY PR --scope one-round` authorizes one review round for an existing request.
+- `authorize REPOSITORY PR --scope one-round --head HEAD_SHA` authorizes one review round for an existing request.
+  Give the head SHA the lead inspected with `status`.
+  If the locally recorded head has changed, the command reports both SHAs and leaves authorization unchanged.
   Use `--scope pr-cycle` instead to keep authorization active when the head changes.
+  The head check also applies when choosing or switching to `pr-cycle`.
   Running `authorize` again can switch between the two scopes.
   It reports an error if the request does not exist.
   This command records the decision; it does not start or consume a review round.
@@ -76,6 +80,8 @@ consume an authorized round, or publish reviews.
 It does not track author comments.
 CLI input is entered manually by the lead.
 Its state is local and intended for one operator process at a time.
+The `--head` check compares local state only;
+it does not verify the live GitHub head or make concurrent CLI writes safe.
 
 For development, run `cargo fmt --all -- --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.
@@ -141,6 +147,7 @@ Authorization controls whether a new review round may start;
 it does not describe whether CI is pending, an agent is running, or a draft awaits the lead's decision.
 Every round also requires green CI checks for the current PR head and lead validation of the reviewer.
 The state file stores the three values as `awaiting_lead`, `one_round`, and `pr_cycle`.
+Entering either authorized state requires the head SHA the lead inspected to match the locally recorded head.
 
 | State | What it allows | How it changes |
 | --- | --- | --- |
@@ -170,8 +177,10 @@ flowchart TD
     B --> C["PR author requests a review"]
     C --> INIT{{"Set authorization:<br/>awaiting lead"}}
     INIT --> D([Wait for lead authorization])
-    D -->|One round| E{{"Set authorization:<br/>one round"}}
-    D -->|PR cycle| F{{"Set authorization:<br/>PR cycle"}}
+    D -->|Lead supplies inspected head and scope| V{"Inspected head matches<br/>recorded head?"}
+    V -->|No| D
+    V -->|One round| E{{"Set authorization:<br/>one round"}}
+    V -->|PR cycle| F{{"Set authorization:<br/>PR cycle"}}
 
     E --> G([Wait for green CI checks on current PR commit])
     F --> G

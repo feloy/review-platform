@@ -1,6 +1,6 @@
 //! Review requests and their authorization transitions.
 
-use crate::model::{Authorization, PrKey, StateError};
+use crate::model::{Authorization, AuthorizationScope, PrKey, StateError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -123,15 +123,32 @@ impl State {
         Ok(RecordOutcome::New)
     }
 
-    pub fn set_authorization(
+    pub fn authorize(
         &mut self,
         key: &PrKey,
-        authorization: Authorization,
+        expected_head: &str,
+        scope: AuthorizationScope,
     ) -> Result<bool, StateError> {
         key.validate()?;
+        validate_head_sha(expected_head)?;
         let request = self.request_mut(key)?;
+        if !request.head_sha.eq_ignore_ascii_case(expected_head) {
+            return Err(StateError::HeadMismatch {
+                expected: expected_head.to_ascii_lowercase(),
+                recorded: request.head_sha.clone(),
+            });
+        }
+        let authorization = Authorization::from(scope);
         let changed = request.authorization != authorization;
         request.authorization = authorization;
+        Ok(changed)
+    }
+
+    pub fn revoke(&mut self, key: &PrKey) -> Result<bool, StateError> {
+        key.validate()?;
+        let request = self.request_mut(key)?;
+        let changed = request.authorization != Authorization::AwaitingLead;
+        request.authorization = Authorization::AwaitingLead;
         Ok(changed)
     }
 
@@ -159,7 +176,7 @@ mod tests {
         let mut state = State::default();
         state.record_request(key(), HEAD_A).unwrap();
         state
-            .set_authorization(&key(), Authorization::OneRound)
+            .authorize(&key(), HEAD_A, AuthorizationScope::OneRound)
             .unwrap();
 
         assert_eq!(
@@ -173,11 +190,36 @@ mod tests {
     }
 
     #[test]
+    fn authorization_rejects_a_head_changed_since_the_lead_checked_status() {
+        let mut state = State::default();
+        state.record_request(key(), HEAD_A).unwrap();
+        let seen_head = state.get(&key()).unwrap().head_sha().to_owned();
+        state.record_request(key(), HEAD_B).unwrap();
+
+        assert_eq!(
+            state.authorize(&key(), &seen_head, AuthorizationScope::OneRound),
+            Err(StateError::HeadMismatch {
+                expected: HEAD_A.to_owned(),
+                recorded: HEAD_B.to_owned(),
+            })
+        );
+        let request = state.get(&key()).unwrap();
+        assert_eq!(request.head_sha(), HEAD_B);
+        assert_eq!(request.authorization(), Authorization::AwaitingLead);
+
+        assert!(
+            state
+                .authorize(&key(), HEAD_B, AuthorizationScope::OneRound)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn cycle_authorization_survives_head_change_and_can_be_revoked() {
         let mut state = State::default();
         state.record_request(key(), HEAD_A).unwrap();
         state
-            .set_authorization(&key(), Authorization::PrCycle)
+            .authorize(&key(), HEAD_A, AuthorizationScope::PrCycle)
             .unwrap();
 
         assert_eq!(
@@ -188,9 +230,7 @@ mod tests {
             state.get(&key()).unwrap().authorization(),
             Authorization::PrCycle
         );
-        state
-            .set_authorization(&key(), Authorization::AwaitingLead)
-            .unwrap();
+        state.revoke(&key()).unwrap();
         assert_eq!(
             state.get(&key()).unwrap().authorization(),
             Authorization::AwaitingLead
@@ -205,7 +245,15 @@ mod tests {
             state.record_request(key(), "not-a-sha"),
             Err(StateError::InvalidHeadSha)
         );
+        assert_eq!(
+            state.authorize(&key(), "not-a-sha", AuthorizationScope::OneRound),
+            Err(StateError::InvalidHeadSha)
+        );
         assert_eq!(state.get(&key()).unwrap().head_sha(), HEAD_A);
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::AwaitingLead
+        );
         assert!(PrKey::new("owner/repo/extra", 42).is_err());
         assert_eq!(
             PrKey::new("owner/repo", 0),
@@ -220,8 +268,9 @@ mod tests {
         state
             .record_request(mixed_case_key, HEAD_A.to_ascii_uppercase())
             .unwrap();
+        let uppercase_head = HEAD_A.to_ascii_uppercase();
         state
-            .set_authorization(&key(), Authorization::OneRound)
+            .authorize(&key(), &uppercase_head, AuthorizationScope::OneRound)
             .unwrap();
 
         assert_eq!(
