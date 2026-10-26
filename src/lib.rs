@@ -1,5 +1,6 @@
-//! Workflow state for the local operator prototype.
+//! Workflow state and reusable read-only GitHub access for Review Platform.
 
+pub mod github;
 mod model;
 mod state;
 

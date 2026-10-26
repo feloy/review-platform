@@ -17,7 +17,11 @@ add a dependency or abstraction when a current feature needs it.
   Keep cross-record checks on the containing state.
   Make transitions return useful errors instead of silently changing state.
 - Prefer borrowing and owned values with clear lifetimes over unnecessary clones, shared mutable state, or elaborate lifetime parameters.
-- Use `Result` and contextual errors for recoverable failures.
+- Use typed errors at reusable library and adapter boundaries so callers can
+  distinguish failures by variant without parsing error messages.
+  Preserve underlying sources and useful context; use `anyhow` to report errors
+  at a CLI entry point when the caller has no recovery decision to make.
+  Test error decisions by variant; check message text only when it is user-facing behavior.
   Reserve `panic!`, `unwrap`, and `expect` for tests or invariants that are proven locally.
 - Use exhaustive matches for workflow states.
   Avoid boolean flags for distinct states, stringly typed decisions, and `unsafe` unless a documented need arises.

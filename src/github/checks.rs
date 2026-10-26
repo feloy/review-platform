@@ -1,9 +1,9 @@
 //! Exact-head GitHub check runs and commit statuses for operator display.
 
-use super::{GithubClient, PullRequest};
-use anyhow::{Context, Result, bail, ensure};
-use review_platform::{HeadSha, PrKey};
+use super::{GithubClient, GithubError, GithubResult, PullRequest};
+use crate::{HeadSha, PrKey};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fmt;
 
 const PAGE_SIZE: usize = 100;
@@ -86,6 +86,7 @@ struct CheckRunsPage {
 
 #[derive(Deserialize)]
 pub struct CheckRun {
+    id: u64,
     pub name: String,
     head_sha: HeadSha,
     pub status: CheckRunStatus,
@@ -239,7 +240,7 @@ enum Signal {
 }
 
 impl GithubClient {
-    pub fn checks_for_pull(&self, key: &PrKey, pull: &PullRequest) -> Result<CheckReport> {
+    pub fn checks_for_pull(&self, key: &PrKey, pull: &PullRequest) -> GithubResult<CheckReport> {
         let check_runs = self.check_runs_for_head(key, &pull.head_sha)?;
         let (commit_statuses, combined_state) =
             self.commit_statuses_for_head(key, &pull.head_sha)?;
@@ -251,47 +252,87 @@ impl GithubClient {
         })
     }
 
-    fn check_runs_for_head(&self, key: &PrKey, head: &HeadSha) -> Result<Vec<CheckRun>> {
+    fn check_runs_for_head(&self, key: &PrKey, head: &HeadSha) -> GithubResult<Vec<CheckRun>> {
         let mut runs = Vec::new();
+        let mut seen_ids = HashSet::new();
         let mut expected_total = None;
+        let mut first_page_snapshot = Vec::new();
         for page in 1..=MAX_PAGES {
-            let route = format!(
-                "/repos/{}/commits/{head}/check-runs?per_page={PAGE_SIZE}&page={page}&filter=latest",
-                key.repository()
-            );
-            let response = self.get(
-                &route,
-                "application/vnd.github+json",
-                &format!("check runs for {key} at {head}"),
-            )?;
-            let data: CheckRunsPage = response
-                .into_json()
-                .with_context(|| format!("reading check runs for {key} at {head}"))?;
+            let data = self.check_runs_page(key, head, page)?;
             check_total(&mut expected_total, data.total_count, "check runs")?;
+            if page == 1 {
+                first_page_snapshot = run_snapshot(&data.check_runs);
+            }
+            let total_count = data.total_count;
             for run in data.check_runs {
-                ensure!(
-                    &run.head_sha == head,
-                    "GitHub returned a check run for {} while inspecting {head}",
-                    run.head_sha
-                );
+                if !seen_ids.insert(run.id) {
+                    return Err(GithubError::PaginationChanged {
+                        kind: "check runs",
+                        detail: format!("run {} appeared twice", run.id),
+                    });
+                }
                 runs.push(run);
             }
-            if runs.len() as u64 == data.total_count {
+            if runs.len() as u64 == total_count {
+                if page > 1 {
+                    let refreshed = self.check_runs_page(key, head, 1)?;
+                    if refreshed.total_count != total_count
+                        || run_snapshot(&refreshed.check_runs) != first_page_snapshot
+                    {
+                        return Err(GithubError::PaginationChanged {
+                            kind: "check runs",
+                            detail: "first page changed".to_owned(),
+                        });
+                    }
+                }
                 return Ok(runs);
             }
-            ensure!(
-                (runs.len() as u64) < data.total_count,
-                "GitHub returned more check runs than reported for {head}"
-            );
+            if runs.len() as u64 > total_count {
+                return Err(GithubError::PaginationChanged {
+                    kind: "check runs",
+                    detail: "more runs than reported".to_owned(),
+                });
+            }
         }
-        bail!("GitHub did not return every check run for {head}; retry later")
+        Err(GithubError::PaginationChanged {
+            kind: "check runs",
+            detail: "not every page was returned".to_owned(),
+        })
+    }
+
+    fn check_runs_page(
+        &self,
+        key: &PrKey,
+        head: &HeadSha,
+        page: usize,
+    ) -> GithubResult<CheckRunsPage> {
+        let route = format!(
+            "/repos/{}/commits/{head}/check-runs?per_page={PAGE_SIZE}&page={page}&filter=latest",
+            key.repository()
+        );
+        let response = self.get(
+            &route,
+            "application/vnd.github+json",
+            &format!("check runs for {key} at {head}"),
+        )?;
+        let data: CheckRunsPage =
+            super::parse_json(response, format!("check runs for {key} at {head}"))?;
+        for run in &data.check_runs {
+            if &run.head_sha != head {
+                return Err(GithubError::InvalidResponse {
+                    resource: format!("check runs for {key} at {head}"),
+                    detail: format!("run {} belongs to {}", run.id, run.head_sha),
+                });
+            }
+        }
+        Ok(data)
     }
 
     fn commit_statuses_for_head(
         &self,
         key: &PrKey,
         head: &HeadSha,
-    ) -> Result<(Vec<CommitStatus>, Option<CommitState>)> {
+    ) -> GithubResult<(Vec<CommitStatus>, Option<CommitState>)> {
         let mut statuses = Vec::new();
         let mut expected_total = None;
         let mut combined_state = None;
@@ -305,20 +346,22 @@ impl GithubClient {
                 "application/vnd.github+json",
                 &format!("commit statuses for {key} at {head}"),
             )?;
-            let data: CombinedStatusPage = response
-                .into_json()
-                .with_context(|| format!("reading commit statuses for {key} at {head}"))?;
-            ensure!(
-                &data.sha == head,
-                "GitHub returned commit statuses for {} while inspecting {head}",
-                data.sha
-            );
+            let data: CombinedStatusPage =
+                super::parse_json(response, format!("commit statuses for {key} at {head}"))?;
+            if &data.sha != head {
+                return Err(GithubError::InvalidResponse {
+                    resource: format!("commit statuses for {key} at {head}"),
+                    detail: format!("response belongs to {}", data.sha),
+                });
+            }
             check_total(&mut expected_total, data.total_count, "commit statuses")?;
             if let Some(previous) = combined_state {
-                ensure!(
-                    previous == data.state,
-                    "GitHub commit statuses changed during pagination; retry later"
-                );
+                if previous != data.state {
+                    return Err(GithubError::PaginationChanged {
+                        kind: "commit statuses",
+                        detail: "combined state changed".to_owned(),
+                    });
+                }
             }
             combined_state = Some(data.state);
             statuses.extend(data.statuses);
@@ -332,25 +375,40 @@ impl GithubClient {
                     },
                 ));
             }
-            ensure!(
-                (statuses.len() as u64) < data.total_count,
-                "GitHub returned more commit statuses than reported for {head}"
-            );
+            if statuses.len() as u64 > data.total_count {
+                return Err(GithubError::PaginationChanged {
+                    kind: "commit statuses",
+                    detail: "more statuses than reported".to_owned(),
+                });
+            }
         }
-        bail!("GitHub did not return every commit status for {head}; retry later")
+        Err(GithubError::PaginationChanged {
+            kind: "commit statuses",
+            detail: "not every page was returned".to_owned(),
+        })
     }
 }
 
-fn check_total(expected: &mut Option<u64>, actual: u64, what: &str) -> Result<()> {
-    ensure!(
-        actual <= MAX_RESULTS as u64,
-        "GitHub reports more than {MAX_RESULTS} {what}; cannot summarize them safely"
-    );
+fn run_snapshot(runs: &[CheckRun]) -> Vec<(u64, CheckRunStatus, Option<CheckConclusion>)> {
+    runs.iter()
+        .map(|run| (run.id, run.status, run.conclusion))
+        .collect()
+}
+
+fn check_total(expected: &mut Option<u64>, actual: u64, what: &'static str) -> GithubResult<()> {
+    if actual > MAX_RESULTS as u64 {
+        return Err(GithubError::TooManyResults {
+            kind: what,
+            limit: MAX_RESULTS,
+        });
+    }
     if let Some(previous) = expected {
-        ensure!(
-            *previous == actual,
-            "GitHub {what} changed during pagination; retry later"
-        );
+        if *previous != actual {
+            return Err(GithubError::PaginationChanged {
+                kind: what,
+                detail: "total count changed".to_owned(),
+            });
+        }
     } else {
         *expected = Some(actual);
     }
@@ -363,6 +421,7 @@ mod tests {
 
     fn run(status: &str, conclusion: Option<&str>) -> CheckRun {
         let value = serde_json::json!({
+            "id": 1,
             "name": "job",
             "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "status": status,

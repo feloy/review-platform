@@ -1,15 +1,20 @@
 //! Read-only GitHub REST API adapter for PR metadata, diffs, and checks.
 
-mod checks;
+pub mod checks;
+mod error;
 
-use anyhow::{Context, Result, ensure};
-use review_platform::{HeadSha, PrKey};
+pub use error::GithubError;
+
+use crate::{HeadSha, PrKey};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::io::Read;
 use std::time::Duration;
 
 const API_ROOT: &str = "https://api.github.com";
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
+
+pub type GithubResult<T> = std::result::Result<T, GithubError>;
 
 pub struct GithubClient {
     agent: ureq::Agent,
@@ -69,13 +74,11 @@ struct ApiComparison {
 }
 
 impl GithubClient {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> GithubResult<Self> {
         let token = match std::env::var("REVIEW_PLATFORM_GITHUB_TOKEN_RO") {
             Ok(token) if !token.is_empty() => Some(token),
             Ok(_) | Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("REVIEW_PLATFORM_GITHUB_TOKEN_RO must be UTF-8")
-            }
+            Err(std::env::VarError::NotUnicode(_)) => return Err(GithubError::TokenNotUtf8),
         };
         Ok(Self::for_api(API_ROOT.to_owned(), token))
     }
@@ -93,21 +96,20 @@ impl GithubClient {
         }
     }
 
-    pub fn pull_request(&self, key: &PrKey) -> Result<PullRequest> {
+    pub fn pull_request(&self, key: &PrKey) -> GithubResult<PullRequest> {
         let route = pull_route(key);
         let response = self.get(
             &route,
             "application/vnd.github+json",
             &format!("pull request {key}"),
         )?;
-        let raw: ApiPullRequest = response
-            .into_json()
-            .with_context(|| format!("reading GitHub pull request {key}"))?;
-        ensure!(
-            raw.number == key.number(),
-            "GitHub returned PR #{} while inspecting {key}",
-            raw.number
-        );
+        let raw: ApiPullRequest = parse_json(response, format!("pull request {key}"))?;
+        if raw.number != key.number() {
+            return Err(GithubError::InvalidResponse {
+                resource: format!("pull request {key}"),
+                detail: format!("returned PR #{}", raw.number),
+            });
+        }
         Ok(PullRequest {
             title: raw.title,
             author: raw.user.login,
@@ -125,7 +127,7 @@ impl GithubClient {
         key: &PrKey,
         pull: &PullRequest,
         since: Option<&HeadSha>,
-    ) -> Result<String> {
+    ) -> GithubResult<String> {
         let expected_head = &pull.head_sha;
         let route = if let Some(previous_head) = since {
             if previous_head == expected_head {
@@ -143,13 +145,13 @@ impl GithubClient {
                 "application/vnd.github+json",
                 &format!("comparison for {key}"),
             )?;
-            let comparison: ApiComparison = response
-                .into_json()
-                .with_context(|| format!("reading GitHub comparison for {key}"))?;
-            ensure!(
-                &comparison.merge_base_commit.sha == previous_head,
-                "{previous_head} is not an ancestor of {expected_head}; inspect the full PR diff after a force push"
-            );
+            let comparison: ApiComparison = parse_json(response, format!("comparison for {key}"))?;
+            if &comparison.merge_base_commit.sha != previous_head {
+                return Err(GithubError::DivergentHistory {
+                    previous: previous_head.clone(),
+                    current: expected_head.clone(),
+                });
+            }
             route
         } else {
             pull_route(key)
@@ -161,46 +163,60 @@ impl GithubClient {
             &format!("diff for {key}"),
         )?;
         let content_type = response.header("Content-Type").unwrap_or_default();
-        ensure!(
-            content_type.starts_with("application/vnd.github.diff"),
-            "GitHub returned {content_type:?} instead of a diff for {key}"
-        );
+        if !content_type.starts_with("application/vnd.github.diff") {
+            return Err(GithubError::UnexpectedDiffMediaType {
+                key: key.clone(),
+                actual: content_type.to_owned(),
+            });
+        }
         let mut bytes = Vec::new();
         response
             .into_reader()
             .take(MAX_DIFF_BYTES + 1)
             .read_to_end(&mut bytes)
-            .with_context(|| format!("reading GitHub diff for {key}"))?;
-        ensure!(
-            bytes.len() as u64 <= MAX_DIFF_BYTES,
-            "GitHub diff for {key} exceeds 8 MiB; inspect it on GitHub"
-        );
-        let diff = String::from_utf8(bytes)
-            .with_context(|| format!("GitHub diff for {key} is not UTF-8"))?;
+            .map_err(|source| GithubError::ReadResponse {
+                resource: format!("GitHub diff for {key}"),
+                source,
+            })?;
+        if bytes.len() as u64 > MAX_DIFF_BYTES {
+            return Err(GithubError::DiffTooLarge {
+                key: key.clone(),
+                max_mib: MAX_DIFF_BYTES / (1024 * 1024),
+            });
+        }
+        let diff = String::from_utf8(bytes).map_err(|source| GithubError::DiffNotUtf8 {
+            key: key.clone(),
+            source,
+        })?;
         self.ensure_unchanged(key, pull, since.is_none())?;
         Ok(diff)
     }
 
-    fn ensure_unchanged(&self, key: &PrKey, pull: &PullRequest, check_base: bool) -> Result<()> {
+    fn ensure_unchanged(
+        &self,
+        key: &PrKey,
+        pull: &PullRequest,
+        check_base: bool,
+    ) -> GithubResult<()> {
         let current = self.pull_request(key)?;
-        ensure!(
-            current.head_sha == pull.head_sha,
-            "GitHub PR {key} head changed from {} to {} while fetching the diff; inspect it again",
-            pull.head_sha,
-            current.head_sha
-        );
-        if check_base {
-            ensure!(
-                current.base_sha == pull.base_sha,
-                "GitHub PR {key} base changed from {} to {} while fetching the diff; inspect it again",
-                pull.base_sha,
-                current.base_sha
-            );
+        if current.head_sha != pull.head_sha {
+            return Err(GithubError::HeadChanged {
+                key: key.clone(),
+                expected: pull.head_sha.clone(),
+                actual: current.head_sha,
+            });
+        }
+        if check_base && current.base_sha != pull.base_sha {
+            return Err(GithubError::BaseChanged {
+                key: key.clone(),
+                expected: pull.base_sha.clone(),
+                actual: current.base_sha,
+            });
         }
         Ok(())
     }
 
-    fn get(&self, route: &str, accept: &str, description: &str) -> Result<ureq::Response> {
+    fn get(&self, route: &str, accept: &str, description: &str) -> GithubResult<ureq::Response> {
         let url = format!("{}{}", self.api_root, route);
         let mut request = self
             .agent
@@ -212,21 +228,21 @@ impl GithubClient {
                 concat!("review-platform/", env!("CARGO_PKG_VERSION")),
             );
         if let Some(token) = &self.token {
-            ensure!(
-                token.bytes().all(|byte| byte.is_ascii_graphic()),
-                "REVIEW_PLATFORM_GITHUB_TOKEN_RO contains invalid header characters"
-            );
+            if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+                return Err(GithubError::InvalidTokenHeader);
+            }
             request = request.set("Authorization", &format!("Bearer {token}"));
         }
 
         let response = request
             .call()
-            .map_err(|error| github_error(error, description))?;
-        ensure!(
-            response.status() == 200,
-            "GitHub returned unexpected HTTP {} for {description}",
-            response.status()
-        );
+            .map_err(|error| github_error(error, description, self.token.is_some()))?;
+        if response.status() != 200 {
+            return Err(GithubError::HttpStatus {
+                status: response.status(),
+                resource: description.to_owned(),
+            });
+        }
         Ok(response)
     }
 }
@@ -235,29 +251,43 @@ fn pull_route(key: &PrKey) -> String {
     format!("/repos/{}/pulls/{}", key.repository(), key.number())
 }
 
-fn github_error(error: ureq::Error, description: &str) -> anyhow::Error {
+fn parse_json<T: DeserializeOwned>(response: ureq::Response, resource: String) -> GithubResult<T> {
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|source| GithubError::ReadResponse {
+            resource: resource.clone(),
+            source,
+        })?;
+    serde_json::from_slice(&bytes)
+        .map_err(|source| GithubError::DecodeResponse { resource, source })
+}
+
+fn github_error(error: ureq::Error, description: &str, token_configured: bool) -> GithubError {
     match error {
-        ureq::Error::Status(401, _) => {
-            anyhow::anyhow!(
-                "GitHub rejected REVIEW_PLATFORM_GITHUB_TOKEN_RO; check the token and try again"
-            )
-        }
-        ureq::Error::Status(403 | 429, response)
-            if response.header("x-ratelimit-remaining") == Some("0") =>
+        ureq::Error::Status(401, _) if token_configured => GithubError::InvalidCredentials,
+        ureq::Error::Status(401, _) => GithubError::AuthenticationRequired {
+            resource: description.to_owned(),
+        },
+        ureq::Error::Status(429, _) => GithubError::RateLimited,
+        ureq::Error::Status(403, response)
+            if response.header("x-ratelimit-remaining") == Some("0")
+                || response.header("retry-after").is_some() =>
         {
-            anyhow::anyhow!(
-                "GitHub API rate limit reached; set REVIEW_PLATFORM_GITHUB_TOKEN_RO or retry later"
-            )
+            GithubError::RateLimited
         }
-        ureq::Error::Status(404, _) => {
-            anyhow::anyhow!("GitHub {description} was not found or is not accessible")
-        }
-        ureq::Error::Status(status, _) => {
-            anyhow::anyhow!("GitHub returned HTTP {status} while inspecting {description}")
-        }
-        ureq::Error::Transport(error) => {
-            anyhow::anyhow!(error).context(format!("connecting to GitHub for {description}"))
-        }
+        ureq::Error::Status(404, _) => GithubError::NotFound {
+            resource: description.to_owned(),
+        },
+        ureq::Error::Status(status, _) => GithubError::HttpStatus {
+            status,
+            resource: description.to_owned(),
+        },
+        ureq::Error::Transport(source) => GithubError::Transport {
+            resource: description.to_owned(),
+            source: Box::new(source),
+        },
     }
 }
 
@@ -316,6 +346,20 @@ mod tests {
             "base": {"sha": base}
         })
         .to_string()
+    }
+
+    fn successful_check_runs() -> Vec<serde_json::Value> {
+        (1..=100)
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "name": format!("job-{id}"),
+                    "head_sha": HEAD,
+                    "status": "completed",
+                    "conclusion": "success"
+                })
+            })
+            .collect()
     }
 
     fn serve_once(
@@ -401,7 +445,7 @@ mod tests {
             .err()
             .unwrap();
         handle.join().unwrap();
-        assert!(error.to_string().contains("not found"), "{error}");
+        assert!(matches!(&error, GithubError::NotFound { .. }), "{error}");
 
         let body = serde_json::json!({
             "number": 42,
@@ -419,7 +463,10 @@ mod tests {
             .err()
             .unwrap();
         handle.join().unwrap();
-        assert!(error.to_string().contains("reading GitHub"), "{error}");
+        assert!(
+            matches!(&error, GithubError::DecodeResponse { .. }),
+            "{error}"
+        );
     }
 
     #[test]
@@ -430,8 +477,43 @@ mod tests {
             .pull_request(&PrKey::new("owner/repo", 42).unwrap())
             .err()
             .unwrap();
-        assert!(error.to_string().contains("invalid header characters"));
+        assert!(matches!(&error, GithubError::InvalidTokenHeader));
         assert!(!error.to_string().contains(secret));
+    }
+
+    #[test]
+    fn classifies_authentication_and_rate_limit_responses() {
+        let response = ureq::Response::new(401, "Unauthorized", "").unwrap();
+        assert!(matches!(
+            github_error(ureq::Error::Status(401, response), "pull request", true),
+            GithubError::InvalidCredentials
+        ));
+
+        let response = ureq::Response::new(401, "Unauthorized", "").unwrap();
+        assert!(matches!(
+            github_error(ureq::Error::Status(401, response), "pull request", false),
+            GithubError::AuthenticationRequired { .. }
+        ));
+
+        let response = ureq::Response::new(429, "Too Many Requests", "").unwrap();
+        assert!(matches!(
+            github_error(ureq::Error::Status(429, response), "check runs", true),
+            GithubError::RateLimited
+        ));
+
+        let response: ureq::Response = "HTTP/1.1 403 Forbidden\r\nx-ratelimit-remaining: 0\r\n\r\n"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            github_error(ureq::Error::Status(403, response), "check runs", true),
+            GithubError::RateLimited
+        ));
+
+        let response = ureq::Response::new(403, "Forbidden", "").unwrap();
+        assert!(matches!(
+            github_error(ureq::Error::Status(403, response), "check runs", true),
+            GithubError::HttpStatus { status: 403, .. }
+        ));
     }
 
     #[test]
@@ -471,8 +553,14 @@ mod tests {
         let pull = client.pull_request(&key).unwrap();
         let error = client.diff_for_pull(&key, &pull, None).err().unwrap();
         handle.join().unwrap();
-        assert!(error.to_string().contains(HEAD), "{error}");
-        assert!(error.to_string().contains(PREVIOUS_HEAD), "{error}");
+        assert!(
+            matches!(
+                &error,
+                GithubError::HeadChanged { expected, actual, .. }
+                    if expected.as_str() == HEAD && actual.as_str() == PREVIOUS_HEAD
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -488,8 +576,14 @@ mod tests {
         let pull = client.pull_request(&key).unwrap();
         let error = client.diff_for_pull(&key, &pull, None).err().unwrap();
         handle.join().unwrap();
-        assert!(error.to_string().contains(BASE), "{error}");
-        assert!(error.to_string().contains(NEW_BASE), "{error}");
+        assert!(
+            matches!(
+                &error,
+                GithubError::BaseChanged { expected, actual, .. }
+                    if expected.as_str() == BASE && actual.as_str() == NEW_BASE
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -508,7 +602,10 @@ mod tests {
             .err()
             .unwrap();
         handle.join().unwrap();
-        assert!(error.to_string().contains("not an ancestor"), "{error}");
+        assert!(
+            matches!(&error, GithubError::DivergentHistory { .. }),
+            "{error}"
+        );
     }
 
     #[test]
@@ -517,6 +614,7 @@ mod tests {
         let check_runs = serde_json::json!({
             "total_count": 1,
             "check_runs": [{
+                "id": 1,
                 "name": "build",
                 "head_sha": HEAD,
                 "status": "completed",
@@ -558,21 +656,13 @@ mod tests {
     #[test]
     fn check_run_pagination_includes_failures_after_the_first_page() {
         let key = PrKey::new("owner/repo", 42).unwrap();
-        let first_page_runs = (0..100)
-            .map(|number| {
-                serde_json::json!({
-                    "name": format!("job-{number}"),
-                    "head_sha": HEAD,
-                    "status": "completed",
-                    "conclusion": "success"
-                })
-            })
-            .collect::<Vec<_>>();
         let first_page =
-            serde_json::json!({"total_count": 101, "check_runs": first_page_runs}).to_string();
+            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs()})
+                .to_string();
         let second_page = serde_json::json!({
             "total_count": 101,
             "check_runs": [{
+                "id": 101,
                 "name": "last-job",
                 "head_sha": HEAD,
                 "status": "completed",
@@ -593,13 +683,19 @@ mod tests {
                 format!(
                     "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=1&filter=latest"
                 ),
-                first_page,
+                first_page.clone(),
             ),
             json_reply(
                 format!(
                     "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=2&filter=latest"
                 ),
                 second_page,
+            ),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=1&filter=latest"
+                ),
+                first_page,
             ),
             json_reply(
                 format!("/repos/owner/repo/commits/{HEAD}/status?per_page=100&page=1"),
@@ -618,11 +714,126 @@ mod tests {
     }
 
     #[test]
+    fn check_run_pagination_rejects_a_duplicate_with_unchanged_total() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let first_page =
+            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs()})
+                .to_string();
+        let second_page = serde_json::json!({
+            "total_count": 101,
+            "check_runs": [{
+                "id": 100,
+                "name": "job-100",
+                "head_sha": HEAD,
+                "status": "completed",
+                "conclusion": "success"
+            }]
+        })
+        .to_string();
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=1&filter=latest"
+                ),
+                first_page,
+            ),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=2&filter=latest"
+                ),
+                second_page,
+            ),
+        ];
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let error = client.checks_for_pull(&key, &pull).err().unwrap();
+        handle.join().unwrap();
+        assert!(
+            matches!(
+                &error,
+                GithubError::PaginationChanged {
+                    kind: "check runs",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn check_run_pagination_rejects_a_replaced_first_page_run() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let first_page =
+            serde_json::json!({"total_count": 101, "check_runs": successful_check_runs()})
+                .to_string();
+        let second_page = serde_json::json!({
+            "total_count": 101,
+            "check_runs": [{
+                "id": 101,
+                "name": "last-job",
+                "head_sha": HEAD,
+                "status": "completed",
+                "conclusion": "success"
+            }]
+        })
+        .to_string();
+        let mut changed_runs = successful_check_runs();
+        changed_runs[0] = serde_json::json!({
+            "id": 102,
+            "name": "job-1",
+            "head_sha": HEAD,
+            "status": "completed",
+            "conclusion": "failure"
+        });
+        let refreshed_page =
+            serde_json::json!({"total_count": 101, "check_runs": changed_runs}).to_string();
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=1&filter=latest"
+                ),
+                first_page,
+            ),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=2&filter=latest"
+                ),
+                second_page,
+            ),
+            json_reply(
+                format!(
+                    "/repos/owner/repo/commits/{HEAD}/check-runs?per_page=100&page=1&filter=latest"
+                ),
+                refreshed_page,
+            ),
+        ];
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let error = client.checks_for_pull(&key, &pull).err().unwrap();
+        handle.join().unwrap();
+        assert!(
+            matches!(
+                &error,
+                GithubError::PaginationChanged {
+                    kind: "check runs",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn checks_reject_a_run_for_a_different_head() {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let check_runs = serde_json::json!({
             "total_count": 1,
             "check_runs": [{
+                "id": 1,
                 "name": "build",
                 "head_sha": PREVIOUS_HEAD,
                 "status": "completed",
@@ -644,7 +855,9 @@ mod tests {
         let pull = client.pull_request(&key).unwrap();
         let error = client.checks_for_pull(&key, &pull).err().unwrap();
         handle.join().unwrap();
-        assert!(error.to_string().contains(HEAD), "{error}");
-        assert!(error.to_string().contains(PREVIOUS_HEAD), "{error}");
+        assert!(
+            matches!(&error, GithubError::InvalidResponse { .. }),
+            "{error}"
+        );
     }
 }
