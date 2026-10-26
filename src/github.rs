@@ -14,6 +14,8 @@ use std::time::Duration;
 const API_ROOT: &str = "https://api.github.com";
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
 
+type HttpResponse = ureq::http::Response<ureq::Body>;
+
 pub type GithubResult<T> = std::result::Result<T, GithubError>;
 
 pub struct GithubClient {
@@ -84,11 +86,14 @@ impl GithubClient {
     }
 
     fn for_api(api_root: String, token: Option<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_secs(15))
-            .redirects(0)
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_per_read(Some(Duration::from_secs(15)))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .user_agent(concat!("review-platform/", env!("CARGO_PKG_VERSION")))
             .build();
+        let agent = ureq::Agent::new_with_config(config);
         Self {
             agent,
             api_root,
@@ -169,7 +174,11 @@ impl GithubClient {
                 }
                 other => other,
             })?;
-        let content_type = response.header("Content-Type").unwrap_or_default();
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
         if !content_type.starts_with("application/vnd.github.diff") {
             return Err(GithubError::UnexpectedDiffMediaType {
                 key: key.clone(),
@@ -178,6 +187,7 @@ impl GithubClient {
         }
         let mut bytes = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(MAX_DIFF_BYTES + 1)
             .read_to_end(&mut bytes)
@@ -223,32 +233,32 @@ impl GithubClient {
         Ok(())
     }
 
-    fn get(&self, route: &str, accept: &str, description: &str) -> GithubResult<ureq::Response> {
+    fn get(&self, route: &str, accept: &str, description: &str) -> GithubResult<HttpResponse> {
         let url = format!("{}{}", self.api_root, route);
         let mut request = self
             .agent
-            .get(&url)
-            .set("Accept", accept)
-            .set("X-GitHub-Api-Version", "2022-11-28")
-            .set(
-                "User-Agent",
-                concat!("review-platform/", env!("CARGO_PKG_VERSION")),
-            );
+            .get(url.as_str())
+            .header("Accept", accept)
+            .header("X-GitHub-Api-Version", "2022-11-28");
         if let Some(token) = &self.token {
             if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(GithubError::InvalidTokenHeader);
             }
-            request = request.set("Authorization", &format!("Bearer {token}"));
+            request = request.header("Authorization", format!("Bearer {token}"));
         }
 
-        let response = request
-            .call()
-            .map_err(|error| github_error(error, description, self.token.is_some()))?;
-        if response.status() != 200 {
-            return Err(GithubError::HttpStatus {
-                status: response.status(),
-                resource: description.to_owned(),
-            });
+        let response = request.call().map_err(|source| GithubError::Transport {
+            resource: description.to_owned(),
+            source: Box::new(source),
+        })?;
+        let status = response.status().as_u16();
+        if status != 200 {
+            return Err(github_status_error(
+                status,
+                response.headers(),
+                description,
+                self.token.is_some(),
+            ));
         }
         Ok(response)
     }
@@ -258,9 +268,10 @@ fn pull_route(key: &PrKey) -> String {
     format!("/repos/{}/pulls/{}", key.repository(), key.number())
 }
 
-fn parse_json<T: DeserializeOwned>(response: ureq::Response, resource: String) -> GithubResult<T> {
+fn parse_json<T: DeserializeOwned>(response: HttpResponse, resource: String) -> GithubResult<T> {
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .read_to_end(&mut bytes)
         .map_err(|source| GithubError::ReadResponse {
@@ -271,29 +282,32 @@ fn parse_json<T: DeserializeOwned>(response: ureq::Response, resource: String) -
         .map_err(|source| GithubError::DecodeResponse { resource, source })
 }
 
-fn github_error(error: ureq::Error, description: &str, token_configured: bool) -> GithubError {
-    match error {
-        ureq::Error::Status(401, _) if token_configured => GithubError::InvalidCredentials,
-        ureq::Error::Status(401, _) => GithubError::AuthenticationRequired {
+fn github_status_error(
+    status: u16,
+    headers: &ureq::http::HeaderMap,
+    description: &str,
+    token_configured: bool,
+) -> GithubError {
+    match status {
+        401 if token_configured => GithubError::InvalidCredentials,
+        401 => GithubError::AuthenticationRequired {
             resource: description.to_owned(),
         },
-        ureq::Error::Status(429, _) => GithubError::RateLimited,
-        ureq::Error::Status(403, response)
-            if response.header("x-ratelimit-remaining") == Some("0")
-                || response.header("retry-after").is_some() =>
+        429 => GithubError::RateLimited,
+        403 if headers
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            == Some("0")
+            || headers.contains_key("retry-after") =>
         {
             GithubError::RateLimited
         }
-        ureq::Error::Status(404, _) => GithubError::NotFound {
+        404 => GithubError::NotFound {
             resource: description.to_owned(),
         },
-        ureq::Error::Status(status, _) => GithubError::HttpStatus {
+        status => GithubError::HttpStatus {
             status,
             resource: description.to_owned(),
-        },
-        ureq::Error::Transport(source) => GithubError::Transport {
-            resource: description.to_owned(),
-            source: Box::new(source),
         },
     }
 }
@@ -305,11 +319,13 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::Instant;
 
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const PREVIOUS_HEAD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const BASE: &str = "cccccccccccccccccccccccccccccccccccccccc";
     const NEW_BASE: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const MOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
     struct MockReply {
         route: String,
@@ -392,10 +408,28 @@ mod tests {
 
     fn serve_many(replies: Vec<MockReply>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let handle = thread::spawn(move || {
             for reply in replies {
-                let (mut stream, _) = listener.accept().unwrap();
+                let deadline = Instant::now() + MOCK_TIMEOUT;
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "timed out waiting for mock request {}",
+                                reply.route
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accepting mock request {}: {error}", reply.route),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(MOCK_TIMEOUT)).unwrap();
+                stream.set_write_timeout(Some(MOCK_TIMEOUT)).unwrap();
                 let mut lines = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 lines.read_line(&mut line).unwrap();
@@ -415,8 +449,9 @@ mod tests {
                 );
                 assert!(headers.contains("authorization: bearer test-token"));
                 assert!(headers.contains("x-github-api-version: 2022-11-28"));
+                // Each reply owns one connection; tell the client not to reuse it.
                 let response = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}\r\n{}",
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
                     reply.status,
                     reply.content_type,
                     reply.body.len(),
@@ -499,35 +534,38 @@ mod tests {
 
     #[test]
     fn classifies_authentication_and_rate_limit_responses() {
-        let response = ureq::Response::new(401, "Unauthorized", "").unwrap();
+        let no_headers = ureq::http::HeaderMap::new();
         assert!(matches!(
-            github_error(ureq::Error::Status(401, response), "pull request", true),
+            github_status_error(401, &no_headers, "pull request", true),
             GithubError::InvalidCredentials
         ));
 
-        let response = ureq::Response::new(401, "Unauthorized", "").unwrap();
         assert!(matches!(
-            github_error(ureq::Error::Status(401, response), "pull request", false),
+            github_status_error(401, &no_headers, "pull request", false),
             GithubError::AuthenticationRequired { .. }
         ));
 
-        let response = ureq::Response::new(429, "Too Many Requests", "").unwrap();
         assert!(matches!(
-            github_error(ureq::Error::Status(429, response), "check runs", true),
+            github_status_error(429, &no_headers, "check runs", true),
             GithubError::RateLimited
         ));
 
-        let response: ureq::Response = "HTTP/1.1 403 Forbidden\r\nx-ratelimit-remaining: 0\r\n\r\n"
-            .parse()
-            .unwrap();
+        let mut rate_limit_headers = ureq::http::HeaderMap::new();
+        rate_limit_headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
         assert!(matches!(
-            github_error(ureq::Error::Status(403, response), "check runs", true),
+            github_status_error(403, &rate_limit_headers, "check runs", true),
             GithubError::RateLimited
         ));
 
-        let response = ureq::Response::new(403, "Forbidden", "").unwrap();
+        let mut retry_headers = ureq::http::HeaderMap::new();
+        retry_headers.insert("retry-after", "60".parse().unwrap());
         assert!(matches!(
-            github_error(ureq::Error::Status(403, response), "check runs", true),
+            github_status_error(403, &retry_headers, "check runs", true),
+            GithubError::RateLimited
+        ));
+
+        assert!(matches!(
+            github_status_error(403, &no_headers, "check runs", true),
             GithubError::HttpStatus { status: 403, .. }
         ));
     }

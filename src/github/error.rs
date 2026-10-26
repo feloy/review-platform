@@ -26,7 +26,7 @@ pub enum GithubError {
     Transport {
         resource: String,
         #[source]
-        source: Box<ureq::Transport>,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("reading {resource}: {source}")]
     ReadResponse {
