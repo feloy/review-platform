@@ -92,7 +92,7 @@ it does not verify the live GitHub head or make concurrent CLI writes safe.
 For development, run `cargo fmt --all -- --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.
 The same checks run in GitHub Actions on Ubuntu 26.04, macOS 26, and Windows Server 2025.
-CI also checks all targets with Rust 1.85 on Ubuntu.
+CI also checks all targets with Rust 1.85 on each of these platforms.
 
 ## User story
 

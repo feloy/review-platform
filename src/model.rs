@@ -179,7 +179,10 @@ mod tests {
     #[test]
     fn repository_names_reject_reserved_segments_and_length_overflow() {
         for name in [".", ".."] {
-            assert!(PrKey::new(format!("owner/{name}"), 1).is_err());
+            assert!(matches!(
+                PrKey::new(format!("owner/{name}"), 1),
+                Err(StateError::InvalidRepository(_))
+            ));
         }
         let error = serde_json::from_value::<PrKey>(
             serde_json::json!({"repository": "owner/..", "number": 1}),
@@ -191,8 +194,14 @@ mod tests {
                 .contains("repository must be a valid GitHub owner/name"),
             "{error}"
         );
-        assert!(PrKey::new(format!("{}/repo", "o".repeat(40)), 1).is_err());
-        assert!(PrKey::new(format!("owner/{}", "r".repeat(101)), 1).is_err());
+        assert!(matches!(
+            PrKey::new(format!("{}/repo", "o".repeat(40)), 1),
+            Err(StateError::InvalidRepository(_))
+        ));
+        assert!(matches!(
+            PrKey::new(format!("owner/{}", "r".repeat(101)), 1),
+            Err(StateError::InvalidRepository(_))
+        ));
 
         assert!(PrKey::new(format!("{}/{}", "o".repeat(39), "r".repeat(100)), 1).is_ok());
         assert!(PrKey::new("owner/.github", 1).is_ok());
