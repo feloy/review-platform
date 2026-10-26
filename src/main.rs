@@ -93,13 +93,17 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let state_file = storage::resolve_path(cli.state_file)?;
-    match cli.command {
+    let Cli {
+        state_file,
+        command,
+    } = cli;
+    match command {
         Command::Request {
             repository,
             pr,
             head_sha,
         } => {
+            let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
             let head_sha = HeadSha::new(head_sha)?;
             let mut state = storage::load(&state_file)?;
@@ -124,6 +128,7 @@ fn run(cli: Cli) -> Result<()> {
             scope,
             head,
         } => {
+            let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
             let inspected_head = HeadSha::new(head)?;
             let scope = AuthorizationScope::from(scope);
@@ -134,6 +139,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("{key}: {}.", Authorization::from(scope));
         }
         Command::Revoke { repository, pr } => {
+            let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
             let mut state = storage::load(&state_file)?;
             if state.revoke(&key)? {
@@ -142,6 +148,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("{key}: {}.", Authorization::AwaitingLead);
         }
         Command::Status { repository, pr } => {
+            let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
             let state = storage::load(&state_file)?;
             let request = state
@@ -152,6 +159,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("  state: {}", request.authorization());
         }
         Command::List => {
+            let state_file = storage::resolve_path(state_file)?;
             let state = storage::load(&state_file)?;
             let mut requests = state.requests().iter().collect::<Vec<_>>();
             requests.sort_by_key(|request| (request.key().repository(), request.key().number()));
@@ -245,7 +253,10 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::StatePath => println!("{}", state_file.display()),
+        Command::StatePath => {
+            let state_file = storage::resolve_path(state_file)?;
+            println!("{}", state_file.display());
+        }
     }
     Ok(())
 }

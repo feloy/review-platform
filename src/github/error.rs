@@ -47,7 +47,7 @@ pub enum GithubError {
     #[error("GitHub reports more than {limit} {kind}; cannot summarize them safely")]
     TooManyResults { kind: &'static str, limit: usize },
     #[error(
-        "GitHub PR {key} head changed from {expected} to {actual} while fetching data; inspect it again"
+        "GitHub PR {key} head changed from {expected} to {actual} while fetching PR data; inspect it again"
     )]
     HeadChanged {
         key: PrKey,
@@ -55,7 +55,7 @@ pub enum GithubError {
         actual: HeadSha,
     },
     #[error(
-        "GitHub PR {key} base changed from {expected} to {actual} while fetching the diff; inspect it again"
+        "GitHub PR {key} base changed from {expected} to {actual} while fetching PR data; inspect it again"
     )]
     BaseChanged {
         key: PrKey,
