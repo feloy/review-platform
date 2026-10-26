@@ -157,11 +157,18 @@ impl GithubClient {
             pull_route(key)
         };
 
-        let response = self.get(
-            &route,
-            "application/vnd.github.diff",
-            &format!("diff for {key}"),
-        )?;
+        let response = self
+            .get(
+                &route,
+                "application/vnd.github.diff",
+                &format!("diff for {key}"),
+            )
+            .map_err(|error| match error {
+                GithubError::HttpStatus { status: 406, .. } => {
+                    GithubError::DiffUnavailable { key: key.clone() }
+                }
+                other => other,
+            })?;
         let content_type = response.header("Content-Type").unwrap_or_default();
         if !content_type.starts_with("application/vnd.github.diff") {
             return Err(GithubError::UnexpectedDiffMediaType {
@@ -538,6 +545,26 @@ mod tests {
             .unwrap();
         handle.join().unwrap();
         assert!(diff.contains("+new line"));
+    }
+
+    #[test]
+    fn diff_406_points_the_lead_to_github() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut unavailable_diff = diff_reply(pull_route(&key), String::new());
+        unavailable_diff.status = "406 Not Acceptable".to_owned();
+        let (url, handle) = serve_many(vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            unavailable_diff,
+        ]);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let error = client.diff_for_pull(&key, &pull, None).unwrap_err();
+        handle.join().unwrap();
+        assert!(
+            matches!(&error, GithubError::DiffUnavailable { key: failed_key } if failed_key == &key),
+            "{error}"
+        );
+        assert!(error.to_string().contains("inspect the PR on GitHub"));
     }
 
     #[test]
