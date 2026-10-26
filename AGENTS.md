@@ -17,10 +17,11 @@ add a dependency or abstraction when a current feature needs it.
   Keep cross-record checks on the containing state.
   Make transitions return useful errors instead of silently changing state.
 - Prefer borrowing and owned values with clear lifetimes over unnecessary clones, shared mutable state, or elaborate lifetime parameters.
-- Use typed errors at reusable library and adapter boundaries so callers can
-  distinguish failures by variant without parsing error messages.
-  Preserve underlying sources and useful context; use `anyhow` to report errors
-  at a CLI entry point when the caller has no recovery decision to make.
+- Use typed errors at reusable library and adapter boundaries.
+  Callers should distinguish failures by variant without parsing error messages.
+  Keep HTTP client types out of public errors so replacing the client does not break callers.
+  Preserve underlying sources and useful context.
+  Use `anyhow` at a CLI entry point when the caller has no recovery decision to make.
   Test error decisions by variant; check message text only when it is user-facing behavior.
   Reserve `panic!`, `unwrap`, and `expect` for tests or invariants that are proven locally.
 - Use exhaustive matches for workflow states.
