@@ -5,9 +5,14 @@ use std::fmt;
 use std::num::NonZeroU64;
 use thiserror::Error;
 
+const MAX_OWNER_LEN: usize = 39;
+const MAX_REPOSITORY_NAME_LEN: usize = 100;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StateError {
-    #[error("repository must be in owner/name form using GitHub name characters: {0}")]
+    #[error(
+        "repository must be a valid GitHub owner/name (owner 1-39 characters, name 1-100 characters and not . or ..): {0}"
+    )]
     InvalidRepository(String),
     #[error("PR number must be greater than zero")]
     InvalidPrNumber,
@@ -79,12 +84,16 @@ fn validate_repository(repository: &str) -> Result<(), StateError> {
         return Err(StateError::InvalidRepository(repository.to_owned()));
     };
     let valid_owner = !owner.is_empty()
+        && owner.len() <= MAX_OWNER_LEN
         && !owner.starts_with('-')
         && !owner.ends_with('-')
         && owner
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-');
     let valid_name = !name.is_empty()
+        && name.len() <= MAX_REPOSITORY_NAME_LEN
+        && name != "."
+        && name != ".."
         && name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'));
@@ -95,7 +104,8 @@ fn validate_repository(repository: &str) -> Result<(), StateError> {
     }
 }
 
-/// A lowercase Git commit ID with 40 or 64 hexadecimal characters.
+/// A Git commit ID with 40 or 64 hexadecimal characters.
+/// Accepts either case and stores lowercase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct HeadSha(String);
@@ -159,5 +169,32 @@ impl fmt::Display for Authorization {
             Self::PrCycle => "authorized for the PR cycle",
         };
         f.write_str(label)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repository_names_reject_reserved_segments_and_length_overflow() {
+        for name in [".", ".."] {
+            assert!(PrKey::new(format!("owner/{name}"), 1).is_err());
+        }
+        let error = serde_json::from_value::<PrKey>(
+            serde_json::json!({"repository": "owner/..", "number": 1}),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("repository must be a valid GitHub owner/name"),
+            "{error}"
+        );
+        assert!(PrKey::new(format!("{}/repo", "o".repeat(40)), 1).is_err());
+        assert!(PrKey::new(format!("owner/{}", "r".repeat(101)), 1).is_err());
+
+        assert!(PrKey::new(format!("{}/{}", "o".repeat(39), "r".repeat(100)), 1).is_ok());
+        assert!(PrKey::new("owner/.github", 1).is_ok());
     }
 }
