@@ -189,11 +189,11 @@ fn run(cli: Cli) -> Result<()> {
                 None
             };
             println!("GitHub PR {key}");
-            println!("  title: {}", escape_terminal_field(&pull.title));
-            println!("  author: {}", pull.author);
-            println!("  state: {}", pull.state);
-            println!("  draft: {}", if pull.draft { "yes" } else { "no" });
-            println!("  head: {}", pull.head_sha);
+            println!("  title: {}", escape_terminal_field(pull.title()));
+            println!("  author: {}", pull.author());
+            println!("  state: {}", pull.state());
+            println!("  draft: {}", if pull.draft() { "yes" } else { "no" });
+            println!("  head: {}", pull.head_sha());
             println!(
                 "  url: https://github.com/{}/pull/{}",
                 key.repository(),
@@ -232,7 +232,7 @@ fn run(cli: Cli) -> Result<()> {
                     Some(previous_head) => {
                         println!("\nChanges since {previous_head}:")
                     }
-                    None => println!("\nFull PR diff against base {}:", pull.base_sha),
+                    None => println!("\nFull PR diff against base {}:", pull.base_sha()),
                 }
                 if changes.is_empty() {
                     println!("(no changes)");
