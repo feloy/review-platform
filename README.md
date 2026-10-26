@@ -35,6 +35,8 @@ cargo run -- help authorize
 Run each command as `cargo run -- COMMAND` from the repository root.
 `REPOSITORY` means `owner/repo`, `PR` is a positive pull request number,
 and `HEAD_SHA` is a 40- or 64-character hexadecimal commit ID.
+Repository names and head SHAs are normalized to lowercase,
+including when loaded from the JSON state file.
 
 - `request REPOSITORY PR HEAD_SHA` manually records a review request and its current PR head.
   A new request starts in `awaiting lead authorization`.

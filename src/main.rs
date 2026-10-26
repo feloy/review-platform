@@ -4,7 +4,9 @@ mod storage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use review_platform::{Authorization, AuthorizationScope, PrKey, RecordOutcome, StateError};
+use review_platform::{
+    Authorization, AuthorizationScope, HeadSha, PrKey, RecordOutcome, StateError,
+};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -84,9 +86,10 @@ fn run(cli: Cli) -> Result<()> {
             pr,
             head_sha,
         } => {
-            let mut state = storage::load(&state_file)?;
             let key = PrKey::new(repository, pr)?;
-            let outcome = state.record_request(key.clone(), head_sha)?;
+            let head_sha = HeadSha::new(head_sha)?;
+            let mut state = storage::load(&state_file)?;
+            let outcome = state.record_request(key.clone(), head_sha);
             if outcome != RecordOutcome::Unchanged {
                 storage::save(&state_file, &state)?;
             }
@@ -107,25 +110,26 @@ fn run(cli: Cli) -> Result<()> {
             scope,
             head,
         } => {
-            let mut state = storage::load(&state_file)?;
             let key = PrKey::new(repository, pr)?;
+            let inspected_head = HeadSha::new(head)?;
             let scope = AuthorizationScope::from(scope);
-            if state.authorize(&key, &head, scope)? {
+            let mut state = storage::load(&state_file)?;
+            if state.authorize(&key, &inspected_head, scope)? {
                 storage::save(&state_file, &state)?;
             }
             println!("{key}: {}.", Authorization::from(scope));
         }
         Command::Revoke { repository, pr } => {
-            let mut state = storage::load(&state_file)?;
             let key = PrKey::new(repository, pr)?;
+            let mut state = storage::load(&state_file)?;
             if state.revoke(&key)? {
                 storage::save(&state_file, &state)?;
             }
             println!("{key}: {}.", Authorization::AwaitingLead);
         }
         Command::Status { repository, pr } => {
-            let state = storage::load(&state_file)?;
             let key = PrKey::new(repository, pr)?;
+            let state = storage::load(&state_file)?;
             let request = state
                 .get(&key)
                 .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
