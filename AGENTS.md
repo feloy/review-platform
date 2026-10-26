@@ -8,7 +8,7 @@ add a dependency or abstraction when a current feature needs it.
 ## Rust conventions
 
 - Use stable Rust, Rust 2024 edition, and the repository's stated minimum Rust version.
-  Check the stated minimum version in CI.
+  Check the stated minimum version in CI on every supported platform.
   Commit `Cargo.lock` for this application.
 - Keep workflow rules in library code with explicit types and state transitions.
   Keep CLI, GitHub, storage, and OpenShell adapters at the edges.
