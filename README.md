@@ -35,6 +35,10 @@ cargo run -- help authorize
 Run each command as `cargo run -- COMMAND` from the repository root.
 `REPOSITORY` means `owner/repo`, `PR` is a positive pull request number,
 and `HEAD_SHA` is a 40- or 64-character hexadecimal commit ID.
+Owners use 1-39 ASCII letters, digits, or hyphens.
+They cannot start or end with a hyphen.
+Repository names use 1-100 ASCII letters, digits, hyphens, underscores, or dots,
+except `.` and `..`.
 Repository names and head SHAs are normalized to lowercase,
 including when loaded from the JSON state file.
 
@@ -73,8 +77,8 @@ Without it, the CLI uses the per-user location for each platform:
 
 On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 The CLI creates the application directory when it first saves state.
-To keep using the previous project-relative file,
-pass `--state-file .review-platform/state.json`.
+For a project-local state file, pass `--state-file .review-platform/state.json`.
+Git ignores the `.review-platform/` directory.
 Keep the state file private to the lead operator.
 
 This prototype does not read GitHub, verify requests or CI, start OpenShell,
@@ -88,6 +92,7 @@ it does not verify the live GitHub head or make concurrent CLI writes safe.
 For development, run `cargo fmt --all -- --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.
 The same checks run in GitHub Actions on Ubuntu 26.04, macOS 26, and Windows Server 2025.
+CI also checks all targets with Rust 1.85 on Ubuntu.
 
 ## User story
 
@@ -181,8 +186,8 @@ flowchart TD
     INIT --> D([Wait for lead authorization])
     D -->|Lead supplies inspected head and scope| V{"Inspected head matches<br/>recorded head?"}
     V -->|No| D
-    V -->|One round| E{{"Set authorization:<br/>one round"}}
-    V -->|PR cycle| F{{"Set authorization:<br/>PR cycle"}}
+    V -->|Yes, one round| E{{"Set authorization:<br/>one round"}}
+    V -->|Yes, PR cycle| F{{"Set authorization:<br/>PR cycle"}}
 
     E --> G([Wait for green CI checks on current PR commit])
     F --> G

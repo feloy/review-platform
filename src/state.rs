@@ -230,15 +230,22 @@ mod tests {
             Err(StateError::InvalidPrNumber)
         );
 
-        for raw_key in [
-            serde_json::json!({"repository": "owner/repo", "number": 0}),
-            serde_json::json!({"repository": "owner/repo/extra", "number": 42}),
+        for (raw_key, expected_error) in [
+            (
+                serde_json::json!({"repository": "owner/repo", "number": 0}),
+                "PR number must be greater than zero",
+            ),
+            (
+                serde_json::json!({"repository": "owner/repo/extra", "number": 42}),
+                "repository must be a valid GitHub owner/name",
+            ),
         ] {
             let invalid_state = serde_json::json!({
                 "schema_version": 1,
                 "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead"}]
             });
-            assert!(serde_json::from_value::<State>(invalid_state).is_err());
+            let error = serde_json::from_value::<State>(invalid_state).unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error}");
         }
         let invalid_head = serde_json::json!({
             "schema_version": 1,
@@ -246,7 +253,11 @@ mod tests {
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead"}
             ]
         });
-        assert!(serde_json::from_value::<State>(invalid_head).is_err());
+        let error = serde_json::from_value::<State>(invalid_head).unwrap_err();
+        assert!(
+            error.to_string().contains("head SHA must contain 40 or 64"),
+            "{error}"
+        );
     }
 
     #[test]

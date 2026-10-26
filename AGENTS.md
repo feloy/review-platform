@@ -8,6 +8,7 @@ add a dependency or abstraction when a current feature needs it.
 ## Rust conventions
 
 - Use stable Rust, Rust 2024 edition, and the repository's stated minimum Rust version.
+  Check the stated minimum version in CI.
   Commit `Cargo.lock` for this application.
 - Keep workflow rules in library code with explicit types and state transitions.
   Keep CLI, GitHub, storage, and OpenShell adapters at the edges.
@@ -77,6 +78,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Use the newest available explicit OS version labels for GitHub-hosted runners; avoid `*-latest`.
 - Give workflows only the `GITHUB_TOKEN` permissions their jobs need.
   Use `contents: read` for read-only checks and grant write access only where required.
+  Set `persist-credentials: false` on checkout steps in jobs that do not push.
 - Avoid running the same PR checks on both `push` and `pull_request`.
   Group PR runs by workflow and PR, and cancel runs superseded by newer changes.
 - Set a reasonable timeout for CI jobs so stalled checks do not run indefinitely.
