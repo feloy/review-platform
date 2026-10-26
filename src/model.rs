@@ -14,9 +14,12 @@ pub enum StateError {
     #[error("head SHA must contain 40 or 64 hexadecimal characters")]
     InvalidHeadSha,
     #[error(
-        "recorded head changed: expected {expected}, found {recorded}; run status and review the current head before authorizing"
+        "inspected head {inspected} is no longer the recorded head {recorded}; run status and review the current head before authorizing"
     )]
-    HeadMismatch { expected: String, recorded: String },
+    HeadMismatch {
+        inspected: HeadSha,
+        recorded: HeadSha,
+    },
     #[error("review request not found: {0}")]
     RequestNotFound(PrKey),
     #[error("duplicate review request in state: {0}")]
@@ -25,9 +28,16 @@ pub enum StateError {
     UnsupportedSchema(u32),
 }
 
-/// A repository and pull request number, validated at construction and on load.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawPrKey {
+    repository: String,
+    number: u64,
+}
+
+/// A repository and pull request number, parsed at construction and on load.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "RawPrKey")]
 pub struct PrKey {
     repository: String,
     number: NonZeroU64,
@@ -48,13 +58,13 @@ impl PrKey {
     pub fn number(&self) -> u64 {
         self.number.get()
     }
+}
 
-    pub(crate) fn validate(&self) -> Result<(), StateError> {
-        validate_repository(&self.repository)?;
-        if self.repository != self.repository.to_ascii_lowercase() {
-            return Err(StateError::InvalidRepository(self.repository.clone()));
-        }
-        Ok(())
+impl TryFrom<RawPrKey> for PrKey {
+    type Error = StateError;
+
+    fn try_from(value: RawPrKey) -> Result<Self, Self::Error> {
+        Self::new(value.repository, value.number)
     }
 }
 
@@ -82,6 +92,39 @@ fn validate_repository(repository: &str) -> Result<(), StateError> {
         Ok(())
     } else {
         Err(StateError::InvalidRepository(repository.to_owned()))
+    }
+}
+
+/// A lowercase Git commit ID with 40 or 64 hexadecimal characters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct HeadSha(String);
+
+impl HeadSha {
+    pub fn new(value: impl Into<String>) -> Result<Self, StateError> {
+        let value = value.into();
+        if !matches!(value.len(), 40 | 64) || !value.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(StateError::InvalidHeadSha);
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for HeadSha {
+    type Error = StateError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl fmt::Display for HeadSha {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

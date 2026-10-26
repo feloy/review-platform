@@ -12,6 +12,8 @@ add a dependency or abstraction when a current feature needs it.
 - Keep workflow rules in library code with explicit types and state transitions.
   Keep CLI, GitHub, storage, and OpenShell adapters at the edges.
 - Model identifiers and states so invalid values are rejected at input boundaries.
+  Parse CLI and deserialized data through the same fallible constructors.
+  Keep cross-record checks on the containing state.
   Make transitions return useful errors instead of silently changing state.
 - Prefer borrowing and owned values with clear lifetimes over unnecessary clones, shared mutable state, or elaborate lifetime parameters.
 - Use `Result` and contextual errors for recoverable failures.
