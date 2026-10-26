@@ -47,6 +47,9 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Reject it if the recorded head has changed; revocation needs no head match.
 - A round requires green checks for the exact PR head being reviewed.
   Bind each draft to that head and the author comments seen; mark it stale on change.
+- Combine check runs and commit statuses for the exact PR head when assessing CI.
+  An empty result set is not green; an empty legacy-status rollup's `pending` value contributes no result.
+  Recheck at round start because an operator display is only a snapshot.
 - Post only the exact draft the lead approved.
   Rejection posts nothing and requires fresh authorization before another round.
 - Keep GitHub posting credentials in the daemon.

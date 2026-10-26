@@ -14,7 +14,8 @@ Rejecting a draft starts another review round only after fresh lead authorizatio
 
 ## Run the Rust prototype
 
-The first runnable slice is a local operator CLI for manually recording PR review requests and lead authorization.
+The runnable prototype is a local operator CLI for manually recording PR review requests and lead authorization,
+and inspecting one live GitHub pull request at a time.
 It requires stable Rust 1.85 or newer.
 From the repository root:
 
@@ -22,6 +23,10 @@ From the repository root:
 cargo run -- --help
 cargo run -- request owner/repo 42 0123456789abcdef0123456789abcdef01234567
 cargo run -- status owner/repo 42
+cargo run -- github-pr owner/repo 42
+cargo run -- github-pr owner/repo 42 --checks
+cargo run -- github-pr owner/repo 42 --diff
+cargo run -- github-pr owner/repo 42 --since 0123456789abcdef0123456789abcdef01234567 --checks
 cargo run -- authorize owner/repo 42 --scope one-round --head 0123456789abcdef0123456789abcdef01234567
 cargo run -- status owner/repo 42
 cargo run -- list
@@ -60,6 +65,34 @@ including when loaded from the JSON state file.
   It reports an error if the request does not exist.
 - `list` prints every recorded request, head SHA, and authorization, sorted by repository and PR number.
   It reports that there are no requests when none have been recorded.
+- `github-pr REPOSITORY PR` fetches the live pull request from GitHub and prints its title,
+  author, open or closed state, draft status, current head SHA, and URL.
+  Add `--checks` to display GitHub check runs and commit statuses for that exact head.
+  It lists each result and summarizes the reported checks as green, pending, failing,
+  unknown, or no checks reported.
+  Green requires at least one result, every check run completed with success, neutral, or skipped,
+  and every commit status successful.
+  An unknown GitHub value or incomplete result never appears green.
+  The command reports an error rather than giving a partial summary if GitHub reports more than 1000 results.
+  Add `--diff` to display the full PR code diff against its base for a first review.
+  Add `--since HEAD_SHA` to display changes after a previously reviewed commit
+  instead of showing the full PR diff again.
+  The previous commit must be an ancestor of the current head;
+  after a force push that breaks this history, inspect the full diff again.
+  `--diff` and `--since` cannot be combined.
+  `--checks` can be used with either diff option.
+  The checks section always refers to the current PR head;
+  `--diff` and `--since` only change the code diff section.
+  For the same head and unchanged GitHub results,
+  `--checks` shows the same checks section alone or with either diff option.
+  If a requested diff or checks fetch fails, the command prints no partial report.
+  Diff output is limited to 8 MiB and terminal control characters are escaped.
+  The CLI checks the live PR head again before displaying the diff,
+  and also checks the base SHA for a full PR diff.
+  It reports a change during retrieval.
+  It reads no local state and changes nothing on GitHub or in the state file.
+  It reports an error for an inaccessible or missing pull request, invalid API data,
+  or a connection failure.
 - `state-path` prints the absolute path of the effective state file.
   It honors `--state-file` and does not read or create the file.
 - `help` prints the command summary; `help COMMAND` prints help for one command.
@@ -81,13 +114,25 @@ For a project-local state file, pass `--state-file .review-platform/state.json`.
 Git ignores the `.review-platform/` directory.
 Keep the state file private to the lead operator.
 
-This prototype does not read GitHub, verify requests or CI, start OpenShell,
+`github-pr` reads public GitHub pull requests without a token.
+For private repositories or a higher GitHub API rate limit,
+set `REVIEW_PLATFORM_GITHUB_TOKEN_RO` to a token with pull request, contents,
+checks, and commit statuses read access.
+The CLI uses this token only for GitHub reads.
+
+This prototype does not discover author review requests, enforce a CI gate, start OpenShell,
 consume an authorized round, or publish reviews.
 It does not track author comments.
-CLI input is entered manually by the lead.
+Review requests and lead decisions are still entered manually.
+The CLI does not yet store the head of a completed review round;
+the lead must supply that SHA to `--since` for an incremental comparison.
 Its state is local and intended for one operator process at a time.
 The `--head` check compares local state only;
 it does not verify the live GitHub head or make concurrent CLI writes safe.
+Use `github-pr --diff` or `github-pr --since HEAD_SHA` to inspect the code and live head before recording or authorizing a request;
+GitHub may still change after that inspection.
+The `--checks` output is a snapshot of reported results,
+not a decision about required checks or permission to start a review round.
 
 For development, run `cargo fmt --all -- --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.
