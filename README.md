@@ -230,6 +230,7 @@ Model IDs should identify the exact models that the agent can run.
 Agent IDs are lowercase ASCII identifiers.
 The CLI matches both the name and email of trailing `Co-authored-by` commit trailers,
 case insensitively, so models sharing a co-author email can be distinguished.
+It never treats the commit subject as a trailer.
 It proposes the first repository-listed model absent from those trailers.
 If every configured model matches a trailer, it proposes the first and explains the match.
 For that model, it chooses the first repository-listed runner whose agent declares support.
