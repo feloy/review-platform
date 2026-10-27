@@ -180,6 +180,17 @@ fn read_page(
 }
 
 fn trailer_coauthors(message: &str) -> Vec<CoauthorIdentity> {
+    // A one-paragraph message contains the subject, not a trailer block.
+    let mut reversed = message
+        .lines()
+        .rev()
+        .skip_while(|line| line.trim().is_empty());
+    let has_separator = reversed.by_ref().any(|line| line.trim().is_empty());
+    let has_earlier_paragraph = reversed.any(|line| !line.trim().is_empty());
+    if !has_separator || !has_earlier_paragraph {
+        return Vec::new();
+    }
+
     let mut identities = Vec::new();
     for line in message
         .lines()
@@ -227,5 +238,16 @@ mod tests {
         assert_eq!(coauthors[0].name(), "claude");
         assert_eq!(coauthors[0].email(), "claude@example.com");
         assert!(trailer_coauthors("Change\n\nCo-authored-by: no email").is_empty());
+        assert!(trailer_coauthors("Co-authored-by: Fake <fake@example.com>").is_empty());
+        assert!(
+            trailer_coauthors(
+                "Co-authored-by: Fake <fake@example.com>\nCo-authored-by: Claude <claude@example.com>"
+            )
+            .is_empty()
+        );
+        let crlf =
+            trailer_coauthors("Change\r\n\r\nCo-authored-by: Claude <claude@example.com>\r\n");
+        assert_eq!(crlf.len(), 1);
+        assert_eq!(crlf[0].name(), "claude");
     }
 }
