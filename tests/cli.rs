@@ -301,16 +301,16 @@ fn new_state_uses_current_schema_and_older_schema_is_rejected() {
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 5);
+    assert_eq!(saved["schema_version"], 3);
     assert_eq!(saved["requests"][0]["revision"], 1);
     assert!(saved["requests"][0]["discussion"].is_null());
     assert!(saved["requests"][0]["model_validation"].is_null());
     let mut older = saved;
-    older["schema_version"] = 4.into();
+    older["schema_version"] = 2.into();
     std::fs::write(&state_file, serde_json::to_vec(&older).unwrap()).unwrap();
     let error = run_failing(&state_file, &["status", "owner/repo", "42"]);
     assert!(
-        error.contains("unsupported state schema version: 4"),
+        error.contains("unsupported state schema version: 2"),
         "{error}"
     );
 }
@@ -321,7 +321,7 @@ fn status_reports_observed_discussion_counts_without_comment_text() {
     let state_file = dir.path().join("state.json");
     let hash = "a".repeat(64);
     let state = serde_json::json!({
-        "schema_version": 5,
+        "schema_version": 3,
         "requests": [{
             "key": {"repository": "owner/repo", "number": 42},
             "head_sha": HEAD_A,

@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum ModelValidationError {
@@ -518,14 +518,14 @@ mod tests {
             ),
         ] {
             let invalid_state = serde_json::json!({
-                "schema_version": 5,
+                "schema_version": 3,
                 "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}]
             });
             let error = serde_json::from_value::<State>(invalid_state).unwrap_err();
             assert!(error.to_string().contains(expected_error), "{error}");
         }
         let invalid_head = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 3,
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}
             ]
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn state_json_keeps_its_shape_and_normalizes_identifiers() {
         let raw = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 3,
             "requests": [
                 {
                     "key": {"repository": "Owner/Repo", "number": 42},
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(serialized["requests"][0]["key"]["number"], 42);
         assert_eq!(serialized["requests"][0]["head_sha"], HEAD_A);
         assert_eq!(serialized["requests"][0]["authorization"], "awaiting_lead");
-        assert_eq!(serialized["schema_version"], 5);
+        assert_eq!(serialized["schema_version"], 3);
         assert_eq!(serialized["requests"][0]["revision"], 1);
         assert!(serialized["requests"][0]["discussion"].is_null());
         assert!(serialized["requests"][0]["model_validation"].is_null());
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn corrupt_or_future_state_is_rejected() {
         let duplicate = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 3,
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": HEAD_A, "authorization": "one_round", "revision": 1, "discussion": {"author_id": 7, "comments": []}, "model_validation": null},
                 {"key": {"repository": "Owner/Repo", "number": 42}, "head_sha": HEAD_B, "authorization": "pr_cycle", "revision": 1, "discussion": null, "model_validation": null}
@@ -610,8 +610,8 @@ mod tests {
         let state: State = serde_json::from_value(duplicate).unwrap();
         assert_eq!(state.validate(), Err(StateError::DuplicateRequest(key())));
 
-        let future: State = serde_json::from_str(r#"{"schema_version":6,"requests":[]}"#).unwrap();
-        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(6)));
+        let future: State = serde_json::from_str(r#"{"schema_version":4,"requests":[]}"#).unwrap();
+        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(4)));
     }
 
     #[test]
@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn current_state_rejects_one_round_authorization_without_observed_discussion() {
         let state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 3,
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
                 "head_sha": HEAD_A,
@@ -851,7 +851,7 @@ mod tests {
     #[test]
     fn malformed_observations_and_revision_overflow_are_rejected() {
         let base = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 3,
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
                 "head_sha": HEAD_A,

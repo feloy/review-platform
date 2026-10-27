@@ -169,8 +169,8 @@ Without overrides, the CLI uses the per-user locations for each platform:
 On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
-The current state schema is version 5.
-Older state files are rejected; there is no schema migration during development.
+The current state schema is version 3.
+Other state schema versions are rejected; there is no schema migration during development.
 For project-local files, pass both `--state-file .review-platform/state.json`
 and `--config-file .review-platform/config.json`.
 Git ignores the `.review-platform/` directory.
