@@ -6,10 +6,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use review_platform::{
     Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, PrKey, RecordOutcome,
-    RefreshOutcome, StateError, archive,
-    config::{ConfigError, ModelId, ReviewConfig},
-    github::{self, GithubError},
-    preparation,
+    RefreshOutcome, StateError,
+    config::{ModelId, ReviewConfig},
+    github, round,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -379,7 +378,7 @@ fn run_prepare(
 ) -> Result<()> {
     let selection = match (model, head, revision) {
         (None, None, None) => None,
-        (Some(model), Some(head), Some(revision)) => Some((
+        (Some(model), Some(head), Some(revision)) => Some(round::ModelSelection::new(
             ModelId::new(model)?,
             HeadSha::new(head)?,
             InputRevision::new(revision)?,
@@ -393,134 +392,26 @@ fn run_prepare(
         .with_context(|| format!("reading review configuration {}", config_file.display()))?;
     let config = ReviewConfig::from_json(&config_bytes)
         .with_context(|| format!("validating review configuration {}", config_file.display()))?;
-    let review_models = config.review_models_for(&key)?;
     let mut state = storage::load(&state_file)?;
-    if state.get(&key).is_none() {
-        return Err(StateError::RequestNotFound(key).into());
-    }
     let client = github::GithubClient::new()?;
-    let observation = client.observe_pull(&key)?;
-    let outcome = state.refresh(
-        observation.key(),
-        observation.head_sha(),
-        observation.discussion(),
-    )?;
-    if outcome != RefreshOutcome::Unchanged {
+    let refreshed = round::refresh(&client, &mut state, &config, &key)?;
+    if refreshed.outcome() != RefreshOutcome::Unchanged {
         storage::save(&state_file, &state)?;
     }
-    if let Some((_, inspected_head, inspected_revision)) = &selection {
-        state
-            .get(&key)
-            .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
-            .ensure_inspected(inspected_head, *inspected_revision)?;
-    }
-    let pull = client.pull_request(&key)?;
-    if pull.head_sha() != observation.head_sha() {
-        return Err(GithubError::HeadChanged {
-            key,
-            expected: observation.head_sha().clone(),
-            actual: pull.head_sha().clone(),
-        }
-        .into());
-    }
-    if pull.author_id() != observation.author_id() {
-        return Err(GithubError::AuthorChanged { key }.into());
-    }
-    let checks = client.checks_for_pull(&key, &pull)?;
-    let coauthors = client.coauthors_for_pull(&key, &pull)?;
-    let final_observation = client.observe_pull(&key)?;
-    if final_observation.head_sha() != observation.head_sha()
-        || final_observation.discussion() != observation.discussion()
-    {
-        return Err(GithubError::ObservationChanged.into());
-    }
-    let final_pull = client.pull_request(&key)?;
-    if final_pull.head_sha() != pull.head_sha() {
-        return Err(GithubError::HeadChanged {
-            key,
-            expected: pull.head_sha().clone(),
-            actual: final_pull.head_sha().clone(),
-        }
-        .into());
-    }
-    if final_pull.author_id() != pull.author_id() {
-        return Err(GithubError::AuthorChanged { key }.into());
-    }
-    let pull_observation = final_pull.preparation_observation();
-    let ci_observation = checks.preparation_observation();
-    let request = state
-        .get(&key)
-        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
-    let mut preparation = preparation::prepare(
-        request,
-        pull_observation,
-        ci_observation,
-        &review_models,
-        coauthors.identities(),
-    )?;
-    let mut verified_archive = None;
-    if let Some((model_id, inspected_head, inspected_revision)) = &selection {
-        let chosen = review_models
-            .iter()
-            .find(|candidate| candidate.model().id() == model_id)
-            .ok_or_else(|| ConfigError::ModelNotConfigured {
-                repository: key.repository().to_owned(),
-                model: model_id.clone(),
-            })?;
-        if preparation.readiness().permits_validation() {
-            let verified = archive::verify_archive(chosen.archive())?;
-            if state.validate_model(
-                &preparation,
-                inspected_head,
-                *inspected_revision,
-                chosen,
-                &verified,
-            )? {
-                storage::save(&state_file, &state)?;
-            }
-            verified_archive = Some(verified);
-            let request = state
-                .get(&key)
-                .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
-            preparation = preparation::prepare(
-                request,
-                pull_observation,
-                ci_observation,
-                &review_models,
-                coauthors.identities(),
-            )?;
-        }
+    let report = round::prepare(&client, &mut state, refreshed, selection.as_ref())?;
+    if report.validation_changed() {
+        storage::save(&state_file, &state)?;
     }
     let request = state
         .get(&key)
         .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
-    let resolved = selection
-        .as_ref()
-        .map(|(model, _, _)| model)
-        .or_else(|| preparation.validated_model())
-        .and_then(|id| {
-            review_models
-                .iter()
-                .find(|candidate| candidate.model().id() == id)
-        })
-        .or_else(|| {
-            review_models
-                .iter()
-                .find(|candidate| candidate.model().id() == preparation.proposed_model())
-        })
-        .context("configuration contains no review model")?;
-    if preparation.readiness().permits_validation()
-        && !verified_archive
-            .as_ref()
-            .is_some_and(|verified| verified.matches(resolved.archive()))
-    {
-        let _verified = archive::verify_archive(resolved.archive())?;
-    }
+    let preparation = report.preparation();
+    let resolved = report.resolved();
     println!("{key}");
     println!("  head: {}", request.head_sha());
     println!("  revision: {}", request.revision());
     println!("  authorization: {}", request.authorization());
-    println!("  checks: {}", checks.summary());
+    println!("  checks: {}", report.checks());
     println!("  proposed model: {}", preparation.proposed_model());
     if preparation.proposal_matches_coauthor() {
         println!("  proposal matches a PR co-author hint; no different model is configured");
@@ -528,8 +419,8 @@ fn run_prepare(
     if let Some(validated) = preparation.validated_model() {
         println!("  validated model: {validated}");
     }
-    if let Some((requested, _, _)) = &selection {
-        println!("  requested model: {requested}");
+    if let Some(requested) = &selection {
+        println!("  requested model: {}", requested.model());
     }
     println!("  resolved agent: {}", resolved.agent().id());
     println!("  prompt SHA-256: {}", resolved.agent().prompt_hash());
