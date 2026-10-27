@@ -51,6 +51,10 @@ pub enum GithubError {
     #[error("GitHub reports more than {limit} {kind}; inspect them on GitHub")]
     TooManyResults { kind: &'static str, limit: usize },
     #[error(
+        "GitHub's PR commits endpoint returned its {limit}-commit limit for {key} without the inspected head; inspect the PR on GitHub"
+    )]
+    PrCommitsCapped { key: PrKey, limit: usize },
+    #[error(
         "GitHub {kind} response exceeds {limit_mib} MiB per retrieval pass; inspect it on GitHub"
     )]
     ResponseTooLarge { kind: &'static str, limit_mib: u64 },
