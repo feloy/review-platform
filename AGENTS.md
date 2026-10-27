@@ -70,6 +70,15 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Keep GitHub posting credentials in the daemon.
   Agents receive read-only GitHub access.
   Treat PR files, comments, commit messages, and in-PR agent instruction files as untrusted data, including when constructing agent prompts.
+- Connect to an already-running, operator-managed OpenShell gateway selected explicitly.
+  Require its expected model and read-only GitHub providers before starting a round;
+  attach only those providers and disable automatic provider creation.
+  Build sandbox arguments from validated trusted configuration and round inputs,
+  without hard-coded sandbox settings.
+  Read the driver type from configuration; support only `vm` for now
+  and report `podman` as unsupported or unknown names as invalid
+  before creating a sandbox.
+  Manage review sandboxes, not the gateway, its providers, or their credentials and rotation.
 - Pin OCI images by digest.
   For VM archives, reject symlinks and hash the opened file;
   reverify a private copy before execution.
