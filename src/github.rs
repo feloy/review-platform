@@ -4,8 +4,10 @@ pub mod checks;
 pub mod commits;
 pub mod discussion;
 mod error;
+mod preparation;
 
 pub use error::GithubError;
+pub use preparation::PreparationInputs;
 
 use crate::preparation::{PullAvailability, PullObservation};
 use crate::{HeadSha, PrKey};
@@ -496,6 +498,35 @@ mod tests {
         replies.extend(discussion_pass_replies(issues, inline, reviews));
         replies.extend(discussion_pass_replies(issues, inline, reviews));
         replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
+        replies
+    }
+
+    fn preparation_replies(final_issues: &[serde_json::Value]) -> Vec<MockReply> {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let commits_route = "/repos/owner/repo/pulls/42/commits?per_page=100&page=1";
+        let commit = serde_json::json!([{
+            "sha": HEAD,
+            "commit": {"message": "Change\n\nCo-authored-by: Claude <claude@example.com>"}
+        }]);
+        let mut replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            check_runs_reply(1, 1, successful_check_runs(1, 1)),
+            json_reply(
+                format!("/repos/owner/repo/commits/{HEAD}/status?per_page=100&page=1"),
+                serde_json::json!({
+                    "sha": HEAD,
+                    "state": "pending",
+                    "total_count": 0,
+                    "statuses": []
+                })
+                .to_string(),
+            ),
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            json_reply(commits_route.to_owned(), commit.to_string()),
+            json_reply(commits_route.to_owned(), commit.to_string()),
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+        ];
+        replies.extend(observation_replies(final_issues, &[], &[]));
         replies
     }
 
@@ -1481,5 +1512,194 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn preparation_inputs_bind_checks_and_coauthors_to_stable_observation() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut replies = observation_replies(&[], &[], &[]);
+        replies.extend(preparation_replies(&[]));
+        replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let observed = client.observe_pull(&key).unwrap();
+        let inputs = client.preparation_inputs(observed).unwrap();
+        handle.join().unwrap();
+        assert_eq!(inputs.head_sha().as_str(), HEAD);
+        assert_eq!(inputs.checks_summary(), CheckSummary::Green);
+        assert!(inputs.coauthors().contains(
+            &crate::config::CoauthorIdentity::new("Claude", "claude@example.com").unwrap()
+        ));
+    }
+
+    #[test]
+    fn preparation_inputs_reject_head_and_author_changes_after_refresh() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut changed_author: serde_json::Value =
+            serde_json::from_str(&pr_body(HEAD, BASE)).unwrap();
+        changed_author["user"]["id"] = 8.into();
+        for (changed_pull, expected_head_change) in [
+            (pr_body(PREVIOUS_HEAD, BASE), true),
+            (changed_author.to_string(), false),
+        ] {
+            let mut replies = observation_replies(&[], &[], &[]);
+            replies.push(json_reply(pull_route(&key), changed_pull));
+            let (url, handle) = serve_many(replies);
+            let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+            let observed = client.observe_pull(&key).unwrap();
+            let error = client.preparation_inputs(observed).err().unwrap();
+            handle.join().unwrap();
+            assert_eq!(
+                matches!(&error, GithubError::HeadChanged { .. }),
+                expected_head_change
+            );
+            assert_eq!(
+                matches!(&error, GithubError::AuthorChanged { .. }),
+                !expected_head_change
+            );
+        }
+    }
+
+    #[test]
+    fn preparation_inputs_reject_author_discussion_change_on_final_pass() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut replies = observation_replies(&[], &[], &[]);
+        replies.extend(preparation_replies(&[author_comment(9, "new reply")]));
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let observed = client.observe_pull(&key).unwrap();
+        let error = client.preparation_inputs(observed).err().unwrap();
+        handle.join().unwrap();
+        assert!(matches!(error, GithubError::ObservationChanged));
+    }
+
+    #[test]
+    fn preparation_inputs_recheck_the_final_pull_head_and_author() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut changed_author: serde_json::Value =
+            serde_json::from_str(&pr_body(HEAD, BASE)).unwrap();
+        changed_author["user"]["id"] = 8.into();
+        for (changed_pull, expected_head_change) in [
+            (pr_body(PREVIOUS_HEAD, BASE), true),
+            (changed_author.to_string(), false),
+        ] {
+            let mut replies = observation_replies(&[], &[], &[]);
+            replies.extend(preparation_replies(&[]));
+            replies.push(json_reply(pull_route(&key), changed_pull));
+            let (url, handle) = serve_many(replies);
+            let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+            let observed = client.observe_pull(&key).unwrap();
+            let error = client.preparation_inputs(observed).err().unwrap();
+            handle.join().unwrap();
+            assert_eq!(
+                matches!(&error, GithubError::HeadChanged { .. }),
+                expected_head_change
+            );
+            assert_eq!(
+                matches!(&error, GithubError::AuthorChanged { .. }),
+                !expected_head_change
+            );
+        }
+    }
+
+    #[test]
+    fn round_preparation_verifies_archive_before_model_validation() {
+        use crate::archive::ArchiveError;
+        use crate::config::ReviewConfig;
+        use crate::preparation::Readiness;
+        use crate::round::{self, ModelSelection, RoundError};
+        use crate::{AuthorizationScope, InputRevision, ObservedDiscussion, State};
+        use sha2::{Digest, Sha256};
+        use std::num::NonZeroU64;
+
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("reviewer.tar");
+        std::fs::write(&archive, b"archive bytes").unwrap();
+        let checksum = format!("{:x}", Sha256::digest(b"archive bytes"));
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let head = HeadSha::new(HEAD).unwrap();
+        let revision = InputRevision::new(2).unwrap();
+
+        for (valid_checksum, select_model) in
+            [(true, true), (false, true), (true, false), (false, false)]
+        {
+            let configured_checksum = if valid_checksum {
+                checksum.as_str()
+            } else {
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            };
+            let config = ReviewConfig::from_json(
+                &serde_json::to_vec(&serde_json::json!({
+                    "schema_version": 2,
+                    "models": [{"id": "model-alpha", "coauthors": []}],
+                    "agents": [{"id": "claude", "models": ["model-alpha"], "prompt": "Review"}],
+                    "repositories": [{
+                        "name": "owner/repo",
+                        "review_models": ["model-alpha"],
+                        "runners": [{
+                            "agent": "claude",
+                            "vm_archive": {"path": archive, "sha256": configured_checksum}
+                        }]
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut state = State::default();
+            state.record_request(key.clone(), head.clone()).unwrap();
+            state
+                .refresh(
+                    &key,
+                    &head,
+                    &ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap(),
+                )
+                .unwrap();
+            state
+                .authorize(&key, &head, revision, AuthorizationScope::OneRound)
+                .unwrap();
+
+            let mut replies = observation_replies(&[], &[], &[]);
+            replies.extend(preparation_replies(&[]));
+            replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
+            let (url, handle) = serve_many(replies);
+            let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+            let refreshed = round::refresh(&client, &mut state, &config, &key).unwrap();
+            assert_eq!(refreshed.outcome(), crate::RefreshOutcome::Unchanged);
+            let choice = ModelSelection::new(
+                crate::config::ModelId::new("model-alpha").unwrap(),
+                head.clone(),
+                revision,
+            );
+            let result = round::prepare(
+                &client,
+                &mut state,
+                refreshed,
+                select_model.then_some(&choice),
+            );
+            handle.join().unwrap();
+            if valid_checksum {
+                let prepared = result.unwrap();
+                assert_eq!(prepared.validation_changed(), select_model);
+                assert_eq!(
+                    prepared.preparation().readiness(),
+                    if select_model {
+                        Readiness::Ready
+                    } else {
+                        Readiness::ModelValidationRequired
+                    }
+                );
+                assert_eq!(prepared.resolved().agent().id().as_str(), "claude");
+                assert_eq!(
+                    state.get(&key).unwrap().model_validation().is_some(),
+                    select_model
+                );
+            } else {
+                assert!(matches!(
+                    result.err().unwrap(),
+                    RoundError::Archive(ArchiveError::ChecksumMismatch { .. })
+                ));
+                assert!(state.get(&key).unwrap().model_validation().is_none());
+            }
+        }
     }
 }

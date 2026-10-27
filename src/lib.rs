@@ -1,10 +1,11 @@
-//! Workflow state, model and agent configuration, and read-only adapters.
+//! Workflow state, review preparation, and read-only adapters.
 
 pub mod archive;
 pub mod config;
 pub mod github;
 mod model;
 pub mod preparation;
+pub mod round;
 mod state;
 
 pub use model::{
