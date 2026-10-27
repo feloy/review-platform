@@ -1,4 +1,4 @@
-//! CLI integration tests for persisted authorization and state-file paths.
+//! CLI integration tests for persisted decisions and platform file paths.
 
 use review_platform::{HeadSha, ObservedDiscussion, PrKey, State};
 use std::num::NonZeroU64;
@@ -46,6 +46,35 @@ fn observe_empty_discussion(state_file: &Path, head: &str) -> u64 {
     let revision = state.get(&key).unwrap().revision().get();
     std::fs::write(state_file, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     revision
+}
+
+#[test]
+fn config_path_uses_platform_config_independently_of_state_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    let expected = directories::ProjectDirs::from("", "", "review-platform")
+        .unwrap()
+        .config_dir()
+        .join("config.json");
+    let printed = run(&state_file, &["config-path"]);
+    assert_eq!(printed.trim(), expected.to_str().unwrap());
+    assert!(!state_file.exists());
+
+    let override_path = dir.path().join("operator-config.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+        .args([
+            "--config-file",
+            override_path.to_str().unwrap(),
+            "config-path",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        override_path.to_str().unwrap()
+    );
+    assert!(!override_path.exists());
 }
 
 #[test]
@@ -266,51 +295,24 @@ fn refresh_requires_a_request_and_failed_fetch_preserves_the_state_file() {
 }
 
 #[test]
-fn schema_one_loads_without_rewriting_and_next_mutation_saves_schema_two() {
+fn new_state_uses_current_schema_and_older_schema_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let state_file = dir.path().join("state.json");
-    let legacy = serde_json::json!({
-        "schema_version": 1,
-        "requests": [{
-            "key": {"repository": "owner/repo", "number": 42},
-            "head_sha": HEAD_A,
-            "authorization": "pr_cycle"
-        }]
-    });
-    let original = serde_json::to_vec_pretty(&legacy).unwrap();
-    std::fs::write(&state_file, &original).unwrap();
-    let status = run(&state_file, &["status", "owner/repo", "42"]);
-    assert!(status.contains("revision: 1"));
-    assert!(status.contains("authorized for the PR cycle"));
-    let error = run_failing(
-        &state_file,
-        &[
-            "authorize",
-            "owner/repo",
-            "42",
-            "--scope",
-            "one-round",
-            "--head",
-            HEAD_A,
-            "--revision",
-            "1",
-        ],
-    );
-    assert!(
-        error.contains("author discussion has not been observed"),
-        "{error}"
-    );
-    assert_eq!(std::fs::read(&state_file).unwrap(), original);
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
-    assert_eq!(std::fs::read(&state_file).unwrap(), original);
-
-    run(&state_file, &["request", "owner/repo", "42", HEAD_B]);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 2);
-    assert_eq!(saved["requests"][0]["revision"], 2);
+    assert_eq!(saved["schema_version"], 5);
+    assert_eq!(saved["requests"][0]["revision"], 1);
     assert!(saved["requests"][0]["discussion"].is_null());
-    assert_eq!(saved["requests"][0]["authorization"], "pr_cycle");
+    assert!(saved["requests"][0]["model_validation"].is_null());
+    let mut older = saved;
+    older["schema_version"] = 4.into();
+    std::fs::write(&state_file, serde_json::to_vec(&older).unwrap()).unwrap();
+    let error = run_failing(&state_file, &["status", "owner/repo", "42"]);
+    assert!(
+        error.contains("unsupported state schema version: 4"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -319,7 +321,7 @@ fn status_reports_observed_discussion_counts_without_comment_text() {
     let state_file = dir.path().join("state.json");
     let hash = "a".repeat(64);
     let state = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 5,
         "requests": [{
             "key": {"repository": "owner/repo", "number": 42},
             "head_sha": HEAD_A,
@@ -332,7 +334,8 @@ fn status_reports_observed_discussion_counts_without_comment_text() {
                     {"source": "review_comment", "id": 2, "sha256": hash},
                     {"source": "review", "id": 3, "sha256": hash}
                 ]
-            }
+            },
+            "model_validation": null
         }]
     });
     std::fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();

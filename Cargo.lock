@@ -499,6 +499,7 @@ dependencies = [
  "anyhow",
  "clap",
  "directories",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

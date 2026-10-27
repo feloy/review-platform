@@ -1,4 +1,4 @@
-//! State-file path selection and local JSON persistence for the operator CLI.
+//! Platform state and config paths plus local JSON state persistence.
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -13,17 +13,35 @@ pub fn resolve_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
         Some(path) => path,
         None => default_path()?,
     };
+    absolute_path(path, "--state-file")
+}
+
+pub fn resolve_config_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
+    let path = match override_path {
+        Some(path) => path,
+        None => default_config_path()?,
+    };
+    absolute_path(path, "--config-file")
+}
+
+fn absolute_path(path: PathBuf, option: &str) -> Result<PathBuf> {
     anyhow::ensure!(
         !path.as_os_str().is_empty(),
-        "state file path cannot be empty"
+        "{option} path cannot be empty"
     );
     if path.is_absolute() {
         Ok(path)
     } else {
         Ok(std::env::current_dir()
-            .context("determining the current directory for --state-file")?
+            .with_context(|| format!("determining the current directory for {option}"))?
             .join(path))
     }
+}
+
+fn default_config_path() -> Result<PathBuf> {
+    let project_dirs = ProjectDirs::from("", "", "review-platform")
+        .context("cannot determine the user config directory; provide --config-file PATH")?;
+    Ok(project_dirs.config_dir().join("config.json"))
 }
 
 fn default_path() -> Result<PathBuf> {
