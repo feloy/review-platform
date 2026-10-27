@@ -20,6 +20,10 @@ pub enum GithubError {
     RateLimited,
     #[error("GitHub {resource} was not found or is not accessible")]
     NotFound { resource: String },
+    #[error(
+        "GitHub denied access to {resource}; check read permissions on REVIEW_PLATFORM_GITHUB_TOKEN_RO"
+    )]
+    PermissionDenied { resource: String },
     #[error("GitHub returned HTTP {status} while inspecting {resource}")]
     HttpStatus { status: u16, resource: String },
     #[error("connecting to GitHub for {resource}: {source}")]
@@ -44,8 +48,16 @@ pub enum GithubError {
     InvalidResponse { resource: String, detail: String },
     #[error("GitHub {kind} changed during pagination ({detail}); retry later")]
     PaginationChanged { kind: &'static str, detail: String },
-    #[error("GitHub reports more than {limit} {kind}; cannot summarize them safely")]
+    #[error("GitHub reports more than {limit} {kind}; inspect them on GitHub")]
     TooManyResults { kind: &'static str, limit: usize },
+    #[error(
+        "GitHub {kind} response exceeds {limit_mib} MiB per retrieval pass; inspect it on GitHub"
+    )]
+    ResponseTooLarge { kind: &'static str, limit_mib: u64 },
+    #[error("GitHub author discussion changed during retrieval; retry later")]
+    ObservationChanged,
+    #[error("GitHub PR {key} author changed during retrieval; inspect it again")]
+    AuthorChanged { key: PrKey },
     #[error(
         "GitHub PR {key} head changed from {expected} to {actual} while fetching PR data; inspect it again"
     )]

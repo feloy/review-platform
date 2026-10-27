@@ -1,10 +1,13 @@
 //! Review requests and their authorization transitions.
 
-use crate::model::{Authorization, AuthorizationScope, HeadSha, PrKey, StateError};
-use serde::{Deserialize, Serialize};
+use crate::model::{
+    Authorization, AuthorizationScope, HeadSha, InputRevision, ObservedDiscussion, PrKey,
+    StateError,
+};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::collections::HashSet;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordOutcome {
@@ -14,12 +17,31 @@ pub enum RecordOutcome {
     HeadChangedAuthorizationPreserved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    Unchanged,
+    Updated {
+        head_changed: bool,
+        discussion_changed: bool,
+        authorization_cleared: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewRequest {
     key: PrKey,
     head_sha: HeadSha,
     authorization: Authorization,
+    revision: InputRevision,
+    #[serde(deserialize_with = "deserialize_discussion")]
+    discussion: Option<ObservedDiscussion>,
+}
+
+fn deserialize_discussion<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ObservedDiscussion>, D::Error> {
+    Option::<ObservedDiscussion>::deserialize(deserializer)
 }
 
 impl ReviewRequest {
@@ -34,13 +56,72 @@ impl ReviewRequest {
     pub fn authorization(&self) -> Authorization {
         self.authorization
     }
+
+    pub fn revision(&self) -> InputRevision {
+        self.revision
+    }
+
+    pub fn discussion(&self) -> Option<&ObservedDiscussion> {
+        self.discussion.as_ref()
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
     schema_version: u32,
     requests: Vec<ReviewRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawState {
+    schema_version: u32,
+    requests: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyReviewRequest {
+    key: PrKey,
+    head_sha: HeadSha,
+    authorization: Authorization,
+}
+
+impl<'de> Deserialize<'de> for State {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawState::deserialize(deserializer)?;
+        let requests = match raw.schema_version {
+            1 => raw
+                .requests
+                .into_iter()
+                .map(|value| {
+                    let old: LegacyReviewRequest =
+                        serde_json::from_value(value).map_err(de::Error::custom)?;
+                    Ok(ReviewRequest {
+                        key: old.key,
+                        head_sha: old.head_sha,
+                        authorization: old.authorization,
+                        revision: InputRevision::new(1).map_err(de::Error::custom)?,
+                        discussion: None,
+                    })
+                })
+                .collect::<Result<Vec<_>, D::Error>>()?,
+            2 => raw
+                .requests
+                .into_iter()
+                .map(|value| serde_json::from_value(value).map_err(de::Error::custom))
+                .collect::<Result<Vec<_>, D::Error>>()?,
+            other => return Err(de::Error::custom(StateError::UnsupportedSchema(other))),
+        };
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
+            requests,
+        })
+    }
 }
 
 impl Default for State {
@@ -74,13 +155,20 @@ impl State {
         self.requests.iter().find(|request| request.key == *key)
     }
 
-    pub fn record_request(&mut self, key: PrKey, head_sha: HeadSha) -> RecordOutcome {
+    pub fn record_request(
+        &mut self,
+        key: PrKey,
+        head_sha: HeadSha,
+    ) -> Result<RecordOutcome, StateError> {
         if let Some(request) = self.requests.iter_mut().find(|request| request.key == key) {
             if request.head_sha == head_sha {
-                return RecordOutcome::Unchanged;
+                return Ok(RecordOutcome::Unchanged);
             }
+            let next_revision = request.revision.next()?;
             request.head_sha = head_sha;
-            return match request.authorization {
+            request.revision = next_revision;
+            request.discussion = None;
+            return Ok(match request.authorization {
                 Authorization::OneRound => {
                     request.authorization = Authorization::AwaitingLead;
                     RecordOutcome::HeadChangedAuthorizationReset
@@ -88,20 +176,50 @@ impl State {
                 Authorization::AwaitingLead | Authorization::PrCycle => {
                     RecordOutcome::HeadChangedAuthorizationPreserved
                 }
-            };
+            });
         }
         self.requests.push(ReviewRequest {
             key,
             head_sha,
             authorization: Authorization::AwaitingLead,
+            revision: InputRevision::new(1)?,
+            discussion: None,
         });
-        RecordOutcome::New
+        Ok(RecordOutcome::New)
+    }
+
+    pub fn refresh(
+        &mut self,
+        key: &PrKey,
+        head_sha: &HeadSha,
+        discussion: &ObservedDiscussion,
+    ) -> Result<RefreshOutcome, StateError> {
+        let request = self.request_mut(key)?;
+        let head_changed = &request.head_sha != head_sha;
+        let discussion_changed = request.discussion.as_ref() != Some(discussion);
+        if !head_changed && !discussion_changed {
+            return Ok(RefreshOutcome::Unchanged);
+        }
+        let next_revision = request.revision.next()?;
+        let authorization_cleared = request.authorization == Authorization::OneRound;
+        request.head_sha = head_sha.clone();
+        request.discussion = Some(discussion.clone());
+        request.revision = next_revision;
+        if authorization_cleared {
+            request.authorization = Authorization::AwaitingLead;
+        }
+        Ok(RefreshOutcome::Updated {
+            head_changed,
+            discussion_changed,
+            authorization_cleared,
+        })
     }
 
     pub fn authorize(
         &mut self,
         key: &PrKey,
         inspected_head: &HeadSha,
+        inspected_revision: InputRevision,
         scope: AuthorizationScope,
     ) -> Result<bool, StateError> {
         let request = self.request_mut(key)?;
@@ -109,6 +227,12 @@ impl State {
             return Err(StateError::HeadMismatch {
                 inspected: inspected_head.clone(),
                 recorded: request.head_sha.clone(),
+            });
+        }
+        if request.revision != inspected_revision {
+            return Err(StateError::RevisionMismatch {
+                inspected: inspected_revision,
+                recorded: request.revision,
             });
         }
         let authorization = Authorization::from(scope);
@@ -135,6 +259,8 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CommentFingerprint, CommentHash, CommentSource};
+    use std::num::NonZeroU64;
 
     const HEAD_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HEAD_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -147,16 +273,39 @@ mod tests {
         HeadSha::new(value).unwrap()
     }
 
+    fn revision(value: u64) -> InputRevision {
+        InputRevision::new(value).unwrap()
+    }
+
+    fn discussion(comments: &[(CommentSource, u64, u8)]) -> ObservedDiscussion {
+        let comments = comments
+            .iter()
+            .map(|(source, id, digest)| {
+                CommentFingerprint::new(
+                    *source,
+                    NonZeroU64::new(*id).unwrap(),
+                    CommentHash::from_digest([*digest; 32]),
+                )
+            })
+            .collect();
+        ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), comments).unwrap()
+    }
+
     #[test]
     fn one_round_authorization_expires_when_head_changes() {
         let mut state = State::default();
-        state.record_request(key(), head(HEAD_A));
+        state.record_request(key(), head(HEAD_A)).unwrap();
         state
-            .authorize(&key(), &head(HEAD_A), AuthorizationScope::OneRound)
+            .authorize(
+                &key(),
+                &head(HEAD_A),
+                InputRevision::new(1).unwrap(),
+                AuthorizationScope::OneRound,
+            )
             .unwrap();
 
         assert_eq!(
-            state.record_request(key(), head(HEAD_B)),
+            state.record_request(key(), head(HEAD_B)).unwrap(),
             RecordOutcome::HeadChangedAuthorizationReset
         );
         assert_eq!(
@@ -168,12 +317,17 @@ mod tests {
     #[test]
     fn authorization_rejects_a_head_changed_since_the_lead_checked_status() {
         let mut state = State::default();
-        state.record_request(key(), head(HEAD_A));
+        state.record_request(key(), head(HEAD_A)).unwrap();
         let seen_head = state.get(&key()).unwrap().head_sha().clone();
-        state.record_request(key(), head(HEAD_B));
+        state.record_request(key(), head(HEAD_B)).unwrap();
 
         assert_eq!(
-            state.authorize(&key(), &seen_head, AuthorizationScope::OneRound),
+            state.authorize(
+                &key(),
+                &seen_head,
+                InputRevision::new(1).unwrap(),
+                AuthorizationScope::OneRound
+            ),
             Err(StateError::HeadMismatch {
                 inspected: head(HEAD_A),
                 recorded: head(HEAD_B),
@@ -185,7 +339,12 @@ mod tests {
 
         assert!(
             state
-                .authorize(&key(), &head(HEAD_B), AuthorizationScope::OneRound)
+                .authorize(
+                    &key(),
+                    &head(HEAD_B),
+                    InputRevision::new(2).unwrap(),
+                    AuthorizationScope::OneRound
+                )
                 .unwrap()
         );
     }
@@ -193,13 +352,18 @@ mod tests {
     #[test]
     fn cycle_authorization_survives_head_change_and_can_be_revoked() {
         let mut state = State::default();
-        state.record_request(key(), head(HEAD_A));
+        state.record_request(key(), head(HEAD_A)).unwrap();
         state
-            .authorize(&key(), &head(HEAD_A), AuthorizationScope::PrCycle)
+            .authorize(
+                &key(),
+                &head(HEAD_A),
+                InputRevision::new(1).unwrap(),
+                AuthorizationScope::PrCycle,
+            )
             .unwrap();
 
         assert_eq!(
-            state.record_request(key(), head(HEAD_B)),
+            state.record_request(key(), head(HEAD_B)).unwrap(),
             RecordOutcome::HeadChangedAuthorizationPreserved
         );
         assert_eq!(
@@ -265,13 +429,20 @@ mod tests {
         let mut state = State::default();
         let mixed_case_key = PrKey::new("Owner/Repo", 42).unwrap();
         let uppercase_head = head(HEAD_A.to_ascii_uppercase());
-        state.record_request(mixed_case_key, uppercase_head.clone());
         state
-            .authorize(&key(), &uppercase_head, AuthorizationScope::OneRound)
+            .record_request(mixed_case_key, uppercase_head.clone())
+            .unwrap();
+        state
+            .authorize(
+                &key(),
+                &uppercase_head,
+                InputRevision::new(1).unwrap(),
+                AuthorizationScope::OneRound,
+            )
             .unwrap();
 
         assert_eq!(
-            state.record_request(key(), head(HEAD_A)),
+            state.record_request(key(), head(HEAD_A)).unwrap(),
             RecordOutcome::Unchanged
         );
         assert_eq!(state.requests().len(), 1);
@@ -302,6 +473,9 @@ mod tests {
         assert_eq!(serialized["requests"][0]["key"]["number"], 42);
         assert_eq!(serialized["requests"][0]["head_sha"], HEAD_A);
         assert_eq!(serialized["requests"][0]["authorization"], "awaiting_lead");
+        assert_eq!(serialized["schema_version"], 2);
+        assert_eq!(serialized["requests"][0]["revision"], 1);
+        assert!(serialized["requests"][0]["discussion"].is_null());
     }
 
     #[test]
@@ -316,7 +490,298 @@ mod tests {
         let state: State = serde_json::from_value(duplicate).unwrap();
         assert_eq!(state.validate(), Err(StateError::DuplicateRequest(key())));
 
-        let future: State = serde_json::from_str(r#"{"schema_version":2,"requests":[]}"#).unwrap();
-        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(2)));
+        let future =
+            serde_json::from_str::<State>(r#"{"schema_version":3,"requests":[]}"#).unwrap_err();
+        assert!(
+            future
+                .to_string()
+                .contains("unsupported state schema version: 3")
+        );
+    }
+
+    #[test]
+    fn refresh_detects_head_and_author_discussion_changes_under_every_authorization() {
+        let initial = discussion(&[
+            (CommentSource::IssueComment, 1, 1),
+            (CommentSource::ReviewComment, 2, 2),
+        ]);
+        let changes = [
+            (head(HEAD_B), initial.clone(), true, false),
+            (
+                head(HEAD_A),
+                discussion(&[
+                    (CommentSource::IssueComment, 1, 1),
+                    (CommentSource::ReviewComment, 2, 2),
+                    (CommentSource::Review, 3, 3),
+                ]),
+                false,
+                true,
+            ),
+            (
+                head(HEAD_A),
+                discussion(&[
+                    (CommentSource::IssueComment, 1, 9),
+                    (CommentSource::ReviewComment, 2, 2),
+                ]),
+                false,
+                true,
+            ),
+            (
+                head(HEAD_A),
+                discussion(&[(CommentSource::IssueComment, 1, 1)]),
+                false,
+                true,
+            ),
+        ];
+        for authorization in [
+            Authorization::AwaitingLead,
+            Authorization::OneRound,
+            Authorization::PrCycle,
+        ] {
+            for (next_head, next_discussion, head_changed, discussion_changed) in &changes {
+                let mut state = State::default();
+                state.record_request(key(), head(HEAD_A)).unwrap();
+                state.refresh(&key(), &head(HEAD_A), &initial).unwrap();
+                match authorization {
+                    Authorization::AwaitingLead => {}
+                    Authorization::OneRound => {
+                        state
+                            .authorize(
+                                &key(),
+                                &head(HEAD_A),
+                                revision(2),
+                                AuthorizationScope::OneRound,
+                            )
+                            .unwrap();
+                    }
+                    Authorization::PrCycle => {
+                        state
+                            .authorize(
+                                &key(),
+                                &head(HEAD_A),
+                                revision(2),
+                                AuthorizationScope::PrCycle,
+                            )
+                            .unwrap();
+                    }
+                }
+                assert_eq!(
+                    state.refresh(&key(), next_head, next_discussion).unwrap(),
+                    RefreshOutcome::Updated {
+                        head_changed: *head_changed,
+                        discussion_changed: *discussion_changed,
+                        authorization_cleared: authorization == Authorization::OneRound,
+                    }
+                );
+                let request = state.get(&key()).unwrap();
+                assert_eq!(request.revision(), revision(3));
+                assert_eq!(request.head_sha(), next_head);
+                assert_eq!(request.discussion(), Some(next_discussion));
+                assert_eq!(
+                    request.authorization(),
+                    if authorization == Authorization::OneRound {
+                        Authorization::AwaitingLead
+                    } else {
+                        authorization
+                    }
+                );
+                assert_eq!(
+                    state.refresh(&key(), next_head, next_discussion).unwrap(),
+                    RefreshOutcome::Unchanged
+                );
+                assert_eq!(state.get(&key()).unwrap().revision(), revision(3));
+            }
+        }
+    }
+
+    #[test]
+    fn first_refresh_establishes_baseline_and_old_revision_cannot_authorize() {
+        let mut state = State::default();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        state
+            .authorize(
+                &key(),
+                &head(HEAD_A),
+                revision(1),
+                AuthorizationScope::OneRound,
+            )
+            .unwrap();
+        let empty = discussion(&[]);
+        assert_eq!(
+            state.refresh(&key(), &head(HEAD_A), &empty).unwrap(),
+            RefreshOutcome::Updated {
+                head_changed: false,
+                discussion_changed: true,
+                authorization_cleared: true,
+            }
+        );
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::AwaitingLead
+        );
+        assert_eq!(
+            state.authorize(
+                &key(),
+                &head(HEAD_A),
+                revision(1),
+                AuthorizationScope::PrCycle
+            ),
+            Err(StateError::RevisionMismatch {
+                inspected: revision(1),
+                recorded: revision(2),
+            })
+        );
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::AwaitingLead
+        );
+    }
+
+    #[test]
+    fn changed_author_identity_advances_revision_and_failed_scope_switch_keeps_authorization() {
+        let mut state = State::default();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        let original = discussion(&[]);
+        state.refresh(&key(), &head(HEAD_A), &original).unwrap();
+        state
+            .authorize(
+                &key(),
+                &head(HEAD_A),
+                revision(2),
+                AuthorizationScope::PrCycle,
+            )
+            .unwrap();
+        let different_author =
+            ObservedDiscussion::new(NonZeroU64::new(8).unwrap(), vec![]).unwrap();
+        assert_eq!(
+            state
+                .refresh(&key(), &head(HEAD_A), &different_author)
+                .unwrap(),
+            RefreshOutcome::Updated {
+                head_changed: false,
+                discussion_changed: true,
+                authorization_cleared: false,
+            }
+        );
+        assert_eq!(
+            state.authorize(
+                &key(),
+                &head(HEAD_A),
+                revision(2),
+                AuthorizationScope::OneRound
+            ),
+            Err(StateError::RevisionMismatch {
+                inspected: revision(2),
+                recorded: revision(3),
+            })
+        );
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::PrCycle
+        );
+    }
+
+    #[test]
+    fn manual_head_change_advances_revision_and_discards_discussion() {
+        let mut state = State::default();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        state
+            .refresh(&key(), &head(HEAD_A), &discussion(&[]))
+            .unwrap();
+        assert_eq!(
+            state.record_request(key(), head(HEAD_A)).unwrap(),
+            RecordOutcome::Unchanged
+        );
+        assert_eq!(state.get(&key()).unwrap().revision(), revision(2));
+        state.record_request(key(), head(HEAD_B)).unwrap();
+        let request = state.get(&key()).unwrap();
+        assert_eq!(request.revision(), revision(3));
+        assert!(request.discussion().is_none());
+    }
+
+    #[test]
+    fn legacy_authorization_survives_load_until_first_refresh() {
+        for (old_authorization, expected_after_refresh) in [
+            ("one_round", Authorization::AwaitingLead),
+            ("pr_cycle", Authorization::PrCycle),
+        ] {
+            let raw = serde_json::json!({
+                "schema_version": 1,
+                "requests": [{
+                    "key": {"repository": "owner/repo", "number": 42},
+                    "head_sha": HEAD_A,
+                    "authorization": old_authorization
+                }]
+            });
+            let mut state: State = serde_json::from_value(raw).unwrap();
+            assert_eq!(state.get(&key()).unwrap().revision(), revision(1));
+            assert!(state.get(&key()).unwrap().discussion().is_none());
+            state
+                .refresh(&key(), &head(HEAD_A), &discussion(&[]))
+                .unwrap();
+            assert_eq!(
+                state.get(&key()).unwrap().authorization(),
+                expected_after_refresh
+            );
+            assert_eq!(serde_json::to_value(state).unwrap()["schema_version"], 2);
+        }
+    }
+
+    #[test]
+    fn malformed_v2_observations_and_revision_overflow_are_rejected() {
+        let base = serde_json::json!({
+            "schema_version": 2,
+            "requests": [{
+                "key": {"repository": "owner/repo", "number": 42},
+                "head_sha": HEAD_A,
+                "authorization": "one_round",
+                "revision": 1,
+                "discussion": {"author_id": 7, "comments": []}
+            }]
+        });
+        for (field, replacement) in [
+            ("revision", serde_json::json!(0)),
+            (
+                "discussion",
+                serde_json::json!({"author_id": 0, "comments": []}),
+            ),
+            (
+                "discussion",
+                serde_json::json!({"author_id": 7, "comments": [{"source": "issue_comment", "id": 1, "sha256": "bad"}]}),
+            ),
+            (
+                "discussion",
+                serde_json::json!({"author_id": 7, "comments": [
+                    {"source": "issue_comment", "id": 1, "sha256": "a".repeat(64)},
+                    {"source": "issue_comment", "id": 1, "sha256": "b".repeat(64)}
+                ]}),
+            ),
+        ] {
+            let mut value = base.clone();
+            value["requests"][0][field] = replacement;
+            assert!(serde_json::from_value::<State>(value).is_err());
+        }
+        let mut missing_discussion = base.clone();
+        missing_discussion["requests"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("discussion");
+        assert!(serde_json::from_value::<State>(missing_discussion).is_err());
+        let mut value = base;
+        value["requests"][0]["revision"] = serde_json::json!(u64::MAX);
+        let mut state: State = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            state.record_request(key(), head(HEAD_B)),
+            Err(StateError::RevisionOverflow)
+        );
+        assert_eq!(
+            state.refresh(&key(), &head(HEAD_B), &discussion(&[])),
+            Err(StateError::RevisionOverflow)
+        );
+        assert_eq!(state.get(&key()).unwrap().head_sha(), &head(HEAD_A));
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::OneRound
+        );
     }
 }

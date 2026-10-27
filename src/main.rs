@@ -5,7 +5,8 @@ mod storage;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use review_platform::{
-    Authorization, AuthorizationScope, HeadSha, PrKey, RecordOutcome, StateError, github,
+    Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, PrKey, RecordOutcome,
+    RefreshOutcome, StateError, github,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -33,7 +34,9 @@ enum Command {
         pr: u64,
         head_sha: String,
     },
-    /// Authorize the recorded PR head the lead inspected.
+    /// Refresh an existing request's head and author discussion from GitHub.
+    Refresh { repository: String, pr: u64 },
+    /// Authorize the recorded PR head and input revision the lead inspected.
     Authorize {
         repository: String,
         pr: u64,
@@ -42,6 +45,9 @@ enum Command {
         /// Head SHA shown by status; must still be the recorded head.
         #[arg(long, value_name = "HEAD_SHA")]
         head: String,
+        /// Input revision shown by status; must still be current.
+        #[arg(long, value_name = "REVISION")]
+        revision: u64,
     },
     /// Withdraw the lead's authorization for a recorded PR.
     Revoke { repository: String, pr: u64 },
@@ -107,7 +113,7 @@ fn run(cli: Cli) -> Result<()> {
             let key = PrKey::new(repository, pr)?;
             let head_sha = HeadSha::new(head_sha)?;
             let mut state = storage::load(&state_file)?;
-            let outcome = state.record_request(key.clone(), head_sha);
+            let outcome = state.record_request(key.clone(), head_sha)?;
             if outcome != RecordOutcome::Unchanged {
                 storage::save(&state_file, &state)?;
             }
@@ -122,18 +128,58 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Refresh { repository, pr } => {
+            let state_file = storage::resolve_path(state_file)?;
+            let key = PrKey::new(repository, pr)?;
+            let mut state = storage::load(&state_file)?;
+            if state.get(&key).is_none() {
+                return Err(StateError::RequestNotFound(key).into());
+            }
+            let client = github::GithubClient::new()?;
+            let observation = client.observe_pull(&key)?;
+            let outcome = state.refresh(
+                observation.key(),
+                observation.head_sha(),
+                observation.discussion(),
+            )?;
+            if outcome != RefreshOutcome::Unchanged {
+                storage::save(&state_file, &state)?;
+            }
+            match outcome {
+                RefreshOutcome::Unchanged => println!("{key}: inputs unchanged."),
+                RefreshOutcome::Updated {
+                    head_changed,
+                    discussion_changed,
+                    authorization_cleared,
+                } => {
+                    let mut changes = Vec::new();
+                    if head_changed {
+                        changes.push("head changed");
+                    }
+                    if discussion_changed {
+                        changes.push("author discussion changed or established");
+                    }
+                    println!("{key}: {}.", changes.join(", "));
+                    if authorization_cleared {
+                        println!("  one-round authorization was cleared.");
+                    }
+                }
+            }
+        }
         Command::Authorize {
             repository,
             pr,
             scope,
             head,
+            revision,
         } => {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
             let inspected_head = HeadSha::new(head)?;
+            let inspected_revision = InputRevision::new(revision)?;
             let scope = AuthorizationScope::from(scope);
             let mut state = storage::load(&state_file)?;
-            if state.authorize(&key, &inspected_head, scope)? {
+            if state.authorize(&key, &inspected_head, inspected_revision, scope)? {
                 storage::save(&state_file, &state)?;
             }
             println!("{key}: {}.", Authorization::from(scope));
@@ -156,6 +202,16 @@ fn run(cli: Cli) -> Result<()> {
                 .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
             println!("{}", request.key());
             println!("  head: {}", request.head_sha());
+            println!("  revision: {}", request.revision());
+            match request.discussion() {
+                Some(discussion) => println!(
+                    "  author discussion: {} issue comments, {} review comments, {} review bodies",
+                    discussion.count(CommentSource::IssueComment),
+                    discussion.count(CommentSource::ReviewComment),
+                    discussion.count(CommentSource::Review)
+                ),
+                None => println!("  author discussion: not yet observed"),
+            }
             println!("  state: {}", request.authorization());
         }
         Command::List => {

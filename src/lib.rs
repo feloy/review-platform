@@ -4,5 +4,8 @@ pub mod github;
 mod model;
 mod state;
 
-pub use model::{Authorization, AuthorizationScope, HeadSha, PrKey, StateError};
-pub use state::{RecordOutcome, ReviewRequest, State};
+pub use model::{
+    Authorization, AuthorizationScope, CommentFingerprint, CommentHash, CommentSource, HeadSha,
+    InputRevision, ObservedDiscussion, PrKey, StateError,
+};
+pub use state::{RecordOutcome, RefreshOutcome, ReviewRequest, State};
