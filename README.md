@@ -14,20 +14,21 @@ Rejecting a draft starts another review round only after fresh lead authorizatio
 
 ## Run the Rust prototype
 
-The runnable prototype is a local operator CLI for manually recording PR review requests and lead authorization,
-and inspecting one live GitHub pull request at a time.
+The runnable prototype is a local operator CLI for recording PR review requests,
+refreshing their GitHub inputs, and recording lead authorization.
 It requires stable Rust 1.85 or newer.
 From the repository root:
 
 ```sh
 cargo run -- --help
 cargo run -- request owner/repo 42 0123456789abcdef0123456789abcdef01234567
+cargo run -- refresh owner/repo 42
 cargo run -- status owner/repo 42
 cargo run -- github-pr owner/repo 42
 cargo run -- github-pr owner/repo 42 --checks
 cargo run -- github-pr owner/repo 42 --diff
 cargo run -- github-pr owner/repo 42 --since 0123456789abcdef0123456789abcdef01234567 --checks
-cargo run -- authorize owner/repo 42 --scope one-round --head 0123456789abcdef0123456789abcdef01234567
+cargo run -- authorize owner/repo 42 --scope one-round --head 0123456789abcdef0123456789abcdef01234567 --revision 2
 cargo run -- status owner/repo 42
 cargo run -- list
 cargo run -- state-path
@@ -39,7 +40,8 @@ cargo run -- help authorize
 
 Run each command as `cargo run -- COMMAND` from the repository root.
 `REPOSITORY` means `owner/repo`, `PR` is a positive pull request number,
-and `HEAD_SHA` is a 40- or 64-character hexadecimal commit ID.
+`HEAD_SHA` is a 40- or 64-character hexadecimal commit ID,
+and `REVISION` is the positive local input revision shown by `status`.
 Owners use 1-39 ASCII letters, digits, or hyphens.
 They cannot start or end with a hyphen.
 Repository names use 1-100 ASCII letters, digits, hyphens, underscores, or dots,
@@ -50,18 +52,37 @@ including when loaded from the JSON state file.
 - `request REPOSITORY PR HEAD_SHA` manually records a review request and its current PR head.
   A new request starts in `awaiting lead authorization`.
   Repeating the same head changes nothing.
-  Recording a different head clears `one-round` authorization but preserves `pr-cycle` authorization.
-- `authorize REPOSITORY PR --scope one-round --head HEAD_SHA` authorizes one review round for an existing request.
-  Give the head SHA the lead inspected with `status`.
-  If the locally recorded head has changed, the command reports both SHAs and leaves authorization unchanged.
+  Recording a different head advances the input revision,
+  marks author discussion as unavailable,
+  and clears `one-round` authorization while preserving `pr-cycle` authorization.
+- `refresh REPOSITORY PR` fetches the current GitHub head and the PR author's discussion
+  for an existing request.
+  It never creates or authorizes a request.
+  It counts general PR comments, inline review comments and replies,
+  and submitted review bodies from the PR author.
+  It ignores other users, pending reviews, and empty review bodies.
+  It records comment IDs and hashes of exact text, not comment bodies.
+  A changed head, author identity, or author discussion advances the input revision.
+  The first refresh establishes the discussion baseline and advances the revision,
+  clearing any existing `one-round` authorization even if no comments exist.
+  Later changes also clear `one-round` authorization;
+  `pr-cycle` authorization remains active.
+  An unchanged refresh does not rewrite the state file.
+  The command reports input changes and whether authorization was cleared.
+- `authorize REPOSITORY PR --scope one-round --head HEAD_SHA --revision REVISION`
+  authorizes one review round for an existing request.
+  Give the head SHA and revision the lead inspected with `status`.
+  If either locally recorded value has changed,
+  the command reports the mismatch and leaves authorization unchanged.
   Use `--scope pr-cycle` instead to keep authorization active when the head changes.
-  The head check also applies when choosing or switching to `pr-cycle`.
+  Both checks also apply when choosing or switching to `pr-cycle`.
   Running `authorize` again can switch between the two scopes.
   It reports an error if the request does not exist.
   This command records the decision; it does not start or consume a review round.
 - `revoke REPOSITORY PR` returns an existing request to `awaiting lead authorization` without changing its head.
   It reports an error if the request does not exist.
-- `status REPOSITORY PR` prints the recorded head SHA and authorization for one request.
+- `status REPOSITORY PR` prints the recorded head SHA, input revision,
+  author discussion counts or its unavailable state, and authorization for one request.
   It reports an error if the request does not exist.
 - `list` prints every recorded request, head SHA, and authorization, sorted by repository and PR number.
   It reports that there are no requests when none have been recorded.
@@ -113,11 +134,14 @@ Without it, the CLI uses the per-user location for each platform:
 
 On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 The CLI creates the application directory when it first saves state.
+It loads schema 1 state files with revision 1 and discussion not yet observed,
+then writes schema 2 on the next successful mutation.
+Existing authorization stays in place until a refresh observes the discussion baseline.
 For a project-local state file, pass `--state-file .review-platform/state.json`.
 Git ignores the `.review-platform/` directory.
 Keep the state file private to the lead operator.
 
-`github-pr` reads public GitHub pull requests without a token.
+`github-pr` and `refresh` read public GitHub pull requests without a token.
 For private repositories or a higher GitHub API rate limit,
 set `REVIEW_PLATFORM_GITHUB_TOKEN_RO` to a token with pull request, contents,
 checks, and commit statuses read access.
@@ -127,13 +151,21 @@ On Linux, `SSL_CERT_FILE` or `SSL_CERT_DIR` can select a PEM certificate bundle 
 
 This prototype does not discover author review requests, enforce a CI gate, start OpenShell,
 consume an authorized round, or publish reviews.
-It does not track author comments.
 Review requests and lead decisions are still entered manually.
 The CLI does not yet store the head of a completed review round;
 the lead must supply that SHA to `--since` for an incremental comparison.
 Its state is local and intended for one operator process at a time.
-The `--head` check compares local state only;
-it does not verify the live GitHub head or make concurrent CLI writes safe.
+The `--head` and `--revision` checks compare local state only;
+they do not verify live GitHub inputs or make concurrent CLI writes safe.
+Each refresh reads every discussion collection twice and rechecks the PR head and author.
+It limits each collection to 1,000 items and 8 MiB of response data per pass.
+Failure leaves local state unchanged.
+The result is an observation, not a guarantee that GitHub stays unchanged afterward.
+Changes made and reverted between observations may be missed.
+The current CLI cannot identify agent reviews posted under the PR author's GitHub account.
+Until publication records trusted review IDs, `refresh` counts their submitted bodies as author discussion.
+Closed and draft PRs can be refreshed; refreshing grants no permission to run a review.
+Future round startup and publication must fetch fresh inputs again.
 Use `github-pr --diff` or `github-pr --since HEAD_SHA` to inspect the code and live head
 before recording or authorizing a request.
 GitHub may still change after that inspection.
@@ -205,7 +237,8 @@ Authorization controls whether a new review round may start;
 it does not describe whether CI is pending, an agent is running, or a draft awaits the lead's decision.
 Every round also requires green CI checks for the current PR head and lead validation of the reviewer.
 The state file stores the three values as `awaiting_lead`, `one_round`, and `pr_cycle`.
-Entering either authorized state requires the head SHA the lead inspected to match the locally recorded head.
+Entering either authorized state requires the head SHA and input revision the lead inspected
+to match the locally recorded values.
 
 | State | What it allows | How it changes |
 | --- | --- | --- |
@@ -222,10 +255,11 @@ Round progress is separate: waiting for current-head CI, waiting for reviewer va
 running the agent, and holding a private draft for the lead's decision.
 A round ends when the lead publishes the unchanged draft or rejects it.
 
-The current CLI records the authorization state and PR head only.
+The current CLI records the authorization state, PR head, input revision,
+and observed author discussion fingerprints.
 Its `status` and `list` commands do not report round progress.
-It clears one-round authorization on a recorded head change,
-but it does not yet observe author comments or start rounds that consume authorization.
+It clears one-round authorization when refreshed inputs change,
+but it does not yet start rounds that consume authorization.
 
 ## Workflow
 

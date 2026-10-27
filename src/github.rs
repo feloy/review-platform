@@ -1,6 +1,7 @@
 //! Read-only GitHub REST API adapter for PR metadata, diffs, and checks.
 
 pub mod checks;
+pub mod discussion;
 mod error;
 
 pub use error::GithubError;
@@ -9,6 +10,7 @@ use crate::{HeadSha, PrKey};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::time::Duration;
 use ureq::tls::{RootCerts, TlsConfig};
 
@@ -29,6 +31,7 @@ pub struct GithubClient {
 pub struct PullRequest {
     title: String,
     author: String,
+    author_id: NonZeroU64,
     state: PullRequestState,
     draft: bool,
     head_sha: HeadSha,
@@ -42,6 +45,10 @@ impl PullRequest {
 
     pub fn author(&self) -> &str {
         &self.author
+    }
+
+    pub fn author_id(&self) -> u64 {
+        self.author_id.get()
     }
 
     pub fn state(&self) -> PullRequestState {
@@ -90,6 +97,7 @@ struct ApiPullRequest {
 
 #[derive(Deserialize)]
 struct ApiUser {
+    id: NonZeroU64,
     login: String,
 }
 
@@ -151,6 +159,7 @@ impl GithubClient {
         Ok(PullRequest {
             title: raw.title,
             author: raw.user.login,
+            author_id: raw.user.id,
             state: raw.state,
             draft: raw.draft,
             head_sha: raw.head.sha,
@@ -338,6 +347,9 @@ fn github_status_error(
         404 => GithubError::NotFound {
             resource: description.to_owned(),
         },
+        403 => GithubError::PermissionDenied {
+            resource: description.to_owned(),
+        },
         status => GithubError::HttpStatus {
             status,
             resource: description.to_owned(),
@@ -397,7 +409,7 @@ mod tests {
             "title": "Review this change",
             "state": "open",
             "draft": false,
-            "user": {"login": "author"},
+            "user": {"id": 7, "login": "author"},
             "head": {"sha": head},
             "base": {"sha": base}
         })
@@ -425,6 +437,60 @@ mod tests {
             ),
             serde_json::json!({"total_count": total_count, "check_runs": runs}).to_string(),
         )
+    }
+
+    fn discussion_page(route: &str, page: usize, items: &[serde_json::Value]) -> MockReply {
+        json_reply(
+            format!("{route}?per_page=100&page={page}"),
+            serde_json::to_string(items).unwrap(),
+        )
+    }
+
+    fn discussion_collection_replies(route: &str, items: &[serde_json::Value]) -> Vec<MockReply> {
+        let mut replies = items
+            .chunks(100)
+            .enumerate()
+            .map(|(index, chunk)| discussion_page(route, index + 1, chunk))
+            .collect::<Vec<_>>();
+        if items.len() % 100 == 0 {
+            replies.push(discussion_page(route, items.len() / 100 + 1, &[]));
+        }
+        replies
+    }
+
+    fn discussion_pass_replies(
+        issues: &[serde_json::Value],
+        inline: &[serde_json::Value],
+        reviews: &[serde_json::Value],
+    ) -> Vec<MockReply> {
+        let mut replies =
+            discussion_collection_replies("/repos/owner/repo/issues/42/comments", issues);
+        replies.extend(discussion_collection_replies(
+            "/repos/owner/repo/pulls/42/comments",
+            inline,
+        ));
+        replies.extend(discussion_collection_replies(
+            "/repos/owner/repo/pulls/42/reviews",
+            reviews,
+        ));
+        replies
+    }
+
+    fn observation_replies(
+        issues: &[serde_json::Value],
+        inline: &[serde_json::Value],
+        reviews: &[serde_json::Value],
+    ) -> Vec<MockReply> {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+        replies.extend(discussion_pass_replies(issues, inline, reviews));
+        replies.extend(discussion_pass_replies(issues, inline, reviews));
+        replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
+        replies
+    }
+
+    fn author_comment(id: u64, body: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "user": {"id": 7}, "body": body})
     }
 
     fn serve_once(
@@ -504,7 +570,7 @@ mod tests {
             "title": "Review this change",
             "state": "open",
             "draft": false,
-            "user": {"login": "author"},
+            "user": {"id": 7, "login": "author"},
             "head": {"sha": HEAD.to_ascii_uppercase()},
             "base": {"sha": BASE}
         })
@@ -536,7 +602,7 @@ mod tests {
             "title": "Review this change",
             "state": "open",
             "draft": false,
-            "user": {"login": "author"},
+            "user": {"id": 7, "login": "author"},
             "head": {"sha": "invalid"},
             "base": {"sha": BASE}
         })
@@ -599,7 +665,7 @@ mod tests {
 
         assert!(matches!(
             github_status_error(403, &no_headers, "check runs", true),
-            GithubError::HttpStatus { status: 403, .. }
+            GithubError::PermissionDenied { .. }
         ));
     }
 
@@ -1053,5 +1119,294 @@ mod tests {
             matches!(&error, GithubError::InvalidResponse { .. }),
             "{error}"
         );
+    }
+
+    #[test]
+    fn observation_covers_author_discussion_and_ignores_other_users_and_pending_reviews() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let issues = vec![
+            author_comment(1, "hello"),
+            serde_json::json!({"id": 2, "user": {"id": 8}, "body": "outsider"}),
+            serde_json::json!({"id": 8, "user": null, "body": "deleted user"}),
+        ];
+        let inline = vec![serde_json::json!({
+            "id": 3, "user": {"id": 7}, "body": "reply", "in_reply_to_id": 99
+        })];
+        let reviews = vec![
+            serde_json::json!({"id": 4, "user": {"id": 7}, "body": "review body", "state": "COMMENTED"}),
+            serde_json::json!({"id": 5, "user": {"id": 7}, "body": "hidden", "state": "PENDING"}),
+            serde_json::json!({"id": 6, "user": {"id": 7}, "body": "", "state": "APPROVED"}),
+            serde_json::json!({"id": 7, "user": {"id": 8}, "body": "outsider", "state": "COMMENTED"}),
+            serde_json::json!({"id": 9, "user": {"id": 7}, "body": null, "state": "COMMENTED"}),
+        ];
+        let (url, handle) = serve_many(observation_replies(&issues, &inline, &reviews));
+        let observation = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .unwrap();
+        handle.join().unwrap();
+        assert_eq!(observation.key(), &key);
+        assert_eq!(observation.head_sha().as_str(), HEAD);
+        assert_eq!(observation.author_id(), 7);
+        assert_eq!(
+            observation
+                .discussion()
+                .count(crate::CommentSource::IssueComment),
+            1
+        );
+        assert_eq!(
+            observation
+                .discussion()
+                .count(crate::CommentSource::ReviewComment),
+            1
+        );
+        assert_eq!(
+            observation.discussion().count(crate::CommentSource::Review),
+            1
+        );
+        let stored = serde_json::to_string(observation.discussion()).unwrap();
+        assert!(!stored.contains("hello"));
+        assert!(!stored.contains("review body"));
+        assert!(
+            stored.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+    }
+
+    #[test]
+    fn observation_fetches_all_pages_and_detects_a_changed_second_pass() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let issues = (1..=101)
+            .map(|id| author_comment(id, &format!("comment {id}")))
+            .collect::<Vec<_>>();
+        let (url, handle) = serve_many(observation_replies(&issues, &[], &[]));
+        let observation = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .unwrap();
+        handle.join().unwrap();
+        assert_eq!(
+            observation
+                .discussion()
+                .count(crate::CommentSource::IssueComment),
+            101
+        );
+
+        let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+        replies.extend(discussion_pass_replies(
+            &[author_comment(1, "before")],
+            &[],
+            &[],
+        ));
+        replies.extend(discussion_pass_replies(
+            &[author_comment(1, "after")],
+            &[],
+            &[],
+        ));
+        let (url, handle) = serve_many(replies);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(error, GithubError::ObservationChanged));
+        assert!(!error.to_string().contains("before"));
+        assert!(!error.to_string().contains("after"));
+    }
+
+    #[test]
+    fn observation_rechecks_head_and_author_after_collection_reads() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut replies = observation_replies(&[], &[], &[]);
+        replies.last_mut().unwrap().body = pr_body(PREVIOUS_HEAD, BASE);
+        let (url, handle) = serve_many(replies);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(error, GithubError::HeadChanged { .. }));
+
+        let mut replies = observation_replies(&[], &[], &[]);
+        let mut changed: serde_json::Value = serde_json::from_str(&pr_body(HEAD, BASE)).unwrap();
+        changed["user"]["id"] = 8.into();
+        replies.last_mut().unwrap().body = changed.to_string();
+        let (url, handle) = serve_many(replies);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(error, GithubError::AuthorChanged { .. }));
+    }
+
+    #[test]
+    fn observation_rejects_duplicate_ids_and_malformed_comments() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            discussion_page(
+                "/repos/owner/repo/issues/42/comments",
+                1,
+                &[author_comment(1, "first"), author_comment(1, "second")],
+            ),
+        ];
+        let (url, handle) = serve_many(replies);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(
+            error,
+            GithubError::PaginationChanged {
+                kind: "issue comments",
+                ..
+            }
+        ));
+
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            discussion_page(
+                "/repos/owner/repo/issues/42/comments",
+                1,
+                &[serde_json::json!({"id": 1, "user": {"id": 7}, "body": null})],
+            ),
+        ];
+        let (url, handle) = serve_many(replies);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(error, GithubError::DecodeResponse { .. }));
+
+        let mut first = discussion_page(
+            "/repos/owner/repo/issues/42/comments",
+            1,
+            &[author_comment(1, "first")],
+        );
+        first.extra_headers = "Link: <https://api.github.com/next>; rel=\"next\"\r\n".to_owned();
+        let mut missing_next = discussion_page("/repos/owner/repo/issues/42/comments", 2, &[]);
+        missing_next.status = "404 Not Found".to_owned();
+        let (url, handle) = serve_many(vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            first,
+            missing_next,
+        ]);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(error, GithubError::NotFound { .. }));
+    }
+
+    #[test]
+    fn observation_reports_permissions_rate_limits_and_retrieval_failures() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        for (status, extra_headers, expected_rate_limit) in [
+            ("403 Forbidden", "", false),
+            ("403 Forbidden", "x-ratelimit-remaining: 0\r\n", true),
+        ] {
+            let mut denied = discussion_page("/repos/owner/repo/issues/42/comments", 1, &[]);
+            denied.status = status.to_owned();
+            denied.extra_headers = extra_headers.to_owned();
+            let (url, handle) = serve_many(vec![
+                json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+                denied,
+            ]);
+            let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+                .observe_pull(&key)
+                .err()
+                .unwrap();
+            handle.join().unwrap();
+            assert_eq!(
+                matches!(error, GithubError::RateLimited),
+                expected_rate_limit
+            );
+            if !expected_rate_limit {
+                assert!(matches!(error, GithubError::PermissionDenied { .. }));
+            }
+        }
+
+        let mut broken = discussion_page("/repos/owner/repo/issues/42/comments", 1, &[]);
+        broken.body = "[".to_owned();
+        let (url, handle) = serve_many(vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            broken,
+        ]);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(error, GithubError::DecodeResponse { .. }));
+    }
+
+    #[test]
+    fn observation_rejects_collections_beyond_item_and_byte_limits() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let many = (1..=1001)
+            .map(|id| author_comment(id, "x"))
+            .collect::<Vec<_>>();
+        let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+        replies.extend(discussion_collection_replies(
+            "/repos/owner/repo/issues/42/comments",
+            &many,
+        ));
+        let (url, handle) = serve_many(replies);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(
+            error,
+            GithubError::TooManyResults {
+                kind: "issue comments",
+                limit: 1000
+            }
+        ));
+
+        let oversized = author_comment(1, &"x".repeat(8 * 1024 * 1024));
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            discussion_page("/repos/owner/repo/issues/42/comments", 1, &[oversized]),
+        ];
+        let (url, handle) = serve_many(replies);
+        let error = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(matches!(
+            error,
+            GithubError::ResponseTooLarge {
+                kind: "issue comments",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("xxxx"));
+    }
+
+    #[test]
+    fn changed_other_user_comments_do_not_invalidate_an_observation() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+        replies.extend(discussion_pass_replies(
+            &[serde_json::json!({"id": 1, "user": {"id": 8}, "body": "before"})],
+            &[],
+            &[],
+        ));
+        replies.extend(discussion_pass_replies(
+            &[serde_json::json!({"id": 1, "user": {"id": 8}, "body": "after"})],
+            &[],
+            &[],
+        ));
+        replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
+        let (url, handle) = serve_many(replies);
+        let observation = GithubClient::for_api(url, Some("test-token".to_owned()))
+            .observe_pull(&key)
+            .unwrap();
+        handle.join().unwrap();
+        assert!(observation.discussion().comments().is_empty());
     }
 }
