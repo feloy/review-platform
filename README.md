@@ -108,8 +108,9 @@ including when loaded from the JSON state file.
   preparation verifies that the archive is a regular file with the configured SHA-256.
   A missing file or checksum mismatch returns an error and saves no new model choice.
   Preparing and validating do not start a round or consume one-round authorization.
-  A blocked preparation reports its requirement without starting work;
-  GitHub or configuration failures return an error.
+  Without `--model`, a blocked preparation reports its requirement without starting work.
+  With `--model`, blocked readiness returns an error and records no new model choice.
+  GitHub or configuration failures also return an error.
 - `status REPOSITORY PR` prints the recorded head SHA, input revision,
   author discussion counts or its unavailable state, authorization,
   and any last validated model choice and resolved agent for one request.
