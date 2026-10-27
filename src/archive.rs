@@ -29,18 +29,22 @@ pub enum ArchiveError {
 #[must_use = "pass this evidence to model validation"]
 pub struct VerifiedArchive<'a> {
     archive: &'a VmArchive,
+    actual_sha256: String,
 }
 
 impl VerifiedArchive<'_> {
     pub fn matches(&self, archive: &VmArchive) -> bool {
-        self.archive == archive
+        self.archive == archive && self.actual_sha256 == archive.checksum().as_str()
     }
 }
 
 #[cfg(test)]
 impl<'a> VerifiedArchive<'a> {
     pub(crate) fn for_test(archive: &'a VmArchive) -> Self {
-        Self { archive }
+        Self {
+            archive,
+            actual_sha256: archive.checksum().as_str().to_owned(),
+        }
     }
 }
 
@@ -91,7 +95,10 @@ pub fn verify_archive(archive: &VmArchive) -> Result<VerifiedArchive<'_>, Archiv
             actual,
         });
     }
-    Ok(VerifiedArchive { archive })
+    Ok(VerifiedArchive {
+        archive,
+        actual_sha256: actual,
+    })
 }
 
 fn open_no_follow(path: &Path) -> std::io::Result<File> {
@@ -124,7 +131,14 @@ mod tests {
         fs::write(&path, b"archive bytes").unwrap();
         let checksum = ArchiveHash::new(format!("{:x}", Sha256::digest(b"archive bytes"))).unwrap();
         let archive = VmArchive::new(path.clone(), checksum).unwrap();
-        assert!(verify_archive(&archive).unwrap().matches(&archive));
+        let mut verified = verify_archive(&archive).unwrap();
+        assert_eq!(
+            verified.actual_sha256,
+            format!("{:x}", Sha256::digest(b"archive bytes"))
+        );
+        assert!(verified.matches(&archive));
+        verified.actual_sha256 = "0".repeat(64);
+        assert!(!verified.matches(&archive));
         fs::write(&path, b"changed bytes").unwrap();
         assert!(matches!(
             verify_archive(&archive),
