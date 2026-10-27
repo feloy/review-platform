@@ -1,13 +1,31 @@
-//! Review requests and their authorization transitions.
+//! Review requests, authorization, and model-validation transitions.
 
+use crate::archive::VerifiedArchive;
+use crate::config::{AgentId, ModelId, PromptHash, ResolvedReviewModel, VmArchive};
 use crate::model::{
     Authorization, AuthorizationScope, HeadSha, InputRevision, ObservedDiscussion, PrKey,
     StateError,
 };
-use serde::{Deserialize, Deserializer, Serialize, de};
+use crate::preparation::{Preparation, Readiness};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
+use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 5;
+
+#[derive(Debug, Error)]
+pub enum ModelValidationError {
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error("preparation no longer matches the inspected inputs or authorization")]
+    StalePreparation,
+    #[error("model validation is blocked: {0}")]
+    Blocked(Readiness),
+    #[error("selected model {0} was not resolved in this preparation")]
+    ModelNotPrepared(ModelId),
+    #[error("the selected model's VM archive was not verified")]
+    ArchiveNotVerified,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordOutcome {
@@ -36,13 +54,58 @@ pub struct ReviewRequest {
     revision: InputRevision,
     #[serde(deserialize_with = "deserialize_discussion")]
     discussion: Option<ObservedDiscussion>,
+    #[serde(deserialize_with = "deserialize_model_validation")]
+    model_validation: Option<ModelValidation>,
 }
 
-// Require the field in schema 2 while allowing null to mean not yet observed.
+// Require the field in current state while allowing null to mean not yet observed.
 fn deserialize_discussion<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<ObservedDiscussion>, D::Error> {
     Option::<ObservedDiscussion>::deserialize(deserializer)
+}
+
+fn deserialize_model_validation<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ModelValidation>, D::Error> {
+    Option::<ModelValidation>::deserialize(deserializer)
+}
+
+/// The lead's selected model and resolved agent, bound to inspected inputs and configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelValidation {
+    model: ModelId,
+    agent: AgentId,
+    head_sha: HeadSha,
+    revision: InputRevision,
+    prompt_sha256: PromptHash,
+    vm_archive: VmArchive,
+}
+
+impl ModelValidation {
+    pub fn model(&self) -> &ModelId {
+        &self.model
+    }
+
+    pub fn agent(&self) -> &AgentId {
+        &self.agent
+    }
+
+    pub fn head_sha(&self) -> &HeadSha {
+        &self.head_sha
+    }
+
+    pub fn revision(&self) -> InputRevision {
+        self.revision
+    }
+
+    pub fn matches(&self, choice: &ResolvedReviewModel<'_>) -> bool {
+        self.model == *choice.model().id()
+            && self.agent == *choice.agent().id()
+            && self.prompt_sha256 == *choice.agent().prompt_hash()
+            && self.vm_archive == *choice.archive()
+    }
 }
 
 impl ReviewRequest {
@@ -65,63 +128,40 @@ impl ReviewRequest {
     pub fn discussion(&self) -> Option<&ObservedDiscussion> {
         self.discussion.as_ref()
     }
+
+    pub fn model_validation(&self) -> Option<&ModelValidation> {
+        self.model_validation.as_ref()
+    }
+
+    pub fn ensure_inspected(
+        &self,
+        inspected_head: &HeadSha,
+        inspected_revision: InputRevision,
+    ) -> Result<(), StateError> {
+        if &self.head_sha != inspected_head {
+            return Err(StateError::HeadMismatch {
+                inspected: inspected_head.clone(),
+                recorded: self.head_sha.clone(),
+            });
+        }
+        if self.revision != inspected_revision {
+            return Err(StateError::RevisionMismatch {
+                inspected: inspected_revision,
+                recorded: self.revision,
+            });
+        }
+        if self.discussion.is_none() {
+            return Err(StateError::DiscussionNotObserved(self.key.clone()));
+        }
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     schema_version: u32,
     requests: Vec<ReviewRequest>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawState {
-    schema_version: u32,
-    requests: Vec<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyReviewRequest {
-    key: PrKey,
-    head_sha: HeadSha,
-    authorization: Authorization,
-}
-
-impl<'de> Deserialize<'de> for State {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = RawState::deserialize(deserializer)?;
-        let requests = match raw.schema_version {
-            1 => raw
-                .requests
-                .into_iter()
-                .map(|value| {
-                    let old: LegacyReviewRequest =
-                        serde_json::from_value(value).map_err(de::Error::custom)?;
-                    Ok(ReviewRequest {
-                        key: old.key,
-                        head_sha: old.head_sha,
-                        authorization: old.authorization,
-                        revision: InputRevision::new(1).map_err(de::Error::custom)?,
-                        discussion: None,
-                    })
-                })
-                .collect::<Result<Vec<_>, D::Error>>()?,
-            2 => raw
-                .requests
-                .into_iter()
-                .map(|value| serde_json::from_value(value).map_err(de::Error::custom))
-                .collect::<Result<Vec<_>, D::Error>>()?,
-            other => return Err(de::Error::custom(StateError::UnsupportedSchema(other))),
-        };
-        Ok(Self {
-            schema_version: SCHEMA_VERSION,
-            requests,
-        })
-    }
 }
 
 impl Default for State {
@@ -142,6 +182,29 @@ impl State {
         for request in &self.requests {
             if !seen.insert(&request.key) {
                 return Err(StateError::DuplicateRequest(request.key.clone()));
+            }
+            if request.authorization == Authorization::OneRound && request.discussion.is_none() {
+                return Err(StateError::DiscussionNotObserved(request.key.clone()));
+            }
+            if let Some(validation) = &request.model_validation {
+                if request.head_sha != validation.head_sha {
+                    return Err(StateError::HeadMismatch {
+                        inspected: validation.head_sha.clone(),
+                        recorded: request.head_sha.clone(),
+                    });
+                }
+                if request.revision != validation.revision {
+                    return Err(StateError::RevisionMismatch {
+                        inspected: validation.revision,
+                        recorded: request.revision,
+                    });
+                }
+                if request.discussion.is_none() {
+                    return Err(StateError::DiscussionNotObserved(request.key.clone()));
+                }
+                if request.authorization == Authorization::AwaitingLead {
+                    return Err(StateError::AwaitingAuthorization(request.key.clone()));
+                }
             }
         }
         Ok(())
@@ -168,6 +231,7 @@ impl State {
             request.head_sha = head_sha;
             request.revision = next_revision;
             request.discussion = None;
+            request.model_validation = None;
             return Ok(match request.authorization {
                 Authorization::OneRound => {
                     request.authorization = Authorization::AwaitingLead;
@@ -184,6 +248,7 @@ impl State {
             authorization: Authorization::AwaitingLead,
             revision: InputRevision::new(1)?,
             discussion: None,
+            model_validation: None,
         });
         Ok(RecordOutcome::New)
     }
@@ -205,6 +270,7 @@ impl State {
         request.head_sha = head_sha.clone();
         request.discussion = Some(discussion.clone());
         request.revision = next_revision;
+        request.model_validation = None;
         if authorization_cleared {
             request.authorization = Authorization::AwaitingLead;
         }
@@ -223,24 +289,53 @@ impl State {
         scope: AuthorizationScope,
     ) -> Result<bool, StateError> {
         let request = self.request_mut(key)?;
-        if &request.head_sha != inspected_head {
-            return Err(StateError::HeadMismatch {
-                inspected: inspected_head.clone(),
-                recorded: request.head_sha.clone(),
-            });
-        }
-        if request.revision != inspected_revision {
-            return Err(StateError::RevisionMismatch {
-                inspected: inspected_revision,
-                recorded: request.revision,
-            });
-        }
-        if request.discussion.is_none() {
-            return Err(StateError::DiscussionNotObserved(key.clone()));
-        }
+        request.ensure_inspected(inspected_head, inspected_revision)?;
         let authorization = Authorization::from(scope);
         let changed = request.authorization != authorization;
         request.authorization = authorization;
+        if changed {
+            request.model_validation = None;
+        }
+        Ok(changed)
+    }
+
+    pub fn validate_model(
+        &mut self,
+        preparation: &Preparation,
+        inspected_head: &HeadSha,
+        inspected_revision: InputRevision,
+        choice: &ResolvedReviewModel<'_>,
+        archive: &VerifiedArchive<'_>,
+    ) -> Result<bool, ModelValidationError> {
+        let request = self.request_mut(preparation.key())?;
+        request.ensure_inspected(inspected_head, inspected_revision)?;
+        if preparation.head_sha() != inspected_head
+            || preparation.revision() != inspected_revision
+            || preparation.authorization() != request.authorization
+        {
+            return Err(ModelValidationError::StalePreparation);
+        }
+        if !preparation.readiness().permits_validation() {
+            return Err(ModelValidationError::Blocked(preparation.readiness()));
+        }
+        if !preparation.allows_choice(choice) {
+            return Err(ModelValidationError::ModelNotPrepared(
+                choice.model().id().clone(),
+            ));
+        }
+        if !archive.matches(choice.archive()) {
+            return Err(ModelValidationError::ArchiveNotVerified);
+        }
+        let validation = ModelValidation {
+            model: choice.model().id().clone(),
+            agent: choice.agent().id().clone(),
+            head_sha: inspected_head.clone(),
+            revision: inspected_revision,
+            prompt_sha256: choice.agent().prompt_hash().clone(),
+            vm_archive: choice.archive().clone(),
+        };
+        let changed = request.model_validation.as_ref() != Some(&validation);
+        request.model_validation = Some(validation);
         Ok(changed)
     }
 
@@ -248,7 +343,8 @@ impl State {
         let request = self.request_mut(key)?;
         let changed = request.authorization != Authorization::AwaitingLead;
         request.authorization = Authorization::AwaitingLead;
-        Ok(changed)
+        let validation_cleared = request.model_validation.take().is_some();
+        Ok(changed || validation_cleared)
     }
 
     fn request_mut(&mut self, key: &PrKey) -> Result<&mut ReviewRequest, StateError> {
@@ -262,6 +358,8 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ReviewConfig;
+    use crate::preparation::{CiObservation, CiState, PullAvailability, PullObservation, prepare};
     use crate::{CommentFingerprint, CommentHash, CommentSource};
     use std::num::NonZeroU64;
 
@@ -420,16 +518,16 @@ mod tests {
             ),
         ] {
             let invalid_state = serde_json::json!({
-                "schema_version": 1,
-                "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead"}]
+                "schema_version": 5,
+                "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}]
             });
             let error = serde_json::from_value::<State>(invalid_state).unwrap_err();
             assert!(error.to_string().contains(expected_error), "{error}");
         }
         let invalid_head = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 5,
             "requests": [
-                {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead"}
+                {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}
             ]
         });
         let error = serde_json::from_value::<State>(invalid_head).unwrap_err();
@@ -473,12 +571,15 @@ mod tests {
     #[test]
     fn state_json_keeps_its_shape_and_normalizes_identifiers() {
         let raw = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 5,
             "requests": [
                 {
                     "key": {"repository": "Owner/Repo", "number": 42},
                     "head_sha": HEAD_A.to_ascii_uppercase(),
-                    "authorization": "awaiting_lead"
+                    "authorization": "awaiting_lead",
+                    "revision": 1,
+                    "discussion": null,
+                    "model_validation": null
                 }
             ]
         });
@@ -491,30 +592,26 @@ mod tests {
         assert_eq!(serialized["requests"][0]["key"]["number"], 42);
         assert_eq!(serialized["requests"][0]["head_sha"], HEAD_A);
         assert_eq!(serialized["requests"][0]["authorization"], "awaiting_lead");
-        assert_eq!(serialized["schema_version"], 2);
+        assert_eq!(serialized["schema_version"], 5);
         assert_eq!(serialized["requests"][0]["revision"], 1);
         assert!(serialized["requests"][0]["discussion"].is_null());
+        assert!(serialized["requests"][0]["model_validation"].is_null());
     }
 
     #[test]
     fn corrupt_or_future_state_is_rejected() {
         let duplicate = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 5,
             "requests": [
-                {"key": {"repository": "owner/repo", "number": 42}, "head_sha": HEAD_A, "authorization": "one_round"},
-                {"key": {"repository": "Owner/Repo", "number": 42}, "head_sha": HEAD_B, "authorization": "pr_cycle"}
+                {"key": {"repository": "owner/repo", "number": 42}, "head_sha": HEAD_A, "authorization": "one_round", "revision": 1, "discussion": {"author_id": 7, "comments": []}, "model_validation": null},
+                {"key": {"repository": "Owner/Repo", "number": 42}, "head_sha": HEAD_B, "authorization": "pr_cycle", "revision": 1, "discussion": null, "model_validation": null}
             ]
         });
         let state: State = serde_json::from_value(duplicate).unwrap();
         assert_eq!(state.validate(), Err(StateError::DuplicateRequest(key())));
 
-        let future =
-            serde_json::from_str::<State>(r#"{"schema_version":3,"requests":[]}"#).unwrap_err();
-        assert!(
-            future
-                .to_string()
-                .contains("unsupported state schema version: 3")
-        );
+        let future: State = serde_json::from_str(r#"{"schema_version":6,"requests":[]}"#).unwrap();
+        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(6)));
     }
 
     #[test]
@@ -613,44 +710,22 @@ mod tests {
     }
 
     #[test]
-    fn first_refresh_establishes_baseline_and_old_revision_cannot_authorize() {
-        let mut state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
+    fn current_state_rejects_one_round_authorization_without_observed_discussion() {
+        let state: State = serde_json::from_value(serde_json::json!({
+            "schema_version": 5,
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
                 "head_sha": HEAD_A,
-                "authorization": "one_round"
+                "authorization": "one_round",
+                "revision": 1,
+                "discussion": null,
+                "model_validation": null
             }]
         }))
         .unwrap();
-        let empty = discussion(&[]);
         assert_eq!(
-            state.refresh(&key(), &head(HEAD_A), &empty).unwrap(),
-            RefreshOutcome::Updated {
-                head_changed: false,
-                discussion_changed: true,
-                authorization_cleared: true,
-            }
-        );
-        assert_eq!(
-            state.get(&key()).unwrap().authorization(),
-            Authorization::AwaitingLead
-        );
-        assert_eq!(
-            state.authorize(
-                &key(),
-                &head(HEAD_A),
-                revision(1),
-                AuthorizationScope::PrCycle
-            ),
-            Err(StateError::RevisionMismatch {
-                inspected: revision(1),
-                recorded: revision(2),
-            })
-        );
-        assert_eq!(
-            state.get(&key()).unwrap().authorization(),
-            Authorization::AwaitingLead
+            state.validate(),
+            Err(StateError::DiscussionNotObserved(key()))
         );
     }
 
@@ -774,43 +849,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_authorization_survives_load_until_first_refresh() {
-        for (old_authorization, expected_after_refresh) in [
-            ("one_round", Authorization::AwaitingLead),
-            ("pr_cycle", Authorization::PrCycle),
-        ] {
-            let raw = serde_json::json!({
-                "schema_version": 1,
-                "requests": [{
-                    "key": {"repository": "owner/repo", "number": 42},
-                    "head_sha": HEAD_A,
-                    "authorization": old_authorization
-                }]
-            });
-            let mut state: State = serde_json::from_value(raw).unwrap();
-            assert_eq!(state.get(&key()).unwrap().revision(), revision(1));
-            assert!(state.get(&key()).unwrap().discussion().is_none());
-            state
-                .refresh(&key(), &head(HEAD_A), &discussion(&[]))
-                .unwrap();
-            assert_eq!(
-                state.get(&key()).unwrap().authorization(),
-                expected_after_refresh
-            );
-            assert_eq!(serde_json::to_value(state).unwrap()["schema_version"], 2);
-        }
-    }
-
-    #[test]
-    fn malformed_v2_observations_and_revision_overflow_are_rejected() {
+    fn malformed_observations_and_revision_overflow_are_rejected() {
         let base = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 5,
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
                 "head_sha": HEAD_A,
                 "authorization": "one_round",
                 "revision": 1,
-                "discussion": {"author_id": 7, "comments": []}
+                "discussion": {"author_id": 7, "comments": []},
+                "model_validation": null
             }]
         });
         for (field, replacement) in [
@@ -857,5 +905,213 @@ mod tests {
             state.get(&key()).unwrap().authorization(),
             Authorization::OneRound
         );
+    }
+
+    #[test]
+    fn model_validation_tracks_exact_inputs_and_is_cleared_by_changes() {
+        let raw = serde_json::json!({
+            "schema_version":2,
+            "models":[{"id":"model-alpha", "coauthors":[]}],
+            "agents":[{"id":"claude", "models":["model-alpha"], "prompt":"Review."}],
+            "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+                "agent":"claude",
+                "vm_archive":{
+                    "path":std::env::temp_dir().join("reviewer.tar").to_str().unwrap(),
+                    "sha256":"a".repeat(64)
+                }
+            }]}]
+        });
+        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let review_models = config.review_models_for(&key()).unwrap();
+        let current_head = head(HEAD_A);
+        let verified = VerifiedArchive::for_test(review_models[0].archive());
+        let mut state = State::default();
+        state.record_request(key(), current_head.clone()).unwrap();
+        state
+            .refresh(&key(), &current_head, &discussion(&[]))
+            .unwrap();
+        let awaiting = prepare(
+            state.get(&key()).unwrap(),
+            PullObservation::new(&current_head, PullAvailability::Open),
+            CiObservation::new(&current_head, CiState::Green),
+            &review_models,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            state.validate_model(
+                &awaiting,
+                &current_head,
+                revision(2),
+                &review_models[0],
+                &verified,
+            ),
+            Err(ModelValidationError::Blocked(
+                Readiness::AwaitingAuthorization
+            ))
+        ));
+        state
+            .authorize(
+                &key(),
+                &current_head,
+                revision(2),
+                AuthorizationScope::PrCycle,
+            )
+            .unwrap();
+        assert!(matches!(
+            state.validate_model(
+                &awaiting,
+                &current_head,
+                revision(2),
+                &review_models[0],
+                &verified,
+            ),
+            Err(ModelValidationError::StalePreparation)
+        ));
+        let prepared = prepare(
+            state.get(&key()).unwrap(),
+            PullObservation::new(&current_head, PullAvailability::Open),
+            CiObservation::new(&current_head, CiState::Green),
+            &review_models,
+            &HashSet::new(),
+        )
+        .unwrap();
+        let pending = prepare(
+            state.get(&key()).unwrap(),
+            PullObservation::new(&current_head, PullAvailability::Open),
+            CiObservation::new(&current_head, CiState::Pending),
+            &review_models,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            state.validate_model(
+                &pending,
+                &current_head,
+                revision(2),
+                &review_models[0],
+                &verified,
+            ),
+            Err(ModelValidationError::Blocked(Readiness::ChecksPending))
+        ));
+        let other_archive = VmArchive::new(
+            std::env::temp_dir().join("different.tar"),
+            crate::config::ArchiveHash::new("a".repeat(64)).unwrap(),
+        )
+        .unwrap();
+        let wrong_verification = VerifiedArchive::for_test(&other_archive);
+        assert!(matches!(
+            state.validate_model(
+                &prepared,
+                &current_head,
+                revision(2),
+                &review_models[0],
+                &wrong_verification,
+            ),
+            Err(ModelValidationError::ArchiveNotVerified)
+        ));
+        let mut changed_config = raw.clone();
+        changed_config["agents"][0]["prompt"] = "Review differently.".into();
+        let changed_config =
+            ReviewConfig::from_json(&serde_json::to_vec(&changed_config).unwrap()).unwrap();
+        let changed_models = changed_config.review_models_for(&key()).unwrap();
+        let changed_verification = VerifiedArchive::for_test(changed_models[0].archive());
+        assert!(matches!(
+            state.validate_model(
+                &prepared,
+                &current_head,
+                revision(2),
+                &changed_models[0],
+                &changed_verification,
+            ),
+            Err(ModelValidationError::ModelNotPrepared(_))
+        ));
+        assert!(state.get(&key()).unwrap().model_validation().is_none());
+        assert!(
+            state
+                .validate_model(
+                    &prepared,
+                    &current_head,
+                    revision(2),
+                    &review_models[0],
+                    &verified,
+                )
+                .unwrap()
+        );
+        assert!(
+            !state
+                .validate_model(
+                    &prepared,
+                    &current_head,
+                    revision(2),
+                    &review_models[0],
+                    &verified,
+                )
+                .unwrap()
+        );
+        assert!(matches!(
+            state.validate_model(
+                &prepared,
+                &current_head,
+                revision(1),
+                &review_models[0],
+                &verified,
+            ),
+            Err(ModelValidationError::State(
+                StateError::RevisionMismatch { .. }
+            ))
+        ));
+        let mut malformed = serde_json::to_value(&state).unwrap();
+        malformed["requests"][0]["model_validation"]["head_sha"] = HEAD_B.into();
+        let malformed: State = serde_json::from_value(malformed).unwrap();
+        assert!(matches!(
+            malformed.validate(),
+            Err(StateError::HeadMismatch { .. })
+        ));
+        let validated = serde_json::to_value(&state).unwrap();
+        for (field, value) in [
+            ("model", serde_json::json!("INVALID MODEL")),
+            ("agent", serde_json::json!("Invalid Agent")),
+            ("prompt_sha256", serde_json::json!("bad")),
+        ] {
+            let mut malformed = validated.clone();
+            malformed["requests"][0]["model_validation"][field] = value;
+            assert!(serde_json::from_value::<State>(malformed).is_err());
+        }
+        let mut malformed = validated;
+        malformed["requests"][0]["model_validation"]["vm_archive"]["path"] = "relative.tar".into();
+        assert!(serde_json::from_value::<State>(malformed).is_err());
+
+        state
+            .refresh(
+                &key(),
+                &head(HEAD_A),
+                &discussion(&[(CommentSource::IssueComment, 1, 1)]),
+            )
+            .unwrap();
+        assert!(state.get(&key()).unwrap().model_validation().is_none());
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::PrCycle
+        );
+        let prepared = prepare(
+            state.get(&key()).unwrap(),
+            PullObservation::new(&current_head, PullAvailability::Open),
+            CiObservation::new(&current_head, CiState::Green),
+            &review_models,
+            &HashSet::new(),
+        )
+        .unwrap();
+        state
+            .validate_model(
+                &prepared,
+                &current_head,
+                revision(3),
+                &review_models[0],
+                &verified,
+            )
+            .unwrap();
+        state.revoke(&key()).unwrap();
+        assert!(state.get(&key()).unwrap().model_validation().is_none());
     }
 }

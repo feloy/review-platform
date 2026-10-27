@@ -1,11 +1,13 @@
 //! Read-only GitHub REST API adapter for PR metadata, diffs, and checks.
 
 pub mod checks;
+pub mod commits;
 pub mod discussion;
 mod error;
 
 pub use error::GithubError;
 
+use crate::preparation::{PullAvailability, PullObservation};
 use crate::{HeadSha, PrKey};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -61,6 +63,14 @@ impl PullRequest {
 
     pub fn head_sha(&self) -> &HeadSha {
         &self.head_sha
+    }
+
+    pub fn preparation_observation(&self) -> PullObservation<'_> {
+        let availability = match self.state {
+            PullRequestState::Open => PullAvailability::Open,
+            PullRequestState::Closed => PullAvailability::Closed,
+        };
+        PullObservation::new(&self.head_sha, availability)
     }
 
     pub fn base_sha(&self) -> &HeadSha {
@@ -1408,5 +1418,68 @@ mod tests {
             .unwrap();
         handle.join().unwrap();
         assert!(observation.discussion().comments().is_empty());
+    }
+
+    #[test]
+    fn coauthor_hints_are_bound_to_the_pr_head_and_rechecked() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let commits_route = "/repos/owner/repo/pulls/42/commits?per_page=100&page=1";
+        let commit = serde_json::json!({
+            "sha": HEAD,
+            "commit": {"message": "Change\n\nCo-authored-by: Claude <Claude@Example.com>"}
+        });
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            json_reply(
+                commits_route.to_owned(),
+                serde_json::json!([commit]).to_string(),
+            ),
+            json_reply(
+                commits_route.to_owned(),
+                serde_json::json!([commit]).to_string(),
+            ),
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+        ];
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let evidence = client.coauthors_for_pull(&key, &pull).unwrap();
+        handle.join().unwrap();
+        assert_eq!(evidence.head_sha(), pull.head_sha());
+        assert_eq!(evidence.commit_count(), 1);
+        assert!(evidence.identities().contains(
+            &crate::config::CoauthorIdentity::new("Claude", "claude@example.com").unwrap()
+        ));
+    }
+
+    #[test]
+    fn changed_commit_list_cannot_propose_a_model() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let commits_route = "/repos/owner/repo/pulls/42/commits?per_page=100&page=1";
+        let first = serde_json::json!([{
+            "sha": HEAD,
+            "commit": {"message": "Change\n\nCo-authored-by: Claude <claude@example.com>"}
+        }]);
+        let second = serde_json::json!([{
+            "sha": HEAD,
+            "commit": {"message": "Different message"}
+        }]);
+        let replies = vec![
+            json_reply(pull_route(&key), pr_body(HEAD, BASE)),
+            json_reply(commits_route.to_owned(), first.to_string()),
+            json_reply(commits_route.to_owned(), second.to_string()),
+        ];
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let error = client.coauthors_for_pull(&key, &pull).err().unwrap();
+        handle.join().unwrap();
+        assert!(matches!(
+            error,
+            GithubError::PaginationChanged {
+                kind: "PR commits",
+                ..
+            }
+        ));
     }
 }

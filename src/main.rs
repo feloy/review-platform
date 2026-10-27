@@ -1,13 +1,17 @@
-//! Operator CLI for local authorization and read-only GitHub PR inspection.
+//! Operator CLI for local authorization, PR inspection, and round preparation.
 
 mod storage;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use review_platform::{
     Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, PrKey, RecordOutcome,
-    RefreshOutcome, StateError, github,
+    RefreshOutcome, StateError, archive,
+    config::{ConfigError, ModelId, ReviewConfig},
+    github::{self, GithubError},
+    preparation,
 };
+use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -15,12 +19,16 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Local operator prototype for Review Platform",
-    long_about = "Record PR review requests and lead authorization locally, and inspect live GitHub pull requests. CI and OpenShell are not connected yet."
+    long_about = "Record PR review requests and lead authorization locally, inspect live GitHub pull requests, and prepare review rounds. OpenShell execution is not connected yet."
 )]
 struct Cli {
     /// Override the per-user state file; keep this private to the lead operator.
     #[arg(long, global = true)]
     state_file: Option<PathBuf>,
+
+    /// Override the platform review configuration file.
+    #[arg(long, global = true)]
+    config_file: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -53,8 +61,24 @@ enum Command {
     Revoke { repository: String, pr: u64 },
     /// Show a recorded PR's current head and authorization.
     Status { repository: String, pr: u64 },
+    /// Refresh inputs, check exact-head CI, and propose or validate a review model.
+    PrepareReview {
+        repository: String,
+        pr: u64,
+        /// Record the lead's model choice; requires --head and --revision.
+        #[arg(long)]
+        model: Option<String>,
+        /// Head SHA the lead inspected with prepare-review or status.
+        #[arg(long, value_name = "HEAD_SHA")]
+        head: Option<String>,
+        /// Input revision the lead inspected with prepare-review or status.
+        #[arg(long, value_name = "REVISION")]
+        revision: Option<u64>,
+    },
     /// List locally recorded review requests.
     List,
+    /// Print the absolute path of the config file without reading it.
+    ConfigPath,
     /// Show a live GitHub PR, optionally including its code changes.
     GithubPr {
         repository: String,
@@ -101,6 +125,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     let Cli {
         state_file,
+        config_file,
         command,
     } = cli;
     match command {
@@ -213,7 +238,29 @@ fn run(cli: Cli) -> Result<()> {
                 None => println!("  author discussion: not yet observed"),
             }
             println!("  state: {}", request.authorization());
+            if let Some(validation) = request.model_validation() {
+                println!(
+                    "  model choice: {} via {} (recheck configuration with prepare-review)",
+                    validation.model(),
+                    validation.agent()
+                );
+            }
         }
+        Command::PrepareReview {
+            repository,
+            pr,
+            model,
+            head,
+            revision,
+        } => run_prepare(
+            state_file,
+            config_file,
+            repository,
+            pr,
+            model,
+            head,
+            revision,
+        )?,
         Command::List => {
             let state_file = storage::resolve_path(state_file)?;
             let state = storage::load(&state_file)?;
@@ -313,7 +360,182 @@ fn run(cli: Cli) -> Result<()> {
             let state_file = storage::resolve_path(state_file)?;
             println!("{}", state_file.display());
         }
+        Command::ConfigPath => {
+            let config_file = storage::resolve_config_path(config_file)?;
+            println!("{}", config_file.display());
+        }
     }
+    Ok(())
+}
+
+fn run_prepare(
+    state_override: Option<PathBuf>,
+    config_override: Option<PathBuf>,
+    repository: String,
+    pr: u64,
+    model: Option<String>,
+    head: Option<String>,
+    revision: Option<u64>,
+) -> Result<()> {
+    let selection = match (model, head, revision) {
+        (None, None, None) => None,
+        (Some(model), Some(head), Some(revision)) => Some((
+            ModelId::new(model)?,
+            HeadSha::new(head)?,
+            InputRevision::new(revision)?,
+        )),
+        _ => anyhow::bail!("--model, --head, and --revision must be supplied together"),
+    };
+    let key = PrKey::new(repository, pr)?;
+    let state_file = storage::resolve_path(state_override)?;
+    let config_file = storage::resolve_config_path(config_override)?;
+    let config_bytes = fs::read(&config_file)
+        .with_context(|| format!("reading review configuration {}", config_file.display()))?;
+    let config = ReviewConfig::from_json(&config_bytes)
+        .with_context(|| format!("validating review configuration {}", config_file.display()))?;
+    let review_models = config.review_models_for(&key)?;
+    let mut state = storage::load(&state_file)?;
+    if state.get(&key).is_none() {
+        return Err(StateError::RequestNotFound(key).into());
+    }
+    let client = github::GithubClient::new()?;
+    let observation = client.observe_pull(&key)?;
+    let outcome = state.refresh(
+        observation.key(),
+        observation.head_sha(),
+        observation.discussion(),
+    )?;
+    if outcome != RefreshOutcome::Unchanged {
+        storage::save(&state_file, &state)?;
+    }
+    if let Some((_, inspected_head, inspected_revision)) = &selection {
+        state
+            .get(&key)
+            .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
+            .ensure_inspected(inspected_head, *inspected_revision)?;
+    }
+    let pull = client.pull_request(&key)?;
+    if pull.head_sha() != observation.head_sha() {
+        return Err(GithubError::HeadChanged {
+            key,
+            expected: observation.head_sha().clone(),
+            actual: pull.head_sha().clone(),
+        }
+        .into());
+    }
+    if pull.author_id() != observation.author_id() {
+        return Err(GithubError::AuthorChanged { key }.into());
+    }
+    let checks = client.checks_for_pull(&key, &pull)?;
+    let coauthors = client.coauthors_for_pull(&key, &pull)?;
+    let final_observation = client.observe_pull(&key)?;
+    if final_observation.head_sha() != observation.head_sha()
+        || final_observation.discussion() != observation.discussion()
+    {
+        return Err(GithubError::ObservationChanged.into());
+    }
+    let final_pull = client.pull_request(&key)?;
+    if final_pull.head_sha() != pull.head_sha() {
+        return Err(GithubError::HeadChanged {
+            key,
+            expected: pull.head_sha().clone(),
+            actual: final_pull.head_sha().clone(),
+        }
+        .into());
+    }
+    if final_pull.author_id() != pull.author_id() {
+        return Err(GithubError::AuthorChanged { key }.into());
+    }
+    let pull_observation = final_pull.preparation_observation();
+    let ci_observation = checks.preparation_observation();
+    let request = state
+        .get(&key)
+        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+    let mut preparation = preparation::prepare(
+        request,
+        pull_observation,
+        ci_observation,
+        &review_models,
+        coauthors.identities(),
+    )?;
+    let mut verified_archive = None;
+    if let Some((model_id, inspected_head, inspected_revision)) = &selection {
+        let chosen = review_models
+            .iter()
+            .find(|candidate| candidate.model().id() == model_id)
+            .ok_or_else(|| ConfigError::ModelNotConfigured {
+                repository: key.repository().to_owned(),
+                model: model_id.clone(),
+            })?;
+        if preparation.readiness().permits_validation() {
+            let verified = archive::verify_archive(chosen.archive())?;
+            if state.validate_model(
+                &preparation,
+                inspected_head,
+                *inspected_revision,
+                chosen,
+                &verified,
+            )? {
+                storage::save(&state_file, &state)?;
+            }
+            verified_archive = Some(verified);
+            let request = state
+                .get(&key)
+                .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+            preparation = preparation::prepare(
+                request,
+                pull_observation,
+                ci_observation,
+                &review_models,
+                coauthors.identities(),
+            )?;
+        }
+    }
+    let request = state
+        .get(&key)
+        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+    let resolved = selection
+        .as_ref()
+        .map(|(model, _, _)| model)
+        .or_else(|| preparation.validated_model())
+        .and_then(|id| {
+            review_models
+                .iter()
+                .find(|candidate| candidate.model().id() == id)
+        })
+        .or_else(|| {
+            review_models
+                .iter()
+                .find(|candidate| candidate.model().id() == preparation.proposed_model())
+        })
+        .context("configuration contains no review model")?;
+    if preparation.readiness().permits_validation()
+        && !verified_archive
+            .as_ref()
+            .is_some_and(|verified| verified.matches(resolved.archive()))
+    {
+        let _verified = archive::verify_archive(resolved.archive())?;
+    }
+    println!("{key}");
+    println!("  head: {}", request.head_sha());
+    println!("  revision: {}", request.revision());
+    println!("  authorization: {}", request.authorization());
+    println!("  checks: {}", checks.summary());
+    println!("  proposed model: {}", preparation.proposed_model());
+    if preparation.proposal_matches_coauthor() {
+        println!("  proposal matches a PR co-author hint; no different model is configured");
+    }
+    if let Some(validated) = preparation.validated_model() {
+        println!("  validated model: {validated}");
+    }
+    if let Some((requested, _, _)) = &selection {
+        println!("  requested model: {requested}");
+    }
+    println!("  resolved agent: {}", resolved.agent().id());
+    println!("  prompt SHA-256: {}", resolved.agent().prompt_hash());
+    println!("  VM archive: {}", resolved.archive().path().display());
+    println!("  archive SHA-256: {}", resolved.archive().checksum());
+    println!("  readiness: {}", preparation.readiness());
     Ok(())
 }
 

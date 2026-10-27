@@ -46,6 +46,10 @@ pub enum StateError {
     DiscussionNotObserved(PrKey),
     #[error("review request not found: {0}")]
     RequestNotFound(PrKey),
+    #[error(
+        "{0} is awaiting lead authorization; authorize the current inputs before validating a model"
+    )]
+    AwaitingAuthorization(PrKey),
     #[error("duplicate review request in state: {0}")]
     DuplicateRequest(PrKey),
     #[error("unsupported state schema version: {0}")]
@@ -125,7 +129,7 @@ fn validate_repository(repository: &str) -> Result<(), StateError> {
 
 /// A Git commit ID with 40 or 64 hexadecimal characters.
 /// Accepts either case and stores lowercase.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct HeadSha(String);
 

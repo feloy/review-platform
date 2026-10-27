@@ -1,6 +1,7 @@
 //! Exact-head GitHub check runs and commit statuses for operator display.
 
 use super::{GithubClient, GithubError, GithubResult, PullRequest};
+use crate::preparation::{CiObservation, CiState};
 use crate::{HeadSha, PrKey};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -11,12 +12,28 @@ const MAX_RESULTS: usize = 1000;
 const MAX_PAGES: usize = MAX_RESULTS / PAGE_SIZE;
 
 pub struct CheckReport {
+    head_sha: HeadSha,
     check_runs: Vec<CheckRun>,
     commit_statuses: Vec<CommitStatus>,
     combined_state: Option<CommitState>,
 }
 
 impl CheckReport {
+    pub fn head_sha(&self) -> &HeadSha {
+        &self.head_sha
+    }
+
+    pub fn preparation_observation(&self) -> CiObservation<'_> {
+        let state = match self.summary() {
+            CheckSummary::Green => CiState::Green,
+            CheckSummary::Pending => CiState::Pending,
+            CheckSummary::Failing => CiState::Failing,
+            CheckSummary::Unknown => CiState::Unknown,
+            CheckSummary::NoResults => CiState::NoResults,
+        };
+        CiObservation::new(&self.head_sha, state)
+    }
+
     pub fn check_runs(&self) -> &[CheckRun] {
         &self.check_runs
     }
@@ -246,6 +263,7 @@ impl GithubClient {
             self.commit_statuses_for_head(key, &pull.head_sha)?;
         self.ensure_unchanged(key, pull, false)?;
         Ok(CheckReport {
+            head_sha: pull.head_sha.clone(),
             check_runs,
             commit_statuses,
             combined_state,
@@ -436,6 +454,7 @@ mod tests {
             })
             .collect();
         CheckReport {
+            head_sha: HeadSha::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
             check_runs: runs,
             commit_statuses,
             combined_state: None,
@@ -475,6 +494,7 @@ mod tests {
     #[test]
     fn empty_commit_statuses_do_not_make_successful_check_runs_pending() {
         let report = CheckReport {
+            head_sha: HeadSha::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
             check_runs: vec![run("completed", Some("success"))],
             commit_statuses: vec![],
             combined_state: None,
