@@ -22,7 +22,7 @@ pub enum ConfigError {
     )]
     InvalidAgentId(String),
     #[error(
-        "invalid model ID {0:?}; use 1-128 lowercase ASCII letters, digits, dots, slashes, colons, hyphens, or underscores"
+        "invalid model ID {0:?}; use 1-128 lowercase ASCII letters, digits, dots, slashes, colons, hyphens, or underscores, starting with a lowercase letter"
     )]
     InvalidModelId(String),
     #[error("co-author model name must be 1-128 bytes without control characters: {0:?}")]
@@ -426,7 +426,8 @@ impl<'a> ResolvedReviewModel<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
-    schema_version: u32,
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
     models: Vec<RawModel>,
     agents: Vec<RawAgent>,
     repositories: Vec<RawRepository>,
@@ -474,9 +475,6 @@ impl ReviewConfig {
             return Err(ConfigError::UnsupportedSchema(header.schema_version));
         }
         let raw: RawConfig = serde_json::from_slice(bytes)?;
-        if raw.schema_version != 2 {
-            return Err(ConfigError::UnsupportedSchema(raw.schema_version));
-        }
         let mut models = Vec::with_capacity(raw.models.len());
         let mut seen_models = HashSet::new();
         let mut seen_coauthors = HashMap::new();
