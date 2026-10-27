@@ -6,7 +6,9 @@ use crate::github::checks::CheckSummary;
 use crate::github::discussion::PullObservation;
 use crate::github::{GithubClient, GithubError};
 use crate::preparation::{self, Preparation, PreparationError};
-use crate::{HeadSha, InputRevision, PrKey, RefreshOutcome, State, StateError};
+use crate::{
+    HeadSha, InputRevision, ModelValidationError, PrKey, RefreshOutcome, State, StateError,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -22,7 +24,7 @@ pub enum RoundError {
     #[error(transparent)]
     Archive(#[from] ArchiveError),
     #[error(transparent)]
-    Validation(#[from] crate::ModelValidationError),
+    Validation(#[from] ModelValidationError),
     #[error("recorded PR inputs changed since refresh for {0}")]
     StaleObservation(PrKey),
 }
@@ -160,31 +162,33 @@ pub fn prepare<'a>(
                 })
         })
         .transpose()?;
+    let readiness = preparation.readiness();
+    if selection.is_some() && !readiness.permits_validation() {
+        return Err(ModelValidationError::Blocked(readiness).into());
+    }
     let mut verified_index = None;
     let mut validation_changed = false;
     if let (Some(choice), Some(index)) = (selection, selected_index) {
-        if preparation.readiness().permits_validation() {
-            let chosen = &models[index];
-            let verified = archive::verify_archive(chosen.archive())?;
-            validation_changed = state.validate_model(
-                &preparation,
-                &choice.head,
-                choice.revision,
-                chosen,
-                &verified,
-            )?;
-            verified_index = Some(index);
-            let request = state
-                .get(&key)
-                .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
-            preparation = preparation::prepare(
-                request,
-                inputs.pull_observation(),
-                inputs.ci_observation(),
-                &models,
-                inputs.coauthors(),
-            )?;
-        }
+        let chosen = &models[index];
+        let verified = archive::verify_archive(chosen.archive())?;
+        validation_changed = state.validate_model(
+            &preparation,
+            &choice.head,
+            choice.revision,
+            chosen,
+            &verified,
+        )?;
+        verified_index = Some(index);
+        let request = state
+            .get(&key)
+            .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+        preparation = preparation::prepare(
+            request,
+            inputs.pull_observation(),
+            inputs.ci_observation(),
+            &models,
+            inputs.coauthors(),
+        )?;
     }
     let resolved_index = selected_index
         .or_else(|| {

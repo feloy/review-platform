@@ -1603,14 +1603,25 @@ mod tests {
     }
 
     #[test]
-    fn round_preparation_verifies_archive_before_model_validation() {
+    fn round_preparation_verifies_archives_and_rejects_blocked_selection() {
         use crate::archive::ArchiveError;
         use crate::config::ReviewConfig;
         use crate::preparation::Readiness;
         use crate::round::{self, ModelSelection, RoundError};
-        use crate::{AuthorizationScope, InputRevision, ObservedDiscussion, State};
+        use crate::{
+            AuthorizationScope, InputRevision, ModelValidationError, ObservedDiscussion, State,
+        };
         use sha2::{Digest, Sha256};
         use std::num::NonZeroU64;
+
+        #[derive(Clone, Copy)]
+        enum Case {
+            SelectedValid,
+            SelectedInvalidArchive,
+            ProposedValid,
+            ProposedInvalidArchive,
+            SelectedBlocked,
+        }
 
         let directory = tempfile::tempdir().unwrap();
         let archive = directory.path().join("reviewer.tar");
@@ -1620,9 +1631,18 @@ mod tests {
         let head = HeadSha::new(HEAD).unwrap();
         let revision = InputRevision::new(2).unwrap();
 
-        for (valid_checksum, select_model) in
-            [(true, true), (false, true), (true, false), (false, false)]
-        {
+        for case in [
+            Case::SelectedValid,
+            Case::SelectedInvalidArchive,
+            Case::ProposedValid,
+            Case::ProposedInvalidArchive,
+            Case::SelectedBlocked,
+        ] {
+            let valid_checksum = matches!(case, Case::SelectedValid | Case::ProposedValid);
+            let select_model = matches!(
+                case,
+                Case::SelectedValid | Case::SelectedInvalidArchive | Case::SelectedBlocked
+            );
             let configured_checksum = if valid_checksum {
                 checksum.as_str()
             } else {
@@ -1654,9 +1674,11 @@ mod tests {
                     &ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap(),
                 )
                 .unwrap();
-            state
-                .authorize(&key, &head, revision, AuthorizationScope::OneRound)
-                .unwrap();
+            if !matches!(case, Case::SelectedBlocked) {
+                state
+                    .authorize(&key, &head, revision, AuthorizationScope::OneRound)
+                    .unwrap();
+            }
 
             let mut replies = observation_replies(&[], &[], &[]);
             replies.extend(preparation_replies(&[]));
@@ -1677,28 +1699,40 @@ mod tests {
                 select_model.then_some(&choice),
             );
             handle.join().unwrap();
-            if valid_checksum {
-                let prepared = result.unwrap();
-                assert_eq!(prepared.validation_changed(), select_model);
-                assert_eq!(
-                    prepared.preparation().readiness(),
-                    if select_model {
-                        Readiness::Ready
-                    } else {
-                        Readiness::ModelValidationRequired
-                    }
-                );
-                assert_eq!(prepared.resolved().agent().id().as_str(), "claude");
-                assert_eq!(
-                    state.get(&key).unwrap().model_validation().is_some(),
-                    select_model
-                );
-            } else {
-                assert!(matches!(
-                    result.err().unwrap(),
-                    RoundError::Archive(ArchiveError::ChecksumMismatch { .. })
-                ));
-                assert!(state.get(&key).unwrap().model_validation().is_none());
+            match case {
+                Case::SelectedValid | Case::ProposedValid => {
+                    let prepared = result.unwrap();
+                    assert_eq!(prepared.validation_changed(), select_model);
+                    assert_eq!(
+                        prepared.preparation().readiness(),
+                        if select_model {
+                            Readiness::Ready
+                        } else {
+                            Readiness::ModelValidationRequired
+                        }
+                    );
+                    assert_eq!(prepared.resolved().agent().id().as_str(), "claude");
+                    assert_eq!(
+                        state.get(&key).unwrap().model_validation().is_some(),
+                        select_model
+                    );
+                }
+                Case::SelectedInvalidArchive | Case::ProposedInvalidArchive => {
+                    assert!(matches!(
+                        result.err().unwrap(),
+                        RoundError::Archive(ArchiveError::ChecksumMismatch { .. })
+                    ));
+                    assert!(state.get(&key).unwrap().model_validation().is_none());
+                }
+                Case::SelectedBlocked => {
+                    assert!(matches!(
+                        result.err().unwrap(),
+                        RoundError::Validation(ModelValidationError::Blocked(
+                            Readiness::AwaitingAuthorization
+                        ))
+                    ));
+                    assert!(state.get(&key).unwrap().model_validation().is_none());
+                }
             }
         }
     }
