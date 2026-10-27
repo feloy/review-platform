@@ -243,6 +243,17 @@ Calculate it with `shasum -a 256 /absolute/path/to/osi-claude-1.tar` on macOS
 or `sha256sum /absolute/path/to/osi-claude-1.tar` on Linux.
 The example checksum is a placeholder and will fail verification.
 The configuration contains no credentials and should be kept private with the state file.
+The current schema configures the VM archive but has no sandbox execution settings yet.
+When round execution is added, extend trusted configuration with the gateway,
+workspace, driver type, and provider names.
+It also supplies the non-secret sandbox environment, policy path, resource limits,
+mount layout, lifecycle and TTY options,
+and agent command used by `openshell sandbox create`.
+The initial runner supports `vm` only;
+it reports `podman` as unsupported and rejects unknown driver names as invalid configuration
+before creating a sandbox.
+Combine those values with the round's verified checkout and output paths.
+Do not put provider credentials or publishing credentials in this configuration.
 
 `github-pr`, `refresh`, and `prepare-review` read public GitHub pull requests without a token.
 For private repositories or a higher GitHub API rate limit,
@@ -252,7 +263,7 @@ The CLI uses this token only for GitHub reads.
 HTTPS uses the platform's trusted certificates, including organization roots installed for a TLS-intercepting proxy.
 On Linux, `SSL_CERT_FILE` or `SSL_CERT_DIR` can select a PEM certificate bundle or directory instead of the system CA bundle.
 
-This prototype does not discover author review requests, start OpenShell,
+This prototype does not discover author review requests, create OpenShell sandboxes,
 consume an authorized round, or publish reviews.
 Review requests and lead decisions are still entered manually.
 The CLI does not yet store the head of a completed review round;
@@ -293,6 +304,8 @@ CI also checks all targets with Rust 1.85 on each of these platforms.
 The lead configures the repositories the daemon watches, the available models and agents,
 agent review prompts, the VM archive for each repository and agent pair,
 and privileged access for trusted people.
+An operator supplies an already-running OpenShell gateway with compatible model
+and read-only GitHub providers configured for review sandboxes.
 Any author of a PR in a configured repository can request an AI review.
 The daemon waits for the lead to authorize that PR before running a review.
 
@@ -328,6 +341,7 @@ a human maintainer makes the formal approval and merge decision.
   and each PR’s authorization state: awaiting authorization, authorized for one round, or authorized for the PR cycle.
   It manages agents' review instructions (prompts), proposes a model different from the PR's co-author model when possible,
   resolves the first compatible configured agent, and supplies that agent's instructions and verified archive for each round.
+  It connects to the configured OpenShell gateway and manages only the sandboxes it creates for review rounds.
   It waits for green checks, starts review rounds after lead validation, tracks progress, holds draft reviews,
   and posts only drafts the lead has chosen to publish.
   After a rejection, it waits for fresh lead authorization before starting another round.
@@ -336,8 +350,10 @@ a human maintainer makes the formal approval and merge decision.
   publish or reject drafts, authorize a new round after rejection,
   validate or change the daemon's proposed model, and monitor reviews.
   It may be a CLI, terminal UI, or graphical UI.
+- **OpenShell gateway**: Runs independently of Review Platform.
+  Its operator manages gateway access, provider profiles, provider credentials, and rotation.
 - **OpenShell sandbox**: Runs a selected agent, such as Claude or Codex, from the VM archive configured for that repository and agent,
-  with instructions supplied by the daemon.
+  with instructions and named providers selected by the daemon.
   The agent has read-only GitHub access and returns draft text to the daemon;
   the daemon holds the publishing authority.
 
@@ -416,11 +432,29 @@ flowchart TD
 Blue hexagons show authorization state changes;
 rectangles show other actions, rounded boxes show waits, and diamonds show decisions.
 
-## OpenShell management
+## OpenShell gateway and sandboxes
 
-The daemon configures and operates the OpenShell platform, primarily its gateway.
-For each review round, it uses the gateway to create and monitor a sandbox from
-the verified VM archive configured for the repository and selected agent.
+Review Platform connects to an existing gateway selected explicitly in its configuration.
+It does not start or stop the gateway, change its configuration,
+create or update providers, or rotate their credentials.
+The gateway operator configures a compatible model provider and a GitHub provider
+whose policy enforces read-only REST access for the reviewing agent.
+For each round, Review Platform checks authenticated gateway access and the expected
+named providers, then creates, monitors, and removes its own sandbox.
+The trusted configuration names the driver and supplies sandbox creation parameters:
+the verified VM archive, provider names,
+non-secret environment, policy, resource limits, mount layout,
+lifecycle and TTY options, and agent command.
+The runner accepts only a configured `vm` driver for now and checks that the gateway supports it.
+It reports `podman` as unsupported or an unknown driver as invalid
+before any sandbox is created.
+Round-specific checkout and output paths are filled in when the sandbox is created.
+The runner validates these values against the read-only input and isolated output rules.
+It attaches only those providers and disables automatic provider creation.
+Provider names alone do not prove their permissions;
+the operator must maintain the required policies,
+and the runner must reject any incompatible policy it can inspect.
+If the gateway or required providers are unavailable, the round does not start.
 
 ## Review inputs and CI
 
@@ -439,21 +473,21 @@ to inspect, not instructions for the reviewing agent to follow.
 
 ## Credentials and secrets
 
-The daemon manages the credentials needed for GitHub and model access, including
-secret rotation.
-It configures OpenShell providers to supply the sandboxed agent with read-only
-GitHub access and access to the selected model.
-Credentials used to post reviews to GitHub remain under the daemon's control.
-When a secret rotates, the daemon updates the corresponding OpenShell provider.
+The gateway operator manages model and sandboxed GitHub credentials through
+OpenShell providers, including their rotation.
+The daemon may use separate read-only GitHub credentials to inspect PRs.
+Credentials used to post reviews to GitHub remain under the daemon's control
+and never enter an OpenShell provider, sandbox, or agent process.
+Publishing, rejecting, or recovering an existing draft does not require the gateway.
 
 ## Security requirements
 
 | Concern | Security requirement |
 | --- | --- |
 | **Prompt injection** | Treat PR files, comments, and commit messages as untrusted. The daemon's system instruction tells the agent to follow only daemon-provided review instructions. |
-| **GitHub access** | Give the agent read-only access through an OpenShell provider. Keep credentials used to post reviews under daemon control. |
-| **Gateway and VM archives** | Authenticate access to the daemon-managed gateway. Let only authorized operators configure archives, require SHA-256 checksums, and verify a private copy before execution. Pin any OCI source images by digest. |
-| **Secrets and rotation** | Protect GitHub and model credentials in storage and logs. Update providers and revoke old credentials when rotating secrets. |
+| **GitHub access** | Give the agent read-only access through an operator-configured OpenShell provider. Keep credentials used to post reviews under daemon control. |
+| **Gateway and VM archives** | Authenticate access to the explicitly selected, operator-managed gateway. Require its expected providers before dispatch. Let only authorized operators configure archives, require SHA-256 checksums, and verify a private copy before execution. Pin any OCI source images by digest. |
+| **Secrets and rotation** | Protect GitHub and model credentials in storage and logs. The gateway operator rotates provider credentials; Review Platform never manages them. |
 | **Review freshness** | Bind CI results and each draft to the PR commit and author comments reviewed. Flag a draft if either changes before the lead publishes it. |
 | **Identity and resource use** | Verify author requests and lead decisions. Limit repeated runs when author comments trigger reviews during PR-wide authorization. Treat model co-author information as a hint for the lead to validate. |
 | **Draft publication** | Show the lead the exact text that will be posted. Record who published or rejected it; a rejected draft stays off the PR. |
