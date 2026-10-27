@@ -530,6 +530,27 @@ mod tests {
         replies
     }
 
+    fn commit_page_replies(commits: &[serde_json::Value]) -> Vec<MockReply> {
+        commits
+            .chunks(100)
+            .enumerate()
+            .map(|(index, page)| {
+                let mut reply = json_reply(
+                    format!(
+                        "/repos/owner/repo/pulls/42/commits?per_page=100&page={}",
+                        index + 1
+                    ),
+                    serde_json::to_string(page).unwrap(),
+                );
+                if (index + 1) * 100 < commits.len() {
+                    reply.extra_headers =
+                        "Link: <https://api.github.com/next>; rel=\"next\"\r\n".to_owned();
+                }
+                reply
+            })
+            .collect()
+    }
+
     fn author_comment(id: u64, body: &str) -> serde_json::Value {
         serde_json::json!({"id": id, "user": {"id": 7}, "body": body})
     }
@@ -1512,6 +1533,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn commit_hints_report_the_api_cap_only_when_the_head_is_missing() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let truncated = (1..=250)
+            .map(|number| {
+                serde_json::json!({
+                    "sha": format!("{number:040x}"),
+                    "commit": {"message": "Change"}
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut complete = truncated.clone();
+        complete[249]["sha"] = HEAD.into();
+        complete[249]["commit"]["message"] =
+            "Change\n\nCo-authored-by: Claude <claude@example.com>".into();
+
+        let read_hints = |commits: &[serde_json::Value], final_head: &str| {
+            let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+            replies.extend(commit_page_replies(commits));
+            replies.extend(commit_page_replies(commits));
+            replies.push(json_reply(pull_route(&key), pr_body(final_head, BASE)));
+            let (url, handle) = serve_many(replies);
+            let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+            let pull = client.pull_request(&key).unwrap();
+            let result = client.coauthors_for_pull(&key, &pull);
+            handle.join().unwrap();
+            result
+        };
+
+        let hints = read_hints(&complete, HEAD).unwrap();
+        assert_eq!(hints.commit_count(), 250);
+        assert!(hints.identities().contains(
+            &crate::config::CoauthorIdentity::new("Claude", "claude@example.com").unwrap()
+        ));
+
+        let capped = read_hints(&truncated, HEAD).err().unwrap();
+        assert!(matches!(
+            &capped,
+            GithubError::PrCommitsCapped { key: failed, limit: 250 } if failed == &key
+        ));
+        assert!(capped.to_string().contains("250-commit limit"));
+
+        let changed = read_hints(&truncated, PREVIOUS_HEAD).err().unwrap();
+        assert!(matches!(changed, GithubError::HeadChanged { .. }));
+
+        let incomplete = read_hints(&truncated[..1], HEAD).err().unwrap();
+        assert!(matches!(incomplete, GithubError::InvalidResponse { .. }));
     }
 
     #[test]

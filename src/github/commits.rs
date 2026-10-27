@@ -8,7 +8,8 @@ use std::collections::HashSet;
 use std::io::Read;
 
 const PAGE_SIZE: usize = 100;
-const MAX_COMMITS: usize = 1000;
+// GitHub's list PR commits endpoint returns at most 250 commits.
+const MAX_COMMITS: usize = 250;
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Co-author hints obtained from a stable read of the PR commit list.
@@ -57,13 +58,19 @@ impl GithubClient {
                 detail: "commits changed between retrieval passes".to_owned(),
             });
         }
+        self.ensure_unchanged(key, pull, false)?;
         if second.last().map(|commit| &commit.sha) != Some(pull.head_sha()) {
+            if second.len() == MAX_COMMITS {
+                return Err(GithubError::PrCommitsCapped {
+                    key: key.clone(),
+                    limit: MAX_COMMITS,
+                });
+            }
             return Err(GithubError::InvalidResponse {
                 resource: format!("PR commits for {key}"),
                 detail: "last commit does not match the inspected PR head".to_owned(),
             });
         }
-        self.ensure_unchanged(key, pull, false)?;
         let identities = second
             .iter()
             .flat_map(|commit| trailer_coauthors(&commit.commit.message))
@@ -115,6 +122,12 @@ impl GithubClient {
                 commits.push(item);
             }
             if commits.len() > MAX_COMMITS {
+                return Err(GithubError::TooManyResults {
+                    kind: "PR commits",
+                    limit: MAX_COMMITS,
+                });
+            }
+            if has_next && commits.len() == MAX_COMMITS {
                 return Err(GithubError::TooManyResults {
                     kind: "PR commits",
                     limit: MAX_COMMITS,

@@ -277,8 +277,10 @@ GitHub may still change after that inspection.
 The `--checks` output is a snapshot of reported results.
 `prepare-review` uses that same exact-head result for readiness,
 but startup must fetch fresh inputs and checks again before running an agent.
-Preparation limits PR commit hints to 1,000 commits and 8 MiB of response data per pass.
-It reports an error if GitHub cannot provide a complete, stable commit list.
+GitHub's PR commits endpoint returns at most 250 commits.
+Preparation accepts that many only when the list reaches the inspected head;
+otherwise it reports the endpoint limit instead of using incomplete co-author hints.
+It also limits response data to 8 MiB per retrieval pass and rejects an unstable list.
 
 For development, run `cargo fmt --all -- --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.
