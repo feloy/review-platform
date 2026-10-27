@@ -1,5 +1,7 @@
 //! CLI integration tests for persisted authorization and state-file paths.
 
+use review_platform::{HeadSha, ObservedDiscussion, PrKey, State};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -35,12 +37,24 @@ fn run_failing(state_file: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stderr).unwrap()
 }
 
+fn observe_empty_discussion(state_file: &Path, head: &str) -> u64 {
+    let mut state: State = serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
+    let key = PrKey::new("owner/repo", 42).unwrap();
+    let head = HeadSha::new(head).unwrap();
+    let discussion = ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap();
+    state.refresh(&key, &head, &discussion).unwrap();
+    let revision = state.get(&key).unwrap().revision().get();
+    std::fs::write(state_file, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    revision
+}
+
 #[test]
 fn local_authorization_survives_process_restart_and_new_head_clears_one_round() {
     let dir = tempfile::tempdir().unwrap();
     let state_file = dir.path().join("state.json");
 
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
+    assert_eq!(observe_empty_discussion(&state_file, HEAD_A), 2);
     run(
         &state_file,
         &[
@@ -52,7 +66,7 @@ fn local_authorization_survives_process_restart_and_new_head_clears_one_round() 
             "--head",
             HEAD_A,
             "--revision",
-            "1",
+            "2",
         ],
     );
     let status = run(&state_file, &["status", "owner/repo", "42"]);
@@ -112,6 +126,28 @@ fn authorize_requires_the_head_seen_by_the_lead() {
         error.contains("revision must be greater than zero"),
         "{error}"
     );
+    let before = std::fs::read(&state_file).unwrap();
+    for scope in ["one-round", "pr-cycle"] {
+        let error = run_failing(
+            &state_file,
+            &[
+                "authorize",
+                "owner/repo",
+                "42",
+                "--scope",
+                scope,
+                "--head",
+                HEAD_A,
+                "--revision",
+                "1",
+            ],
+        );
+        assert!(
+            error.contains("author discussion has not been observed"),
+            "{error}"
+        );
+    }
+    assert_eq!(std::fs::read(&state_file).unwrap(), before);
 
     run(&state_file, &["request", "owner/repo", "42", HEAD_B]);
     let error = run_failing(
@@ -135,7 +171,7 @@ fn authorize_requires_the_head_seen_by_the_lead() {
     assert!(status.contains("awaiting lead authorization"));
     assert!(status.contains("revision: 2"));
 
-    run(
+    let error = run_failing(
         &state_file,
         &[
             "authorize",
@@ -147,6 +183,25 @@ fn authorize_requires_the_head_seen_by_the_lead() {
             HEAD_B,
             "--revision",
             "2",
+        ],
+    );
+    assert!(
+        error.contains("author discussion has not been observed"),
+        "{error}"
+    );
+    assert_eq!(observe_empty_discussion(&state_file, HEAD_B), 3);
+    run(
+        &state_file,
+        &[
+            "authorize",
+            "owner/repo",
+            "42",
+            "--scope",
+            "one-round",
+            "--head",
+            HEAD_B,
+            "--revision",
+            "3",
         ],
     );
     assert!(run(&state_file, &["status", "owner/repo", "42"]).contains("authorized for one round"));
@@ -227,6 +282,25 @@ fn schema_one_loads_without_rewriting_and_next_mutation_saves_schema_two() {
     let status = run(&state_file, &["status", "owner/repo", "42"]);
     assert!(status.contains("revision: 1"));
     assert!(status.contains("authorized for the PR cycle"));
+    let error = run_failing(
+        &state_file,
+        &[
+            "authorize",
+            "owner/repo",
+            "42",
+            "--scope",
+            "one-round",
+            "--head",
+            HEAD_A,
+            "--revision",
+            "1",
+        ],
+    );
+    assert!(
+        error.contains("author discussion has not been observed"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&state_file).unwrap(), original);
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
     assert_eq!(std::fs::read(&state_file).unwrap(), original);
 

@@ -55,6 +55,7 @@ including when loaded from the JSON state file.
   Recording a different head advances the input revision,
   marks author discussion as unavailable,
   and clears `one-round` authorization while preserving `pr-cycle` authorization.
+  Refresh the request before making a new authorization decision.
 - `refresh REPOSITORY PR` fetches the current GitHub head and the PR author's discussion
   for an existing request.
   It never creates or authorizes a request.
@@ -64,7 +65,8 @@ including when loaded from the JSON state file.
   It records comment IDs and hashes of exact text, not comment bodies.
   A changed head, author identity, or author discussion advances the input revision.
   The first refresh establishes the discussion baseline and advances the revision,
-  clearing any existing `one-round` authorization even if no comments exist.
+  clearing any existing `one-round` authorization loaded from older state
+  even if no comments exist.
   Later changes also clear `one-round` authorization;
   `pr-cycle` authorization remains active.
   An unchanged refresh does not rewrite the state file.
@@ -72,6 +74,8 @@ including when loaded from the JSON state file.
 - `authorize REPOSITORY PR --scope one-round --head HEAD_SHA --revision REVISION`
   authorizes one review round for an existing request.
   Give the head SHA and revision the lead inspected with `status`.
+  Author discussion must already have been observed by `refresh`;
+  otherwise the command asks the lead to refresh and inspect the request first.
   If either locally recorded value has changed,
   the command reports the mismatch and leaves authorization unchanged.
   Use `--scope pr-cycle` instead to keep authorization active when the head changes.
@@ -137,6 +141,7 @@ The CLI creates the application directory when it first saves state.
 It loads schema 1 state files with revision 1 and discussion not yet observed,
 then writes schema 2 on the next successful mutation.
 Existing authorization stays in place until a refresh observes the discussion baseline.
+New authorization of a migrated request requires a refresh first.
 For a project-local state file, pass `--state-file .review-platform/state.json`.
 Git ignores the `.review-platform/` directory.
 Keep the state file private to the lead operator.

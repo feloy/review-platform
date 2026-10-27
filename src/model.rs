@@ -40,6 +40,10 @@ pub enum StateError {
         inspected: InputRevision,
         recorded: InputRevision,
     },
+    #[error(
+        "author discussion has not been observed for {0}; run refresh and inspect status before authorizing"
+    )]
+    DiscussionNotObserved(PrKey),
     #[error("review request not found: {0}")]
     RequestNotFound(PrKey),
     #[error("duplicate review request in state: {0}")]

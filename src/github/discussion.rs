@@ -61,6 +61,7 @@ struct ApiReview {
     state: ReviewState,
 }
 
+// Require the API field while accepting null values GitHub may return.
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
