@@ -15,7 +15,7 @@ pub enum ArchiveError {
         #[source]
         source: std::io::Error,
     },
-    #[error("VM archive {0} must be a regular file, not a symlink")]
+    #[error("VM archive {0} must be a regular file")]
     NotRegular(PathBuf),
     #[error("VM archive {path} has SHA-256 {actual}, expected {expected}")]
     ChecksumMismatch {
@@ -100,7 +100,8 @@ fn open_no_follow(path: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // A FIFO swapped in after the metadata check must not block open.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
@@ -152,5 +153,34 @@ mod tests {
             verify_archive(&archive),
             Err(ArchiveError::NotRegular(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_archive_swapped_for_fifo_does_not_block() {
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviewer.tar");
+        fs::write(&path, b"archive bytes").unwrap();
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
+
+        fs::remove_file(&path).unwrap();
+        let output = Command::new("mkfifo").arg(&path).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+
+        let (sender, receiver) = mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            let result = open_no_follow(&path).and_then(|file| file.metadata());
+            let _ = sender.send(result);
+        });
+        let metadata = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("opening a FIFO must not wait for a writer")
+            .unwrap();
+        opener.join().unwrap();
+        assert!(!metadata.file_type().is_file());
     }
 }
