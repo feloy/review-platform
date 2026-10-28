@@ -1,9 +1,9 @@
 //! Validated model choices, compatible agent runners, and VM archives.
 
-use crate::{PrKey, StateError};
+use crate::{PrKey, StateError, sandbox_layout};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -33,7 +33,7 @@ pub enum ConfigError {
         "VM archive path must be an absolute .tar path without control characters or traversal: {0:?}"
     )]
     InvalidArchivePath(PathBuf),
-    #[error("VM archive SHA-256 must contain 64 hexadecimal characters")]
+    #[error("SHA-256 must contain 64 hexadecimal characters")]
     InvalidArchiveChecksum,
     #[error("agent {0} has an empty or oversized review prompt (maximum 64 KiB)")]
     InvalidPrompt(AgentId),
@@ -78,6 +78,14 @@ pub enum ConfigError {
     RepositoryNotConfigured(String),
     #[error("model {model} is not configured for review in {repository}")]
     ModelNotConfigured { repository: String, model: ModelId },
+    #[error("invalid execution configuration: {0}")]
+    InvalidExecution(String),
+    #[error("invalid agent runner configuration: {0}")]
+    InvalidRunner(String),
+    #[error("agent runner kind {0:?} is unsupported; expected claude")]
+    InvalidRunnerKind(String),
+    #[error("driver {0:?} is invalid; expected vm or podman")]
+    InvalidDriver(String),
 }
 
 /// Stable configured agent identifier, independent of GitHub commit text.
@@ -238,16 +246,21 @@ impl fmt::Display for ArchiveHash {
     }
 }
 
-/// A local rootfs tar archive and the checksum expected by the lead.
+/// A local VM rootfs tar and its separate OCI configuration sidecar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawVmArchive")]
 pub struct VmArchive {
     path: PathBuf,
     sha256: ArchiveHash,
+    config_sha256: ArchiveHash,
 }
 
 impl VmArchive {
-    pub fn new(path: PathBuf, sha256: ArchiveHash) -> Result<Self, ConfigError> {
+    pub fn new(
+        path: PathBuf,
+        sha256: ArchiveHash,
+        config_sha256: ArchiveHash,
+    ) -> Result<Self, ConfigError> {
         let valid = path.is_absolute()
             && path.extension().is_some_and(|extension| extension == "tar")
             && !path
@@ -269,7 +282,11 @@ impl VmArchive {
         if !valid {
             return Err(ConfigError::InvalidArchivePath(path));
         }
-        Ok(Self { path, sha256 })
+        Ok(Self {
+            path,
+            sha256,
+            config_sha256,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -279,6 +296,16 @@ impl VmArchive {
     pub fn checksum(&self) -> &ArchiveHash {
         &self.sha256
     }
+
+    pub fn config_path(&self) -> PathBuf {
+        let mut name = self.path.as_os_str().to_os_string();
+        name.push(".config.json");
+        PathBuf::from(name)
+    }
+
+    pub fn config_checksum(&self) -> &ArchiveHash {
+        &self.config_sha256
+    }
 }
 
 #[derive(Deserialize)]
@@ -286,13 +313,18 @@ impl VmArchive {
 struct RawVmArchive {
     path: PathBuf,
     sha256: String,
+    config_sha256: String,
 }
 
 impl TryFrom<RawVmArchive> for VmArchive {
     type Error = ConfigError;
 
     fn try_from(value: RawVmArchive) -> Result<Self, Self::Error> {
-        Self::new(value.path, ArchiveHash::new(value.sha256)?)
+        Self::new(
+            value.path,
+            ArchiveHash::new(value.sha256)?,
+            ArchiveHash::new(value.config_sha256)?,
+        )
     }
 }
 
@@ -310,7 +342,7 @@ impl PromptHash {
         Ok(Self(value.to_ascii_lowercase()))
     }
 
-    fn of(prompt: &str) -> Self {
+    pub(crate) fn of(prompt: &str) -> Self {
         let digest = Sha256::digest(prompt.as_bytes());
         Self(format!("{digest:x}"))
     }
@@ -339,6 +371,357 @@ pub struct ReviewConfig {
     models: Vec<Model>,
     agents: Vec<Agent>,
     repositories: Vec<RepositoryConfig>,
+    execution: ExecutionConfig,
+}
+
+/// Trusted, non-secret OpenShell and Claude execution settings.
+#[derive(Debug)]
+pub struct ExecutionConfig {
+    openshell: PathBuf,
+    gateway: String,
+    workspace: String,
+    driver: Driver,
+    github_provider: String,
+    timeout_seconds: u64,
+    cpu: String,
+    memory: String,
+    log_limit_bytes: u64,
+    hash: PromptHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Driver {
+    Vm,
+    Podman,
+}
+
+impl Driver {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vm => "vm",
+            Self::Podman => "podman",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawExecution {
+    openshell: PathBuf,
+    gateway: String,
+    workspace: String,
+    driver: String,
+    github_provider: String,
+    #[serde(default = "default_timeout")]
+    timeout_seconds: u64,
+    #[serde(default = "default_cpu")]
+    cpu: String,
+    #[serde(default = "default_memory")]
+    memory: String,
+    #[serde(default = "default_log_limit")]
+    log_limit_bytes: u64,
+}
+
+fn default_timeout() -> u64 {
+    1800
+}
+fn default_cpu() -> String {
+    "2".to_owned()
+}
+fn default_memory() -> String {
+    "4Gi".to_owned()
+}
+fn default_log_limit() -> u64 {
+    8 * 1024 * 1024
+}
+
+impl TryFrom<RawExecution> for ExecutionConfig {
+    type Error = ConfigError;
+
+    fn try_from(raw: RawExecution) -> Result<Self, Self::Error> {
+        let hash = PromptHash::of(&serde_json::to_string(&serde_json::json!({
+            "execution": &raw,
+            "mount_targets": [
+                sandbox_layout::CHECKOUT_TARGET,
+                sandbox_layout::INSTRUCTIONS_TARGET,
+                sandbox_layout::OUTPUT_TARGET,
+            ]
+        }))?);
+        let driver = match raw.driver.as_str() {
+            "vm" => Driver::Vm,
+            "podman" => Driver::Podman,
+            _ => return Err(ConfigError::InvalidDriver(raw.driver)),
+        };
+        for value in [&raw.gateway, &raw.workspace, &raw.github_provider] {
+            if !valid_name(value) {
+                return Err(ConfigError::InvalidExecution(
+                    "gateway, workspace, and GitHub provider names must be simple ASCII names"
+                        .into(),
+                ));
+            }
+        }
+        if !raw.openshell.is_absolute()
+            || raw
+                .openshell
+                .components()
+                .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+        {
+            return Err(ConfigError::InvalidExecution(
+                "OpenShell path must be absolute without traversal".into(),
+            ));
+        }
+        if raw.timeout_seconds == 0
+            || raw.timeout_seconds > 7200
+            || raw.log_limit_bytes == 0
+            || raw.log_limit_bytes > 64 * 1024 * 1024
+            || !raw
+                .cpu
+                .parse::<f64>()
+                .ok()
+                .is_some_and(|cpu| cpu.is_finite() && cpu > 0.0 && cpu <= 64.0)
+            || !valid_memory(&raw.memory)
+        {
+            return Err(ConfigError::InvalidExecution(
+                "invalid lifecycle or resource limits".into(),
+            ));
+        }
+        Ok(Self {
+            openshell: raw.openshell,
+            gateway: raw.gateway,
+            workspace: raw.workspace,
+            driver,
+            github_provider: raw.github_provider,
+            timeout_seconds: raw.timeout_seconds,
+            cpu: raw.cpu,
+            memory: raw.memory,
+            log_limit_bytes: raw.log_limit_bytes,
+            hash,
+        })
+    }
+}
+
+fn valid_memory(value: &str) -> bool {
+    for suffix in ["Mi", "Gi", "M", "G"] {
+        if let Some(amount) = value.strip_suffix(suffix) {
+            return amount
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|amount| amount > 0 && amount <= 65536);
+        }
+    }
+    false
+}
+
+fn valid_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+}
+
+/// Executable paths inside the Linux VM use POSIX syntax on every host platform.
+pub(crate) fn valid_vm_absolute_path(value: &str) -> bool {
+    value.strip_prefix('/').is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.split('/').all(|component| {
+                !component.is_empty()
+                    && component != "."
+                    && component != ".."
+                    && !component.chars().any(char::is_control)
+            })
+    })
+}
+
+pub(crate) fn valid_environment_entry(key: &str, value: &str) -> bool {
+    let uppercase = key.to_ascii_uppercase();
+    !key.is_empty()
+        && key.len() <= 128
+        && (key.as_bytes()[0].is_ascii_alphabetic() || key.as_bytes()[0] == b'_')
+        && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        && !uppercase.contains("TOKEN")
+        && !uppercase.contains("SECRET")
+        && !uppercase.contains("PASSWORD")
+        && !uppercase.ends_with("KEY")
+        && value.len() <= 8192
+        && !value.chars().any(char::is_control)
+}
+
+impl ExecutionConfig {
+    pub fn openshell(&self) -> &Path {
+        &self.openshell
+    }
+    pub fn gateway(&self) -> &str {
+        &self.gateway
+    }
+    pub fn workspace(&self) -> &str {
+        &self.workspace
+    }
+    pub fn driver(&self) -> Driver {
+        self.driver
+    }
+    pub fn github_provider(&self) -> &str {
+        &self.github_provider
+    }
+    pub fn timeout_seconds(&self) -> u64 {
+        self.timeout_seconds
+    }
+    pub fn cpu(&self) -> &str {
+        &self.cpu
+    }
+    pub fn memory(&self) -> &str {
+        &self.memory
+    }
+    pub fn log_limit_bytes(&self) -> u64 {
+        self.log_limit_bytes
+    }
+    pub fn hash(&self) -> &PromptHash {
+        &self.hash
+    }
+}
+
+/// An agent adapter supported by this version of the review runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Claude,
+}
+
+impl AgentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+        }
+    }
+}
+
+/// Trusted settings used only after the selected model resolves to this agent.
+#[derive(Debug)]
+pub struct AgentRunnerConfig {
+    kind: AgentKind,
+    model_provider: String,
+    environment: BTreeMap<String, String>,
+    policy: PathBuf,
+    policy_sha256: ArchiveHash,
+    hold_command: Vec<String>,
+    max_turns: u32,
+    hash: PromptHash,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawAgentRunner {
+    kind: String,
+    model_provider: String,
+    #[serde(default)]
+    environment: BTreeMap<String, String>,
+    policy: PathBuf,
+    policy_sha256: String,
+    hold_command: Vec<String>,
+    #[serde(default = "default_turns")]
+    max_turns: u32,
+}
+
+fn default_turns() -> u32 {
+    100
+}
+
+impl TryFrom<RawAgentRunner> for AgentRunnerConfig {
+    type Error = ConfigError;
+
+    fn try_from(raw: RawAgentRunner) -> Result<Self, Self::Error> {
+        let hash = PromptHash::of(&serde_json::to_string(&raw)?);
+        let kind = match raw.kind.as_str() {
+            "claude" => AgentKind::Claude,
+            _ => return Err(ConfigError::InvalidRunnerKind(raw.kind)),
+        };
+        if !valid_name(&raw.model_provider) {
+            return Err(ConfigError::InvalidRunner(
+                "model provider must be a simple ASCII name".into(),
+            ));
+        }
+        if !raw.policy.is_absolute()
+            || raw
+                .policy
+                .components()
+                .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+        {
+            return Err(ConfigError::InvalidRunner(
+                "policy path must be absolute without traversal".into(),
+            ));
+        }
+        if raw.hold_command.is_empty()
+            || !valid_vm_absolute_path(&raw.hold_command[0])
+            || raw.hold_command.iter().any(|value| {
+                value.is_empty() || value.len() > 32768 || value.chars().any(char::is_control)
+            })
+        {
+            return Err(ConfigError::InvalidRunner(
+                "hold command must start with an absolute VM executable and contain bounded single-line arguments".into(),
+            ));
+        }
+        if raw.environment.len() > 256
+            || raw
+                .environment
+                .iter()
+                .map(|(key, value)| key.len() + value.len() + 1)
+                .sum::<usize>()
+                > 64 * 1024
+            || raw
+                .environment
+                .iter()
+                .any(|(key, value)| !valid_environment_entry(key, value))
+            || raw.environment.contains_key("CLAUDE_CODE_EXECUTABLE")
+            || raw
+                .environment
+                .contains_key("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY")
+        {
+            return Err(ConfigError::InvalidRunner(
+                "environment must contain bounded, non-secret values and cannot replace image or mandatory Claude settings".into(),
+            ));
+        }
+        if raw.max_turns == 0 || raw.max_turns > 1000 {
+            return Err(ConfigError::InvalidRunner(
+                "max_turns must be between 1 and 1000".into(),
+            ));
+        }
+        Ok(Self {
+            kind,
+            model_provider: raw.model_provider,
+            environment: raw.environment,
+            policy: raw.policy,
+            policy_sha256: ArchiveHash::new(raw.policy_sha256)?,
+            hold_command: raw.hold_command,
+            max_turns: raw.max_turns,
+            hash,
+        })
+    }
+}
+
+impl AgentRunnerConfig {
+    pub fn kind(&self) -> AgentKind {
+        self.kind
+    }
+    pub fn model_provider(&self) -> &str {
+        &self.model_provider
+    }
+    pub fn environment(&self) -> &BTreeMap<String, String> {
+        &self.environment
+    }
+    pub fn policy(&self) -> &Path {
+        &self.policy
+    }
+    pub fn policy_sha256(&self) -> &ArchiveHash {
+        &self.policy_sha256
+    }
+    pub fn hold_command(&self) -> &[String] {
+        &self.hold_command
+    }
+    pub fn max_turns(&self) -> u32 {
+        self.max_turns
+    }
+    pub fn hash(&self) -> &PromptHash {
+        &self.hash
+    }
 }
 
 #[derive(Debug)]
@@ -365,6 +748,7 @@ pub struct Agent {
     models: Vec<ModelId>,
     prompt: String,
     prompt_hash: PromptHash,
+    runner: AgentRunnerConfig,
 }
 
 impl Agent {
@@ -378,6 +762,10 @@ impl Agent {
 
     pub fn prompt_hash(&self) -> &PromptHash {
         &self.prompt_hash
+    }
+
+    pub fn runner(&self) -> &AgentRunnerConfig {
+        &self.runner
     }
 
     pub fn supports(&self, model: &ModelId) -> bool {
@@ -403,6 +791,7 @@ pub struct ResolvedReviewModel<'a> {
     model: &'a Model,
     agent: &'a Agent,
     archive: &'a VmArchive,
+    execution: &'a ExecutionConfig,
 }
 
 impl<'a> ResolvedReviewModel<'a> {
@@ -421,6 +810,9 @@ impl<'a> ResolvedReviewModel<'a> {
     pub fn archive(&self) -> &'a VmArchive {
         self.archive
     }
+    pub fn execution(&self) -> &'a ExecutionConfig {
+        self.execution
+    }
 }
 
 #[derive(Deserialize)]
@@ -431,6 +823,7 @@ struct RawConfig {
     models: Vec<RawModel>,
     agents: Vec<RawAgent>,
     repositories: Vec<RawRepository>,
+    execution: RawExecution,
 }
 
 #[derive(Deserialize)]
@@ -451,6 +844,7 @@ struct RawAgent {
     id: String,
     models: Vec<String>,
     prompt: String,
+    runner: RawAgentRunner,
 }
 
 #[derive(Deserialize)]
@@ -469,9 +863,13 @@ struct RawRunner {
 }
 
 impl ReviewConfig {
+    pub fn execution(&self) -> &ExecutionConfig {
+        &self.execution
+    }
+
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
         let header: SchemaHeader = serde_json::from_slice(bytes)?;
-        if header.schema_version != 2 {
+        if header.schema_version != 5 {
             return Err(ConfigError::UnsupportedSchema(header.schema_version));
         }
         let raw: RawConfig = serde_json::from_slice(bytes)?;
@@ -528,6 +926,7 @@ impl ReviewConfig {
                 models: supported_models,
                 prompt_hash: PromptHash::of(&raw_agent.prompt),
                 prompt: raw_agent.prompt,
+                runner: AgentRunnerConfig::try_from(raw_agent.runner)?,
             });
         }
         let mut seen_repositories = HashSet::new();
@@ -593,7 +992,16 @@ impl ReviewConfig {
             models,
             agents,
             repositories,
+            execution: ExecutionConfig::try_from(raw.execution)?,
         };
+        for agent in &config.agents {
+            if agent.runner.model_provider() == config.execution.github_provider() {
+                return Err(ConfigError::InvalidRunner(format!(
+                    "agent {} uses the GitHub provider as its model provider",
+                    agent.id
+                )));
+            }
+        }
         for repository in &config.repositories {
             let key =
                 PrKey::new(repository.name.clone(), 1).map_err(ConfigError::InvalidRepository)?;
@@ -638,6 +1046,7 @@ impl ReviewConfig {
                             model,
                             agent,
                             archive: &runner.archive,
+                            execution: &self.execution,
                         });
                     }
                 }
@@ -648,6 +1057,32 @@ impl ReviewConfig {
             })
             .collect()
     }
+
+    pub fn agents(&self) -> &[Agent] {
+        &self.agents
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_execution_json() -> serde_json::Value {
+    serde_json::json!({
+        "openshell": std::env::temp_dir().join("openshell"),
+        "gateway": "test-gateway",
+        "workspace": "default",
+        "driver": "vm",
+        "github_provider": "test-github-provider",
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn test_runner_json() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "claude",
+        "model_provider": "test-model-provider",
+        "policy": std::env::temp_dir().join("review-policy.yaml"),
+        "policy_sha256": "a".repeat(64),
+        "hold_command": ["/bin/sleep", "3600"]
+    })
 }
 
 pub(crate) fn normalize_email(value: String) -> Result<String, ConfigError> {
@@ -668,13 +1103,31 @@ pub(crate) fn normalize_email(value: String) -> Result<String, ConfigError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn vm_executable_paths_use_posix_absolute_syntax_on_every_host() {
+        assert!(valid_vm_absolute_path("/usr/local/bin/claude"));
+        for invalid in [
+            "",
+            "/",
+            "bin/claude",
+            "/usr/../claude",
+            "/usr/./claude",
+            "/usr//claude",
+            "/usr/claude/",
+            "C:\\claude.exe",
+        ] {
+            assert!(!valid_vm_absolute_path(invalid), "accepted {invalid:?}");
+        }
+    }
+
     fn archive_path(name: &str) -> String {
         std::env::temp_dir().join(name).to_str().unwrap().to_owned()
     }
 
     fn config_json() -> serde_json::Value {
         serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 5,
+            "execution": test_execution_json(),
             "models": [
                 {"id": "model-alpha", "coauthors": [{"name":"Model Alpha", "email":"model@example.com"}]},
                 {"id": "model-beta", "coauthors": [{"name":"Model Beta", "email":"model@example.com"}]}
@@ -683,20 +1136,22 @@ mod tests {
                 {
                     "id": "claude",
                     "models": ["model-alpha", "model-beta"],
-                    "prompt": "Review the pull request."
+                    "prompt": "Review the pull request.",
+                    "runner": test_runner_json()
                 },
                 {
                     "id": "codex",
                     "models": ["model-beta"],
-                    "prompt": "Find correctness and security issues."
+                    "prompt": "Find correctness and security issues.",
+                    "runner": test_runner_json()
                 }
             ],
             "repositories": [{
                 "name": "Owner/Repo",
                 "review_models": ["model-alpha", "model-beta"],
                 "runners": [
-                    {"agent": "codex", "vm_archive": {"path": archive_path("codex.tar"), "sha256": "b".repeat(64)}},
-                    {"agent": "claude", "vm_archive": {"path": archive_path("claude.tar"), "sha256": "a".repeat(64)}}
+                    {"agent": "codex", "vm_archive": {"path": archive_path("codex.tar"), "sha256": "b".repeat(64), "config_sha256": "c".repeat(64)}},
+                    {"agent": "claude", "vm_archive": {"path": archive_path("claude.tar"), "sha256": "a".repeat(64), "config_sha256": "d".repeat(64)}}
                 ]
             }]
         })
@@ -704,7 +1159,9 @@ mod tests {
 
     #[test]
     fn resolves_models_to_the_first_compatible_agent_runner() {
-        let config = ReviewConfig::from_json(&serde_json::to_vec(&config_json()).unwrap()).unwrap();
+        let mut raw = config_json();
+        raw["agents"][1]["runner"]["model_provider"] = "second-model-provider".into();
+        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
         let review_models = config
             .review_models_for(&PrKey::new("owner/repo", 42).unwrap())
             .unwrap();
@@ -713,6 +1170,11 @@ mod tests {
         assert_eq!(review_models[0].agent().id().as_str(), "claude");
         assert_eq!(review_models[1].model().id().as_str(), "model-beta");
         assert_eq!(review_models[1].agent().id().as_str(), "codex");
+        assert_eq!(review_models[1].agent().runner().kind(), AgentKind::Claude);
+        assert_eq!(
+            review_models[1].agent().runner().model_provider(),
+            "second-model-provider"
+        );
         assert_eq!(
             review_models[0].agent().prompt(),
             "Review the pull request."
@@ -745,6 +1207,21 @@ mod tests {
         assert!(matches!(
             ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()),
             Err(ConfigError::InvalidArchiveChecksum)
+        ));
+
+        let mut raw = config_json();
+        raw["agents"][0]["runner"]["kind"] = "unsupported".into();
+        assert!(matches!(
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()),
+            Err(ConfigError::InvalidRunnerKind(_))
+        ));
+
+        let mut raw = config_json();
+        raw["agents"][0]["runner"]["environment"] =
+            serde_json::json!({"CLAUDE_CODE_EXECUTABLE":"/tmp/other"});
+        assert!(matches!(
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()),
+            Err(ConfigError::InvalidRunner(_))
         ));
 
         let mut raw = config_json();
@@ -798,6 +1275,31 @@ mod tests {
         assert!(matches!(
             ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()),
             Err(ConfigError::UnsupportedSchema(1))
+        ));
+
+        let mut raw = config_json();
+        raw["schema_version"] = 3.into();
+        assert!(matches!(
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()),
+            Err(ConfigError::UnsupportedSchema(3))
+        ));
+
+        let mut raw = config_json();
+        raw["schema_version"] = 4.into();
+        assert!(matches!(
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()),
+            Err(ConfigError::UnsupportedSchema(4))
+        ));
+
+        let mut raw = config_json();
+        raw["execution"]["mounts"] = serde_json::json!({
+            "checkout": "/sandbox/other",
+            "instructions": "/sandbox/instructions",
+            "output": "/sandbox/output"
+        });
+        assert!(matches!(
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()),
+            Err(ConfigError::Json(_))
         ));
     }
 }

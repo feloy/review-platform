@@ -285,21 +285,22 @@ mod tests {
     fn config_json() -> serde_json::Value {
         let archive = |name: &str| std::env::temp_dir().join(name).to_str().unwrap().to_owned();
         serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 5,
+            "execution": crate::config::test_execution_json(),
             "models": [
                 {"id":"model-alpha", "coauthors":[{"name":"Model Alpha", "email":"model@example.com"}]},
                 {"id":"model-beta", "coauthors":[{"name":"Model Beta", "email":"model@example.com"}]}
             ],
             "agents": [
-                {"id":"claude", "models":["model-alpha", "model-beta"], "prompt":"Review."},
-                {"id":"codex", "models":["model-beta"], "prompt":"Review carefully."}
+                {"id":"claude", "models":["model-alpha", "model-beta"], "prompt":"Review.", "runner": crate::config::test_runner_json()},
+                {"id":"codex", "models":["model-beta"], "prompt":"Review carefully.", "runner": crate::config::test_runner_json()}
             ],
             "repositories": [{
                 "name":"owner/repo",
                 "review_models":["model-alpha", "model-beta"],
                 "runners":[
-                    {"agent":"codex", "vm_archive":{"path":archive("codex.tar"), "sha256":"b".repeat(64)}},
-                    {"agent":"claude", "vm_archive":{"path":archive("claude.tar"), "sha256":"a".repeat(64)}}
+                    {"agent":"codex", "vm_archive":{"path":archive("codex.tar"), "sha256":"b".repeat(64), "config_sha256":"c".repeat(64)}},
+                    {"agent":"claude", "vm_archive":{"path":archive("claude.tar"), "sha256":"a".repeat(64), "config_sha256":"d".repeat(64)}}
                 ]
             }]
         })
@@ -560,6 +561,23 @@ mod tests {
                 PullAvailability::Open,
                 CiState::Green,
                 &changed_review_models,
+                &empty
+            )
+            .unwrap()
+            .readiness(),
+            Readiness::ModelValidationRequired
+        );
+        let mut changed_execution = config_json();
+        changed_execution["execution"]["cpu"] = "3".into();
+        let changed_execution =
+            ReviewConfig::from_json(&serde_json::to_vec(&changed_execution).unwrap()).unwrap();
+        assert_eq!(
+            prepare_for_head(
+                state.get(&key).unwrap(),
+                &head,
+                PullAvailability::Open,
+                CiState::Green,
+                &changed_execution.review_models_for(&key).unwrap(),
                 &empty
             )
             .unwrap()

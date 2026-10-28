@@ -3,10 +3,97 @@
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use review_platform::State;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
+
+/// Advisory process lock kept on a stable sibling file while state is read and saved.
+pub struct StateLock {
+    _file: File,
+}
+
+#[cfg(windows)]
+fn lock_is_busy(error: &std::io::Error) -> bool {
+    // Windows reports exclusive-open contention as sharing or lock violations.
+    matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+pub fn lock(path: &Path) -> Result<StateLock> {
+    let parent = parent_dir(path);
+    fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
+    let mut lock_name = path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+        for _ in 0..200 {
+            match options.open(&lock_path) {
+                Ok(file) => return Ok(StateLock { _file: file }),
+                Err(error) if lock_is_busy(&error) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("locking {}", lock_path.display()));
+                }
+            }
+        }
+        anyhow::bail!("timed out locking {}", lock_path.display());
+    }
+    #[cfg(unix)]
+    {
+        let file = options
+            .open(&lock_path)
+            .with_context(|| format!("opening lock {}", lock_path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .with_context(|| format!("locking {}", lock_path.display()))?;
+        Ok(StateLock { _file: file })
+    }
+}
+
+/// Nonblocking process lock used to keep recovery from stopping a live runner.
+pub fn try_lock(path: &Path) -> Result<StateLock> {
+    let parent = parent_dir(path);
+    fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
+    let mut lock_name = path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+        let file = options.open(&lock_path).map_err(|error| {
+            if lock_is_busy(&error) {
+                anyhow::anyhow!("review runner is still active")
+            } else {
+                anyhow::Error::new(error).context(format!("locking {}", lock_path.display()))
+            }
+        })?;
+        Ok(StateLock { _file: file })
+    }
+    #[cfg(unix)]
+    {
+        let file = options
+            .open(&lock_path)
+            .with_context(|| format!("opening lock {}", lock_path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+            |error| {
+                if std::io::Error::from(error).kind() == std::io::ErrorKind::WouldBlock {
+                    anyhow::anyhow!("review runner is still active")
+                } else {
+                    anyhow::Error::new(error).context(format!("locking {}", lock_path.display()))
+                }
+            },
+        )?;
+        Ok(StateLock { _file: file })
+    }
+}
 
 pub fn resolve_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
     let path = match override_path {
@@ -88,4 +175,38 @@ fn parent_dir(path: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn state_lock_excludes_concurrent_mutations_and_releases_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let held = lock(&path).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _next = lock(&path).unwrap();
+            sender.send(()).unwrap();
+        });
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(held);
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn nonblocking_round_lock_rejects_an_active_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runner");
+        let held = try_lock(&path).unwrap();
+        let error = try_lock(&path).err().unwrap();
+        assert_eq!(error.to_string(), "review runner is still active");
+        drop(held);
+        assert!(try_lock(&path).is_ok());
+    }
 }

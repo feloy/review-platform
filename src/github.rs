@@ -1697,6 +1697,14 @@ mod tests {
         let archive = directory.path().join("reviewer.tar");
         std::fs::write(&archive, b"archive bytes").unwrap();
         let checksum = format!("{:x}", Sha256::digest(b"archive bytes"));
+        let image_config =
+            br#"{"config":{"Env":["PATH=/usr/bin","CLAUDE_CODE_EXECUTABLE=/usr/bin/claude"]}}"#;
+        std::fs::write(
+            directory.path().join("reviewer.tar.config.json"),
+            image_config,
+        )
+        .unwrap();
+        let config_checksum = format!("{:x}", Sha256::digest(image_config));
         let key = PrKey::new("owner/repo", 42).unwrap();
         let head = HeadSha::new(HEAD).unwrap();
         let revision = InputRevision::new(2).unwrap();
@@ -1720,15 +1728,16 @@ mod tests {
             };
             let config = ReviewConfig::from_json(
                 &serde_json::to_vec(&serde_json::json!({
-                    "schema_version": 2,
+                    "schema_version": 5,
+                    "execution": crate::config::test_execution_json(),
                     "models": [{"id": "model-alpha", "coauthors": []}],
-                    "agents": [{"id": "claude", "models": ["model-alpha"], "prompt": "Review"}],
+                    "agents": [{"id": "claude", "models": ["model-alpha"], "prompt": "Review", "runner":crate::config::test_runner_json()}],
                     "repositories": [{
                         "name": "owner/repo",
                         "review_models": ["model-alpha"],
                         "runners": [{
                             "agent": "claude",
-                            "vm_archive": {"path": archive, "sha256": configured_checksum}
+                            "vm_archive": {"path": archive, "sha256": configured_checksum, "config_sha256": config_checksum}
                         }]
                     }]
                 }))

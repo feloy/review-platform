@@ -7,11 +7,14 @@ use crate::model::{
     StateError,
 };
 use crate::preparation::{Preparation, Readiness};
+use crate::review::{
+    FORMAT_RULES, FailureKind, Freshness, RoundId, RoundRecord, RoundStateError, RoundStatus,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum ModelValidationError {
@@ -80,6 +83,9 @@ pub struct ModelValidation {
     head_sha: HeadSha,
     revision: InputRevision,
     prompt_sha256: PromptHash,
+    format_sha256: PromptHash,
+    execution_sha256: PromptHash,
+    runner_sha256: PromptHash,
     vm_archive: VmArchive,
 }
 
@@ -104,7 +110,23 @@ impl ModelValidation {
         self.model == *choice.model().id()
             && self.agent == *choice.agent().id()
             && self.prompt_sha256 == *choice.agent().prompt_hash()
+            && self.format_sha256 == PromptHash::of(FORMAT_RULES)
+            && self.execution_sha256 == *choice.execution().hash()
+            && self.runner_sha256 == *choice.agent().runner().hash()
             && self.vm_archive == *choice.archive()
+    }
+
+    fn matches_round(&self, round: &RoundRecord) -> bool {
+        self.model == *round.model()
+            && self.agent == *round.agent()
+            && self.head_sha == *round.head_sha()
+            && self.revision == round.revision()
+            && self.prompt_sha256 == *round.prompt_hash()
+            && self.format_sha256 == *round.format_hash()
+            && self.execution_sha256 == *round.execution_hash()
+            && self.runner_sha256 == *round.runner_hash()
+            && self.vm_archive.checksum() == round.archive_hash()
+            && self.vm_archive.config_checksum() == round.archive_config_hash()
     }
 }
 
@@ -162,6 +184,7 @@ impl ReviewRequest {
 pub struct State {
     schema_version: u32,
     requests: Vec<ReviewRequest>,
+    rounds: Vec<RoundRecord>,
 }
 
 impl Default for State {
@@ -169,6 +192,7 @@ impl Default for State {
         Self {
             schema_version: SCHEMA_VERSION,
             requests: Vec::new(),
+            rounds: Vec::new(),
         }
     }
 }
@@ -207,11 +231,161 @@ impl State {
                 }
             }
         }
+        let mut round_ids = HashSet::new();
+        let mut blocking_keys = HashSet::new();
+        for round in &self.rounds {
+            round
+                .validate()
+                .map_err(|_| StateError::InvalidRound(round.id().to_string()))?;
+            if !round_ids.insert(round.id()) {
+                return Err(StateError::InvalidRound(round.id().to_string()));
+            }
+            if self.get(round.key()).is_none() {
+                return Err(StateError::InvalidRound(round.id().to_string()));
+            }
+            if round.blocks_new_round() && !blocking_keys.insert(round.key()) {
+                return Err(StateError::InvalidRound(round.id().to_string()));
+            }
+        }
         Ok(())
     }
 
     pub fn requests(&self) -> &[ReviewRequest] {
         &self.requests
+    }
+
+    pub fn rounds(&self) -> &[RoundRecord] {
+        &self.rounds
+    }
+
+    pub fn round(&self, id: &RoundId) -> Option<&RoundRecord> {
+        self.rounds.iter().find(|round| round.id() == id)
+    }
+
+    pub fn latest_round(&self, key: &PrKey) -> Option<&RoundRecord> {
+        self.rounds.iter().rev().find(|round| round.key() == key)
+    }
+
+    pub fn begin_round(
+        &mut self,
+        round: RoundRecord,
+        choice: &ResolvedReviewModel<'_>,
+    ) -> Result<(), RoundStateError> {
+        if self.round(round.id()).is_some() {
+            return Err(RoundStateError::DuplicateId(round.id().clone()));
+        }
+        if let Some(blocking) = self
+            .rounds
+            .iter()
+            .find(|existing| existing.key() == round.key() && existing.blocks_new_round())
+        {
+            return Err(RoundStateError::BlocksNewRound(blocking.id().clone()));
+        }
+        let request = self
+            .get(round.key())
+            .ok_or_else(|| StateError::RequestNotFound(round.key().clone()))?;
+        request.ensure_inspected(round.head_sha(), round.revision())?;
+        if request.authorization() == Authorization::AwaitingLead {
+            return Err(StateError::AwaitingAuthorization(round.key().clone()).into());
+        }
+        if request.discussion() != Some(round.discussion())
+            || !request
+                .model_validation()
+                .is_some_and(|validation| validation.matches(choice))
+            || round.model() != choice.model().id()
+            || round.agent() != choice.agent().id()
+            || round.prompt_hash() != choice.agent().prompt_hash()
+            || round.format_hash() != &PromptHash::of(FORMAT_RULES)
+            || round.execution_hash() != choice.execution().hash()
+            || round.runner_hash() != choice.agent().runner().hash()
+            || round.archive_hash() != choice.archive().checksum()
+            || round.archive_config_hash() != choice.archive().config_checksum()
+        {
+            return Err(RoundStateError::ModelNotValidated);
+        }
+        self.rounds.push(round);
+        Ok(())
+    }
+
+    pub fn dispatch_round(&mut self, id: &RoundId, at: u64) -> Result<(), RoundStateError> {
+        let index = self
+            .rounds
+            .iter()
+            .position(|round| round.id() == id)
+            .ok_or_else(|| RoundStateError::NotFound(id.clone()))?;
+        let round = &self.rounds[index];
+        if round.status() != RoundStatus::Starting {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        let request = self
+            .get(round.key())
+            .ok_or_else(|| StateError::RequestNotFound(round.key().clone()))?;
+        request.ensure_inspected(round.head_sha(), round.revision())?;
+        if request.discussion() != Some(round.discussion())
+            || request.authorization() == Authorization::AwaitingLead
+            || !request
+                .model_validation()
+                .is_some_and(|validation| validation.matches_round(round))
+        {
+            return Err(RoundStateError::ModelNotValidated);
+        }
+        let key = round.key().clone();
+        let request = self.request_mut(&key)?;
+        match request.authorization {
+            Authorization::OneRound => {
+                request.authorization = Authorization::AwaitingLead;
+                request.model_validation = None;
+            }
+            Authorization::PrCycle => {}
+            Authorization::AwaitingLead => {
+                return Err(StateError::AwaitingAuthorization(key).into());
+            }
+        }
+        self.rounds[index].mark_running(at);
+        Ok(())
+    }
+
+    pub fn complete_round(
+        &mut self,
+        id: &RoundId,
+        at: u64,
+        freshness: Freshness,
+    ) -> Result<(), RoundStateError> {
+        let round = self.round_mut(id)?;
+        if round.status() != RoundStatus::Running {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        round.mark_draft(at, freshness);
+        Ok(())
+    }
+
+    pub fn mark_round_cleaned(&mut self, id: &RoundId) -> Result<(), RoundStateError> {
+        let round = self.round_mut(id)?;
+        round.mark_cleaned();
+        Ok(())
+    }
+
+    pub fn fail_round(
+        &mut self,
+        id: &RoundId,
+        at: u64,
+        failure: FailureKind,
+        interrupted: bool,
+        incomplete_log: bool,
+    ) -> Result<(), RoundStateError> {
+        let round = self.round_mut(id)?;
+        if !matches!(round.status(), RoundStatus::Starting | RoundStatus::Running) {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        round.mark_failed(at, failure, interrupted, incomplete_log);
+        Ok(())
+    }
+
+    fn round_mut(&mut self, id: &RoundId) -> Result<&mut RoundRecord, RoundStateError> {
+        self.rounds
+            .iter_mut()
+            .find(|round| round.id() == id)
+            .ok_or_else(|| RoundStateError::NotFound(id.clone()))
     }
 
     pub fn get(&self, key: &PrKey) -> Option<&ReviewRequest> {
@@ -332,6 +506,9 @@ impl State {
             head_sha: inspected_head.clone(),
             revision: inspected_revision,
             prompt_sha256: choice.agent().prompt_hash().clone(),
+            format_sha256: PromptHash::of(FORMAT_RULES),
+            execution_sha256: choice.execution().hash().clone(),
+            runner_sha256: choice.agent().runner().hash().clone(),
             vm_archive: choice.archive().clone(),
         };
         let changed = request.model_validation.as_ref() != Some(&validation);
@@ -518,14 +695,16 @@ mod tests {
             ),
         ] {
             let invalid_state = serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 5,
+                "rounds": [],
                 "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}]
             });
             let error = serde_json::from_value::<State>(invalid_state).unwrap_err();
             assert!(error.to_string().contains(expected_error), "{error}");
         }
         let invalid_head = serde_json::json!({
-            "schema_version": 3,
+            "schema_version": 5,
+            "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}
             ]
@@ -571,7 +750,8 @@ mod tests {
     #[test]
     fn state_json_keeps_its_shape_and_normalizes_identifiers() {
         let raw = serde_json::json!({
-            "schema_version": 3,
+            "schema_version": 5,
+            "rounds": [],
             "requests": [
                 {
                     "key": {"repository": "Owner/Repo", "number": 42},
@@ -592,7 +772,8 @@ mod tests {
         assert_eq!(serialized["requests"][0]["key"]["number"], 42);
         assert_eq!(serialized["requests"][0]["head_sha"], HEAD_A);
         assert_eq!(serialized["requests"][0]["authorization"], "awaiting_lead");
-        assert_eq!(serialized["schema_version"], 3);
+        assert_eq!(serialized["schema_version"], 5);
+        assert_eq!(serialized["rounds"], serde_json::json!([]));
         assert_eq!(serialized["requests"][0]["revision"], 1);
         assert!(serialized["requests"][0]["discussion"].is_null());
         assert!(serialized["requests"][0]["model_validation"].is_null());
@@ -601,7 +782,8 @@ mod tests {
     #[test]
     fn corrupt_or_future_state_is_rejected() {
         let duplicate = serde_json::json!({
-            "schema_version": 3,
+            "schema_version": 5,
+            "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": HEAD_A, "authorization": "one_round", "revision": 1, "discussion": {"author_id": 7, "comments": []}, "model_validation": null},
                 {"key": {"repository": "Owner/Repo", "number": 42}, "head_sha": HEAD_B, "authorization": "pr_cycle", "revision": 1, "discussion": null, "model_validation": null}
@@ -610,8 +792,9 @@ mod tests {
         let state: State = serde_json::from_value(duplicate).unwrap();
         assert_eq!(state.validate(), Err(StateError::DuplicateRequest(key())));
 
-        let future: State = serde_json::from_str(r#"{"schema_version":4,"requests":[]}"#).unwrap();
-        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(4)));
+        let future: State =
+            serde_json::from_str(r#"{"schema_version":6,"requests":[],"rounds":[]}"#).unwrap();
+        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(6)));
     }
 
     #[test]
@@ -712,7 +895,8 @@ mod tests {
     #[test]
     fn current_state_rejects_one_round_authorization_without_observed_discussion() {
         let state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 3,
+            "schema_version": 5,
+            "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
                 "head_sha": HEAD_A,
@@ -851,7 +1035,8 @@ mod tests {
     #[test]
     fn malformed_observations_and_revision_overflow_are_rejected() {
         let base = serde_json::json!({
-            "schema_version": 3,
+            "schema_version": 5,
+            "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
                 "head_sha": HEAD_A,
@@ -910,14 +1095,19 @@ mod tests {
     #[test]
     fn model_validation_tracks_exact_inputs_and_is_cleared_by_changes() {
         let raw = serde_json::json!({
-            "schema_version":2,
+            "schema_version":5,
+            "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha", "coauthors":[]}],
-            "agents":[{"id":"claude", "models":["model-alpha"], "prompt":"Review."}],
+            "agents":[
+                {"id":"claude", "models":["model-alpha"], "prompt":"Review.", "runner":crate::config::test_runner_json()},
+                {"id":"another-agent", "models":["model-alpha"], "prompt":"Review separately.", "runner":crate::config::test_runner_json()}
+            ],
             "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
                 "agent":"claude",
                 "vm_archive":{
                     "path":std::env::temp_dir().join("reviewer.tar").to_str().unwrap(),
-                    "sha256":"a".repeat(64)
+                    "sha256":"a".repeat(64),
+                    "config_sha256":"c".repeat(64)
                 }
             }]}]
         });
@@ -997,6 +1187,7 @@ mod tests {
         let other_archive = VmArchive::new(
             std::env::temp_dir().join("different.tar"),
             crate::config::ArchiveHash::new("a".repeat(64)).unwrap(),
+            crate::config::ArchiveHash::new("c".repeat(64)).unwrap(),
         )
         .unwrap();
         let wrong_verification = VerifiedArchive::for_test(&other_archive);
@@ -1048,6 +1239,58 @@ mod tests {
                     &verified,
                 )
                 .unwrap()
+        );
+        let mut changed_runner = raw.clone();
+        changed_runner["agents"][0]["runner"]["max_turns"] = 17.into();
+        let changed_runner =
+            ReviewConfig::from_json(&serde_json::to_vec(&changed_runner).unwrap()).unwrap();
+        assert!(
+            !state
+                .get(&key())
+                .unwrap()
+                .model_validation()
+                .unwrap()
+                .matches(&changed_runner.review_models_for(&key()).unwrap()[0])
+        );
+        let mut changed_other_agent = raw.clone();
+        changed_other_agent["agents"][1]["runner"]["max_turns"] = 17.into();
+        let changed_other_agent =
+            ReviewConfig::from_json(&serde_json::to_vec(&changed_other_agent).unwrap()).unwrap();
+        assert!(
+            state
+                .get(&key())
+                .unwrap()
+                .model_validation()
+                .unwrap()
+                .matches(&changed_other_agent.review_models_for(&key()).unwrap()[0])
+        );
+        let mut changed_metadata = raw.clone();
+        changed_metadata["repositories"][0]["runners"][0]["vm_archive"]["config_sha256"] =
+            "d".repeat(64).into();
+        let changed_metadata =
+            ReviewConfig::from_json(&serde_json::to_vec(&changed_metadata).unwrap()).unwrap();
+        assert!(
+            !state
+                .get(&key())
+                .unwrap()
+                .model_validation()
+                .unwrap()
+                .matches(&changed_metadata.review_models_for(&key()).unwrap()[0])
+        );
+        let mut old_format = serde_json::to_value(&state).unwrap();
+        old_format["requests"][0]["model_validation"]["format_sha256"] = "b".repeat(64).into();
+        let old_format: State = serde_json::from_value(old_format).unwrap();
+        assert_eq!(
+            prepare(
+                old_format.get(&key()).unwrap(),
+                PullObservation::new(&current_head, PullAvailability::Open),
+                CiObservation::new(&current_head, CiState::Green),
+                &review_models,
+                &HashSet::new(),
+            )
+            .unwrap()
+            .readiness(),
+            Readiness::ModelValidationRequired
         );
         assert!(matches!(
             state.validate_model(
@@ -1113,5 +1356,182 @@ mod tests {
             .unwrap();
         state.revoke(&key()).unwrap();
         assert!(state.get(&key()).unwrap().model_validation().is_none());
+    }
+
+    #[test]
+    fn rounds_consume_one_round_authorization_and_saved_drafts_block_retries() {
+        let raw = serde_json::json!({
+            "schema_version":5,
+            "execution": crate::config::test_execution_json(),
+            "models":[{"id":"model-alpha", "coauthors":[]}],
+            "agents":[{"id":"claude", "models":["model-alpha"], "prompt":"Review.", "runner":crate::config::test_runner_json()}],
+            "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+                "agent":"claude", "vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
+            }]}]
+        });
+        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let choices = config.review_models_for(&key()).unwrap();
+        let choice = &choices[0];
+        let head = head(HEAD_A);
+        let discussion = discussion(&[]);
+        let mut state = State::default();
+        state.record_request(key(), head.clone()).unwrap();
+        state.refresh(&key(), &head, &discussion).unwrap();
+        state
+            .authorize(&key(), &head, revision(2), AuthorizationScope::OneRound)
+            .unwrap();
+        let prepared = prepare(
+            state.get(&key()).unwrap(),
+            PullObservation::new(&head, PullAvailability::Open),
+            CiObservation::new(&head, CiState::Green),
+            &choices,
+            &HashSet::new(),
+        )
+        .unwrap();
+        state
+            .validate_model(
+                &prepared,
+                &head,
+                revision(2),
+                choice,
+                &VerifiedArchive::for_test(choice.archive()),
+            )
+            .unwrap();
+        let first = RoundRecord::new(
+            RoundId::new("r-first").unwrap(),
+            key(),
+            head.clone(),
+            revision(2),
+            discussion.clone(),
+            choice,
+            1,
+        );
+        state.begin_round(first.clone(), choice).unwrap();
+        assert!(matches!(
+            state.begin_round(
+                RoundRecord::new(
+                    RoundId::new("r-second").unwrap(),
+                    key(),
+                    head.clone(),
+                    revision(2),
+                    discussion.clone(),
+                    choice,
+                    2
+                ),
+                choice
+            ),
+            Err(RoundStateError::BlocksNewRound(_))
+        ));
+        state.dispatch_round(first.id(), 3).unwrap();
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::AwaitingLead
+        );
+        assert!(state.get(&key()).unwrap().model_validation().is_none());
+        state
+            .complete_round(first.id(), 4, Freshness::Stale)
+            .unwrap();
+        state.mark_round_cleaned(first.id()).unwrap();
+        assert!(state.validate().is_ok());
+        state
+            .authorize(&key(), &head, revision(2), AuthorizationScope::OneRound)
+            .unwrap();
+        let prepared = prepare(
+            state.get(&key()).unwrap(),
+            PullObservation::new(&head, PullAvailability::Open),
+            CiObservation::new(&head, CiState::Green),
+            &choices,
+            &HashSet::new(),
+        )
+        .unwrap();
+        state
+            .validate_model(
+                &prepared,
+                &head,
+                revision(2),
+                choice,
+                &VerifiedArchive::for_test(choice.archive()),
+            )
+            .unwrap();
+        assert!(matches!(
+            state.begin_round(
+                RoundRecord::new(
+                    RoundId::new("r-third").unwrap(),
+                    key(),
+                    head,
+                    revision(2),
+                    discussion,
+                    choice,
+                    5
+                ),
+                choice
+            ),
+            Err(RoundStateError::BlocksNewRound(_))
+        ));
+    }
+
+    #[test]
+    fn revocation_between_creation_and_dispatch_prevents_consumption() {
+        let raw = serde_json::json!({
+            "schema_version":5,
+            "execution": crate::config::test_execution_json(),
+            "models":[{"id":"model-alpha", "coauthors":[]}],
+            "agents":[{"id":"claude", "models":["model-alpha"], "prompt":"Review.", "runner":crate::config::test_runner_json()}],
+            "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+                "agent":"claude", "vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
+            }]}]
+        });
+        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let choices = config.review_models_for(&key()).unwrap();
+        let choice = &choices[0];
+        let head = head(HEAD_A);
+        let discussion = discussion(&[]);
+        let mut state = State::default();
+        state.record_request(key(), head.clone()).unwrap();
+        state.refresh(&key(), &head, &discussion).unwrap();
+        state
+            .authorize(&key(), &head, revision(2), AuthorizationScope::OneRound)
+            .unwrap();
+        let prepared = prepare(
+            state.get(&key()).unwrap(),
+            PullObservation::new(&head, PullAvailability::Open),
+            CiObservation::new(&head, CiState::Green),
+            &choices,
+            &HashSet::new(),
+        )
+        .unwrap();
+        state
+            .validate_model(
+                &prepared,
+                &head,
+                revision(2),
+                choice,
+                &VerifiedArchive::for_test(choice.archive()),
+            )
+            .unwrap();
+        let round = RoundRecord::new(
+            RoundId::new("r-revoked").unwrap(),
+            key(),
+            head,
+            revision(2),
+            discussion,
+            choice,
+            1,
+        );
+        state.begin_round(round.clone(), choice).unwrap();
+        state.revoke(&key()).unwrap();
+        assert!(matches!(
+            state.dispatch_round(round.id(), 2),
+            Err(RoundStateError::ModelNotValidated)
+        ));
+        assert_eq!(
+            state.round(round.id()).unwrap().status(),
+            RoundStatus::Starting
+        );
+        state
+            .fail_round(round.id(), 3, FailureKind::Dispatch, false, false)
+            .unwrap();
+        state.mark_round_cleaned(round.id()).unwrap();
+        assert!(state.validate().is_ok());
     }
 }
