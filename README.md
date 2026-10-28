@@ -347,9 +347,15 @@ under `rounds/ROUND_ID/`.
 It retains the original `output/review-output.json` agent artifact unchanged,
 stores the assembled private `draft.json`,
 and keeps an incomplete log file if an agent run fails after emitting dialogue.
-The runner seeds the output file with an invalid marker and allows Claude's
-`Edit` tool to replace that marker in this file only.
+The runner seeds the output file with an invalid marker and grants Claude's
+`Edit` tool permission for that file.
+It starts Claude in `/sandbox` so relative read permissions cover the checkout
+and instructions and `Edit(./output/review-output.json)` matches the output file.
 An unchanged marker cannot become a draft.
+Claude Code may still allow some reads and simple shell commands outside the
+explicit `--allowedTools` entries.
+The wildcard Git and GitHub Bash grants do not by themselves restrict every
+read or write option; this remains an open review finding.
 The agent artifact must be regular UTF-8 JSON of at most 1 MiB
 with exactly `status`, `comments`, and `lead_advice`.
 The runner adds `review_log` from the captured Claude dialogue.
