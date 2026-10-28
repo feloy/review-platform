@@ -453,6 +453,19 @@ impl<'a> OpenShell<'a> {
     }
 
     pub fn exec_command(&self, round: &RoundRecord, command: &[OsString]) -> Command {
+        self.exec_command_at(round, None, command)
+    }
+
+    pub fn exec_review_agent(&self, round: &RoundRecord, command: &[OsString]) -> Command {
+        self.exec_command_at(round, Some(sandbox_layout::WORKDIR_TARGET), command)
+    }
+
+    fn exec_command_at(
+        &self,
+        round: &RoundRecord,
+        workdir: Option<&str>,
+        command: &[OsString],
+    ) -> Command {
         let mut child = Command::new(self.config.openshell());
         self.base_args(&mut child, round.gateway(), round.workspace());
         child.args([
@@ -464,6 +477,9 @@ impl<'a> OpenShell<'a> {
             "--timeout",
         ]);
         child.arg(self.config.timeout_seconds().to_string());
+        if let Some(workdir) = workdir {
+            child.args(["--workdir", workdir]);
+        }
         child.arg("--");
         child.args(command);
         child

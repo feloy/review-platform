@@ -51,7 +51,7 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
         b"trusted instructions\n",
     )
     .unwrap();
-    let output_file = output.join("review-output.json");
+    let output_file = output.join(sandbox_layout::OUTPUT_FILE_NAME);
     let mut marker = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -143,6 +143,15 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
     ] {
         assert!(help.contains(flag), "Claude CLI does not report {flag}");
     }
+    let workdir = shell
+        .exec_review_agent(&round, &[OsString::from("/bin/pwd")])
+        .output()
+        .unwrap();
+    assert!(workdir.status.success(), "review agent workdir failed");
+    assert_eq!(
+        String::from_utf8(workdir.stdout).unwrap().trim(),
+        sandbox_layout::WORKDIR_TARGET
+    );
     let command = format!(
         "test -r {}/README.md && test -r {}/system-prompt.txt && ! (echo changed > {}/README.md) && printf '%s' '{{\"status\":\"ACCEPT\",\"comments\":\"Synthetic result\",\"lead_advice\":\"\"}}' > {}/review-output.json",
         sandbox_layout::CHECKOUT_TARGET,

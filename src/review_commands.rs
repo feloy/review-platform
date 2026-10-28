@@ -188,7 +188,10 @@ pub fn run_review(
         let output = round_dir.join("output");
         fs::create_dir(&instructions).context("creating private instruction directory")?;
         fs::create_dir(&output).context("creating private output directory")?;
-        write_new(&output.join("review-output.json"), OUTPUT_MARKER.as_bytes())?;
+        write_new(
+            &output.join(sandbox_layout::OUTPUT_FILE_NAME),
+            OUTPUT_MARKER.as_bytes(),
+        )?;
         write_new(
             &instructions.join("configured-prompt.txt"),
             choice.agent().prompt().as_bytes(),
@@ -315,7 +318,7 @@ pub fn run_review(
         println!("Round {id}: validating private draft.");
         failure = FailureKind::Output;
         let draft = review_platform::review::read_agent_output(
-            &output.join("review-output.json"),
+            &output.join(sandbox_layout::OUTPUT_FILE_NAME),
             agent_log.clone(),
         )?;
         save_draft(&round_dir.join("draft.json"), &draft)?;
