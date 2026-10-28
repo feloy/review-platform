@@ -8,18 +8,22 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
         HeadSha, InputRevision, ObservedDiscussion, PrKey, archive,
         config::ReviewConfig,
         openshell::{OpenShell, SandboxMounts},
-        review::{RoundId, RoundRecord, read_agent_output},
+        review::{OUTPUT_MARKER, RoundId, RoundRecord, read_agent_output},
         sandbox_layout,
     };
     use std::ffi::OsString;
-    use std::fs;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
     use std::num::NonZeroU64;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let config_path = std::env::var("REVIEW_PLATFORM_LIVE_VM_CONFIG")
         .expect("set REVIEW_PLATFORM_LIVE_VM_CONFIG to a private schema 5 config");
     let config = ReviewConfig::from_json(&fs::read(config_path).unwrap()).unwrap();
-    let key = PrKey::new("owner/repo", 1).unwrap();
+    let repository = std::env::var("REVIEW_PLATFORM_LIVE_VM_REPOSITORY")
+        .unwrap_or_else(|_| "owner/repo".to_owned());
+    let key = PrKey::new(repository, 1).unwrap();
     let choices = config.review_models_for(&key).unwrap();
     let shell = OpenShell::new(config.execution());
     shell.preflight_gateway().unwrap();
@@ -47,6 +51,15 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
         b"trusted instructions\n",
     )
     .unwrap();
+    let output_file = output.join("review-output.json");
+    let mut marker = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&output_file)
+        .unwrap();
+    marker.write_all(OUTPUT_MARKER.as_bytes()).unwrap();
+    drop(marker);
     let policy = root.path().join("policy.yaml");
     shell
         .stage_policy(choices[0].agent().runner(), &policy)
@@ -145,8 +158,8 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
     let status = shell.exec_command(&round, &args).output().unwrap();
     assert!(status.status.success(), "VM command failed");
     shell.stop(&round).unwrap();
-    let draft = read_agent_output(&output.join("review-output.json"), String::new()).unwrap();
+    let draft = read_agent_output(&output_file, String::new()).unwrap();
     assert_eq!(draft.publication_body(), "Synthetic result");
     shell.delete(&round).unwrap();
-    assert!(output.join("review-output.json").exists());
+    assert!(output_file.exists());
 }
