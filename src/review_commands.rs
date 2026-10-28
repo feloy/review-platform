@@ -11,7 +11,8 @@ use review_platform::{
     openshell::{OpenShell, SandboxMounts},
     preparation::Readiness,
     review::{
-        DraftOutput, FORMAT_RULES, FailureKind, Freshness, RoundId, RoundRecord, RoundStatus,
+        DraftOutput, FORMAT_RULES, FailureKind, Freshness, OUTPUT_MARKER, RoundId, RoundRecord,
+        RoundStatus,
     },
     round, sandbox_layout,
 };
@@ -187,6 +188,7 @@ pub fn run_review(
         let output = round_dir.join("output");
         fs::create_dir(&instructions).context("creating private instruction directory")?;
         fs::create_dir(&output).context("creating private output directory")?;
+        write_new(&output.join("review-output.json"), OUTPUT_MARKER.as_bytes())?;
         write_new(
             &instructions.join("configured-prompt.txt"),
             choice.agent().prompt().as_bytes(),

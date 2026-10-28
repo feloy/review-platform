@@ -85,6 +85,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Read image environment values only from verified metadata.
   Do not log credentials, tokens, prompts containing secrets, or draft text by default.
   Keep secret material out of repository files.
+- Verify the agent's reported tools under its actual CLI flags before relying on an allowlist entry.
+  Exercise draft output through the live VM mount; CLI permissions and mount access are separate.
 - Validate external input at its boundary and propagate actionable errors.
   Do not make network calls or run agents from pure domain logic or unit tests.
 - Use platform trust roots for outbound HTTPS so operator-installed certificates work.

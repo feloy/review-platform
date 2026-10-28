@@ -347,6 +347,9 @@ under `rounds/ROUND_ID/`.
 It retains the original `output/review-output.json` agent artifact unchanged,
 stores the assembled private `draft.json`,
 and keeps an incomplete log file if an agent run fails after emitting dialogue.
+The runner seeds the output file with an invalid marker and allows Claude's
+`Edit` tool to replace that marker in this file only.
+An unchanged marker cannot become a draft.
 The agent artifact must be regular UTF-8 JSON of at most 1 MiB
 with exactly `status`, `comments`, and `lead_advice`.
 The runner adds `review_log` from the captured Claude dialogue.
@@ -379,6 +382,8 @@ The config must point to an existing VM tar, its `.config.json` metadata,
 and a policy with correct checksums.
 Set `REVIEW_PLATFORM_LIVE_VM_DIR` when the gateway requires test paths
 on a particular host directory.
+Set `REVIEW_PLATFORM_LIVE_VM_REPOSITORY` when the configuration does not
+include the test's default `owner/repo` repository.
 
 `github-pr`, `refresh`, and `prepare-review` read public GitHub pull requests without a token.
 For private repositories or a higher GitHub API rate limit,
