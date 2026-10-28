@@ -48,6 +48,12 @@ impl ModelSelection {
     pub fn model(&self) -> &ModelId {
         &self.model
     }
+    pub fn head(&self) -> &HeadSha {
+        &self.head
+    }
+    pub fn revision(&self) -> InputRevision {
+        self.revision
+    }
 }
 
 /// A refreshed request, ready for the caller to persist before further reads.
@@ -61,6 +67,9 @@ pub struct RefreshedRound<'a> {
 impl RefreshedRound<'_> {
     pub fn outcome(&self) -> RefreshOutcome {
         self.outcome
+    }
+    pub fn observation(&self) -> &PullObservation {
+        &self.observation
     }
 }
 
@@ -98,11 +107,21 @@ pub fn refresh<'a>(
     config: &'a ReviewConfig,
     key: &PrKey,
 ) -> Result<RefreshedRound<'a>, RoundError> {
+    let observation = client.observe_pull(key)?;
+    refresh_observation(state, config, observation)
+}
+
+/// Apply an already-fetched observation after a caller has reacquired its state lock.
+pub fn refresh_observation<'a>(
+    state: &mut State,
+    config: &'a ReviewConfig,
+    observation: PullObservation,
+) -> Result<RefreshedRound<'a>, RoundError> {
+    let key = observation.key();
     let models = config.review_models_for(key)?;
     if state.get(key).is_none() {
         return Err(StateError::RequestNotFound(key.clone()).into());
     }
-    let observation = client.observe_pull(key)?;
     let outcome = state.refresh(
         observation.key(),
         observation.head_sha(),

@@ -54,6 +54,8 @@ pub enum StateError {
     DuplicateRequest(PrKey),
     #[error("unsupported state schema version: {0}")]
     UnsupportedSchema(u32),
+    #[error("invalid stored round {0}")]
+    InvalidRound(String),
 }
 
 #[derive(Deserialize)]

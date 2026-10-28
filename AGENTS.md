@@ -73,15 +73,16 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Connect to an already-running, operator-managed OpenShell gateway selected explicitly.
   Require its expected model and read-only GitHub providers before starting a round;
   attach only those providers and disable automatic provider creation.
-  Build sandbox arguments from validated trusted configuration and round inputs,
-  without hard-coded sandbox settings.
+  Build sandbox arguments from validated trusted configuration and round inputs.
+  Keep review mount targets, access modes, and mandatory lifecycle restrictions fixed in code.
   Read the driver type from configuration; support only `vm` for now
   and report `podman` as unsupported or unknown names as invalid
   before creating a sandbox.
   Manage review sandboxes, not the gateway, its providers, or their credentials and rotation.
 - Pin OCI images by digest.
-  For VM archives, reject symlinks and hash the opened file;
-  reverify a private copy before execution.
+  For VM archives and their separate OCI metadata, reject symlinks,
+  hash the opened files, and reverify private copies before execution.
+  Read image environment values only from verified metadata.
   Do not log credentials, tokens, prompts containing secrets, or draft text by default.
   Keep secret material out of repository files.
 - Validate external input at its boundary and propagate actionable errors.

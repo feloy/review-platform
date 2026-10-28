@@ -1,5 +1,6 @@
 //! Operator CLI for local authorization, PR inspection, and round preparation.
 
+mod review_commands;
 mod storage;
 
 use anyhow::{Context, Result};
@@ -18,7 +19,7 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Local operator prototype for Review Platform",
-    long_about = "Record PR review requests and lead authorization locally, inspect live GitHub pull requests, and prepare review rounds. OpenShell execution is not connected yet."
+    long_about = "Record PR requests and lead decisions, prepare and run reviews through an existing OpenShell gateway, and inspect private drafts."
 )]
 struct Cli {
     /// Override the per-user state file; keep this private to the lead operator.
@@ -74,6 +75,31 @@ enum Command {
         #[arg(long, value_name = "REVISION")]
         revision: Option<u64>,
     },
+    /// Inspect the configured OpenShell gateway without changing it.
+    Gateway {
+        #[command(subcommand)]
+        command: GatewayCommand,
+    },
+    /// Run one prepared, authorized review in the foreground.
+    RunReview {
+        repository: String,
+        pr: u64,
+        #[arg(long, value_name = "HEAD_SHA")]
+        head: String,
+        #[arg(long, value_name = "REVISION")]
+        revision: u64,
+    },
+    /// Display a saved private draft and optionally its sensitive review log.
+    ShowDraft {
+        repository: String,
+        pr: u64,
+        #[arg(long, value_name = "ROUND_ID")]
+        round: String,
+        #[arg(long)]
+        log: bool,
+    },
+    /// Clean up an interrupted review without running the agent again.
+    RecoverReview { repository: String, pr: u64 },
     /// List locally recorded review requests.
     List,
     /// Print the absolute path of the config file without reading it.
@@ -94,6 +120,11 @@ enum Command {
     },
     /// Print the absolute path of the state file without reading it.
     StatePath,
+}
+
+#[derive(Subcommand)]
+enum GatewayCommand {
+    Status,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -136,6 +167,7 @@ fn run(cli: Cli) -> Result<()> {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
             let head_sha = HeadSha::new(head_sha)?;
+            let _lock = storage::lock(&state_file)?;
             let mut state = storage::load(&state_file)?;
             let outcome = state.record_request(key.clone(), head_sha)?;
             if outcome != RecordOutcome::Unchanged {
@@ -155,12 +187,26 @@ fn run(cli: Cli) -> Result<()> {
         Command::Refresh { repository, pr } => {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
-            let mut state = storage::load(&state_file)?;
-            if state.get(&key).is_none() {
-                return Err(StateError::RequestNotFound(key).into());
-            }
+            let state = storage::load(&state_file)?;
+            let prior_revision = state
+                .get(&key)
+                .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
+                .revision();
             let client = github::GithubClient::new()?;
             let observation = client.observe_pull(&key)?;
+            let _lock = storage::lock(&state_file)?;
+            let mut state = storage::load(&state_file)?;
+            let current_revision = state
+                .get(&key)
+                .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
+                .revision();
+            if current_revision != prior_revision {
+                return Err(StateError::RevisionMismatch {
+                    inspected: prior_revision,
+                    recorded: current_revision,
+                }
+                .into());
+            }
             let outcome = state.refresh(
                 observation.key(),
                 observation.head_sha(),
@@ -202,6 +248,7 @@ fn run(cli: Cli) -> Result<()> {
             let inspected_head = HeadSha::new(head)?;
             let inspected_revision = InputRevision::new(revision)?;
             let scope = AuthorizationScope::from(scope);
+            let _lock = storage::lock(&state_file)?;
             let mut state = storage::load(&state_file)?;
             if state.authorize(&key, &inspected_head, inspected_revision, scope)? {
                 storage::save(&state_file, &state)?;
@@ -211,6 +258,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Revoke { repository, pr } => {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
+            let _lock = storage::lock(&state_file)?;
             let mut state = storage::load(&state_file)?;
             if state.revoke(&key)? {
                 storage::save(&state_file, &state)?;
@@ -244,6 +292,12 @@ fn run(cli: Cli) -> Result<()> {
                     validation.agent()
                 );
             }
+            if let Some(round) = state.latest_round(&key) {
+                println!("  latest round: {} ({})", round.id(), round.status());
+                if round.cleanup_pending() {
+                    println!("  cleanup pending: run recover-review");
+                }
+            }
         }
         Command::PrepareReview {
             repository,
@@ -260,6 +314,30 @@ fn run(cli: Cli) -> Result<()> {
             head,
             revision,
         )?,
+        Command::Gateway {
+            command: GatewayCommand::Status,
+        } => {
+            review_commands::gateway_status(config_file)?;
+        }
+        Command::RunReview {
+            repository,
+            pr,
+            head,
+            revision,
+        } => {
+            review_commands::run_review(state_file, config_file, repository, pr, head, revision)?;
+        }
+        Command::ShowDraft {
+            repository,
+            pr,
+            round,
+            log,
+        } => {
+            review_commands::show_draft(state_file, repository, pr, round, log)?;
+        }
+        Command::RecoverReview { repository, pr } => {
+            review_commands::recover_review(state_file, config_file, repository, pr)?;
+        }
         Command::List => {
             let state_file = storage::resolve_path(state_file)?;
             let state = storage::load(&state_file)?;
@@ -392,15 +470,48 @@ fn run_prepare(
         .with_context(|| format!("reading review configuration {}", config_file.display()))?;
     let config = ReviewConfig::from_json(&config_bytes)
         .with_context(|| format!("validating review configuration {}", config_file.display()))?;
-    let mut state = storage::load(&state_file)?;
+    let initial = storage::load(&state_file)?;
+    let prior_revision = initial
+        .get(&key)
+        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
+        .revision();
     let client = github::GithubClient::new()?;
-    let refreshed = round::refresh(&client, &mut state, &config, &key)?;
+    let observation = client.observe_pull(&key)?;
+    let _lock = storage::lock(&state_file)?;
+    let mut state = storage::load(&state_file)?;
+    let current_revision = state
+        .get(&key)
+        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
+        .revision();
+    if current_revision != prior_revision {
+        return Err(StateError::RevisionMismatch {
+            inspected: prior_revision,
+            recorded: current_revision,
+        }
+        .into());
+    }
+    let refreshed = round::refresh_observation(&mut state, &config, observation)?;
     if refreshed.outcome() != RefreshOutcome::Unchanged {
         storage::save(&state_file, &state)?;
     }
+    drop(_lock);
     let report = round::prepare(&client, &mut state, refreshed, selection.as_ref())?;
     if report.validation_changed() {
-        storage::save(&state_file, &state)?;
+        let verified = review_platform::archive::verify_archive(report.resolved().archive())?;
+        let _lock = storage::lock(&state_file)?;
+        let mut current = storage::load(&state_file)?;
+        let selected = selection
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("model selection disappeared"))?;
+        current.validate_model(
+            report.preparation(),
+            selected.head(),
+            selected.revision(),
+            report.resolved(),
+            &verified,
+        )?;
+        storage::save(&state_file, &current)?;
+        state = current;
     }
     let request = state
         .get(&key)
@@ -423,14 +534,31 @@ fn run_prepare(
         println!("  requested model: {}", requested.model());
     }
     println!("  resolved agent: {}", resolved.agent().id());
+    println!(
+        "  runner kind: {}",
+        resolved.agent().runner().kind().as_str()
+    );
+    println!(
+        "  model provider: {}",
+        resolved.agent().runner().model_provider()
+    );
     println!("  prompt SHA-256: {}", resolved.agent().prompt_hash());
+    println!("  runner SHA-256: {}", resolved.agent().runner().hash());
     println!("  VM archive: {}", resolved.archive().path().display());
     println!("  archive SHA-256: {}", resolved.archive().checksum());
+    println!(
+        "  VM metadata: {}",
+        resolved.archive().config_path().display()
+    );
+    println!(
+        "  metadata SHA-256: {}",
+        resolved.archive().config_checksum()
+    );
     println!("  readiness: {}", preparation.readiness());
     Ok(())
 }
 
-fn escape_terminal_controls(value: &str) -> String {
+pub(crate) fn escape_terminal_controls(value: &str) -> String {
     let mut rendered = String::with_capacity(value.len());
     for character in value.chars() {
         if character == '\n' || character == '\t' {
