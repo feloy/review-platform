@@ -207,7 +207,8 @@ including when loaded from the JSON state file.
   The agent is the first configured runner that declares support for that model.
   Validation is saved only when the live gates pass and the inspected head and revision still match.
   This choice is invalidated by input changes, authorization changes or revocation,
-  or a change to the selected model's resolved agent, its prompt, archive path, or archive checksum.
+  or a change to the trusted output and tool rules, selected model's resolved agent,
+  its prompt, archive path, or archive checksum.
   When the other gates allow model validation,
   preparation verifies that the archive is a regular file with the configured SHA-256.
   A missing file or checksum mismatch returns an error and saves no new model choice.
@@ -461,6 +462,9 @@ The runner seeds the output file with an invalid marker and grants Claude's
 It starts Claude in `/sandbox` so relative read permissions cover the checkout
 and instructions and `Edit(./output/review-output.json)` matches the output file.
 An unchanged marker cannot become a draft.
+The trusted prompt lists the standalone Git and GitHub Bash commands the runner grants.
+It tells Claude to treat other shell commands as denied and to retry a denied
+compound command only as a standalone granted command.
 Claude Code may still allow some reads and simple shell commands outside the
 explicit `--allowedTools` entries.
 The wildcard Git and GitHub Bash grants do not by themselves restrict every
