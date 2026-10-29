@@ -2,7 +2,6 @@
 
 pub const WORKDIR_TARGET: &str = "/sandbox";
 pub const CHECKOUT_TARGET: &str = "/sandbox/src";
-pub const INPUT_TARGET: &str = "/sandbox/input";
 pub const INSTRUCTIONS_TARGET: &str = "/sandbox/instructions";
 pub const OUTPUT_TARGET: &str = "/sandbox/output";
 pub const OUTPUT_FILE_NAME: &str = "review-output.json";

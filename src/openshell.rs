@@ -70,21 +70,14 @@ pub struct OpenShell<'a> {
 /// Host directories mounted into one review sandbox.
 pub struct SandboxMounts<'a> {
     checkout: &'a Path,
-    input: &'a Path,
     instructions: &'a Path,
     output: &'a Path,
 }
 
 impl<'a> SandboxMounts<'a> {
-    pub fn new(
-        checkout: &'a Path,
-        input: &'a Path,
-        instructions: &'a Path,
-        output: &'a Path,
-    ) -> Self {
+    pub fn new(checkout: &'a Path, instructions: &'a Path, output: &'a Path) -> Self {
         Self {
             checkout,
-            input,
             instructions,
             output,
         }
@@ -352,7 +345,6 @@ impl<'a> OpenShell<'a> {
         }
         let driver = serde_json::json!({"vm":{"mounts":[
             {"type":"bind","source":mounts.checkout,"target":sandbox_layout::CHECKOUT_TARGET,"read_only":true},
-            {"type":"bind","source":mounts.input,"target":sandbox_layout::INPUT_TARGET,"read_only":true},
             {"type":"bind","source":mounts.instructions,"target":sandbox_layout::INSTRUCTIONS_TARGET,"read_only":true},
             {"type":"bind","source":mounts.output,"target":sandbox_layout::OUTPUT_TARGET,"read_only":false}
         ]}});
@@ -698,7 +690,6 @@ mod tests {
                 &policy,
                 &SandboxMounts::new(
                     Path::new("/tmp/src"),
-                    Path::new("/tmp/input"),
                     Path::new("/tmp/instructions"),
                     Path::new("/tmp/output"),
                 ),
@@ -741,22 +732,17 @@ mod tests {
         let mounts: Value = serde_json::from_str(mount_json).unwrap();
         assert_eq!(mounts["vm"]["mounts"][0]["read_only"], true);
         assert_eq!(mounts["vm"]["mounts"][1]["read_only"], true);
-        assert_eq!(mounts["vm"]["mounts"][2]["read_only"], true);
-        assert_eq!(mounts["vm"]["mounts"][3]["read_only"], false);
+        assert_eq!(mounts["vm"]["mounts"][2]["read_only"], false);
         assert_eq!(
             mounts["vm"]["mounts"][0]["target"],
             sandbox_layout::CHECKOUT_TARGET
         );
         assert_eq!(
             mounts["vm"]["mounts"][1]["target"],
-            sandbox_layout::INPUT_TARGET
-        );
-        assert_eq!(
-            mounts["vm"]["mounts"][2]["target"],
             sandbox_layout::INSTRUCTIONS_TARGET
         );
         assert_eq!(
-            mounts["vm"]["mounts"][3]["target"],
+            mounts["vm"]["mounts"][2]["target"],
             sandbox_layout::OUTPUT_TARGET
         );
         let mut conflicting = raw.clone();
@@ -775,7 +761,6 @@ mod tests {
                 &policy,
                 &SandboxMounts::new(
                     Path::new("/tmp/src"),
-                    Path::new("/tmp/input"),
                     Path::new("/tmp/instructions"),
                     Path::new("/tmp/output"),
                 ),
