@@ -176,6 +176,8 @@ including when loaded from the JSON state file.
   configuration, and policy.
   One-round authorization is consumed only when dispatch is recorded.
   Progress output names phases and never prints the review dialogue or draft.
+  A completed output is validated and saved even if sandbox stop fails;
+  `recover-review` can finish cleanup without losing the draft.
 - `show-draft REPOSITORY PR --round ROUND_ID` displays the saved PR-facing comments,
   separate private lead advice, and live freshness.
   Rejected drafts remain available for inspection.
@@ -379,6 +381,8 @@ Terminal control characters in displayed draft text are escaped.
 
 If execution is interrupted or sandbox cleanup fails,
 run `recover-review` after the gateway is available.
+When cleanup fails after a successful agent run,
+the saved draft remains available for `show-draft` while cleanup is pending.
 Recovery refuses to stop a sandbox while its review runner is active.
 Recovery stops and deletes the recorded sandbox without replaying Claude.
 One-round authorization is never restored after an uncertain dispatch.

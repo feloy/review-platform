@@ -191,6 +191,108 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     assert!(run(&state_file, &["status", "owner/repo", "42"]).contains("authorized for one round"));
 }
 
+#[cfg(unix)]
+#[test]
+fn recovery_preserves_a_saved_draft_when_sandbox_stop_fails() {
+    use review_platform::review::{RoundId, RoundStatus, read_saved_draft};
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    let config_file = dir.path().join("config.json");
+    let fake_openshell = dir.path().join("openshell");
+    std::fs::write(
+        &fake_openshell,
+        b"#!/bin/sh\ncase \" $* \" in\n  *\" sandbox stop \"*) exit 1;;\n  *\" sandbox delete \"*) exit 0;;\nesac\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_openshell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = serde_json::json!({
+        "schema_version": 5,
+        "execution": {
+            "openshell": fake_openshell,
+            "gateway": "test-gateway",
+            "workspace": "default",
+            "driver": "vm",
+            "github_provider": "test-github-readonly"
+        },
+        "models": [],
+        "agents": [],
+        "repositories": []
+    });
+    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    let state = serde_json::json!({
+        "schema_version": 5,
+        "requests": [{
+            "key": {"repository": "owner/repo", "number": 42},
+            "head_sha": HEAD_A,
+            "authorization": "awaiting_lead",
+            "revision": 2,
+            "discussion": {"author_id": 7, "comments": []},
+            "model_validation": null
+        }],
+        "rounds": [{
+            "id": "r-draft",
+            "key": {"repository": "owner/repo", "number": 42},
+            "status": "draft_available",
+            "sandbox": "rp-722d6472616674",
+            "head_sha": HEAD_A,
+            "revision": 2,
+            "discussion": {"author_id": 7, "comments": []},
+            "model": "model-alpha",
+            "agent": "claude",
+            "gateway": "test-gateway",
+            "workspace": "default",
+            "driver": "vm",
+            "model_provider": "model-provider",
+            "github_provider": "test-github-readonly",
+            "prompt_sha256": "a".repeat(64),
+            "format_sha256": "b".repeat(64),
+            "archive_sha256": "c".repeat(64),
+            "archive_config_sha256": "d".repeat(64),
+            "execution_sha256": "e".repeat(64),
+            "runner_sha256": "f".repeat(64),
+            "created_at": 1,
+            "dispatched_at": 2,
+            "finished_at": 3,
+            "freshness": "fresh",
+            "failure": null,
+            "incomplete_log": false,
+            "cleanup_pending": true
+        }]
+    });
+    std::fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+    let round_dir = dir.path().join("rounds/r-draft");
+    std::fs::create_dir_all(&round_dir).unwrap();
+    let draft_file = round_dir.join("draft.json");
+    std::fs::write(
+        &draft_file,
+        br#"{"status":"REQUEST_CHANGES","comments":"Saved finding","lead_advice":"","review_log":""}"#,
+    )
+    .unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+        .args(["--state-file", state_file.to_str().unwrap()])
+        .args(["--config-file", config_file.to_str().unwrap()])
+        .args(["recover-review", "owner/repo", "42"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "recovery failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stored: State = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    stored.validate().unwrap();
+    let round = stored.round(&RoundId::new("r-draft").unwrap()).unwrap();
+    assert_eq!(round.status(), RoundStatus::DraftAvailable);
+    assert!(!round.cleanup_pending());
+    assert_eq!(
+        read_saved_draft(&draft_file).unwrap().comments(),
+        "Saved finding"
+    );
+}
+
 #[test]
 fn authorize_requires_the_head_seen_by_the_lead() {
     let dir = tempfile::tempdir().unwrap();

@@ -8,7 +8,7 @@ use review_platform::{
     archive, checkout,
     config::ReviewConfig,
     github::{self, PullRequestState},
-    openshell::{OpenShell, SandboxMounts},
+    openshell::{OpenShell, OpenShellError, SandboxMounts},
     preparation::Readiness,
     review::{
         DraftOutput, FORMAT_RULES, FailureKind, Freshness, OUTPUT_MARKER, RoundId, RoundRecord,
@@ -167,7 +167,7 @@ pub fn run_review(
     let mut sandbox_created = false;
     let mut agent_log = String::new();
     let mut incomplete_log = false;
-    let operation = (|| -> Result<Freshness> {
+    let operation = (|| -> Result<(Freshness, Option<OpenShellError>)> {
         let staged_image = archive::stage_archive(
             choice.archive(),
             &private_parent(&state_path).join("archives"),
@@ -313,19 +313,19 @@ pub fn run_review(
             incomplete_log = true;
             anyhow::bail!("{error}");
         }
-        failure = FailureKind::Cleanup;
-        shell.stop(&record)?;
+        let stop_result = shell.stop(&record);
         println!("Round {id}: validating private draft.");
         failure = FailureKind::Output;
-        let draft = review_platform::review::read_agent_output(
+        let stop_error = save_output_after_stop_attempt(
+            stop_result,
             &output.join(sandbox_layout::OUTPUT_FILE_NAME),
+            &round_dir.join("draft.json"),
             agent_log.clone(),
         )?;
-        save_draft(&round_dir.join("draft.json"), &draft)?;
-        Ok(refresh_freshness(&client, &state_path, &record))
+        Ok((refresh_freshness(&client, &state_path, &record), stop_error))
     })();
-    let freshness = match operation {
-        Ok(freshness) => freshness,
+    let (freshness, stop_error) = match operation {
+        Ok(result) => result,
         Err(error) => {
             let cleaned = if sandbox_created {
                 let _ = shell.stop(&record);
@@ -373,6 +373,11 @@ pub fn run_review(
         let mut current = storage::load(&state_path)?;
         current.complete_round(&id, now()?, freshness)?;
         storage::save(&state_path, &current)?;
+    }
+    if let Some(error) = stop_error {
+        return Err(error).with_context(|| {
+            format!("draft {id} saved; sandbox cleanup pending; run recover-review")
+        });
     }
     shell.delete(&record).with_context(|| {
         format!("draft {id} saved; sandbox cleanup pending; run recover-review")
@@ -676,6 +681,50 @@ fn save_draft(path: &Path, draft: &DraftOutput) -> Result<()> {
     Ok(())
 }
 
+fn save_output_after_stop_attempt(
+    stop_result: Result<(), OpenShellError>,
+    output_path: &Path,
+    draft_path: &Path,
+    agent_log: String,
+) -> Result<Option<OpenShellError>> {
+    let draft = review_platform::review::read_agent_output(output_path, agent_log)?;
+    save_draft(draft_path, &draft)?;
+    Ok(stop_result.err())
+}
+
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_output_is_saved_after_stop_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("review-output.json");
+        let draft = dir.path().join("draft.json");
+        fs::write(
+            &output,
+            br#"{"status":"REQUEST_CHANGES","comments":"Saved finding","lead_advice":"Private advice"}"#,
+        )
+        .unwrap();
+
+        let stop_error = save_output_after_stop_attempt(
+            Err(OpenShellError::Failed("sandbox stop")),
+            &output,
+            &draft,
+            "Review log".to_owned(),
+        )
+        .unwrap();
+        assert!(matches!(
+            stop_error,
+            Some(OpenShellError::Failed("sandbox stop"))
+        ));
+        let saved = review_platform::review::read_saved_draft(&draft).unwrap();
+        assert_eq!(saved.comments(), "Saved finding");
+        assert_eq!(saved.lead_advice(), "Private advice");
+        assert_eq!(saved.review_log(), "Review log");
+    }
 }
