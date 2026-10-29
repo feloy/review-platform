@@ -76,6 +76,13 @@ fn cleanup_pending_context(key: &PrKey, id: &RoundId) -> String {
     )
 }
 
+fn cleanup_complete_after_failed_stop_context(key: &PrKey, id: &RoundId) -> String {
+    format!(
+        "draft {id} saved; sandbox cleanup complete after stop failed. Run {}.",
+        show_draft_command(key, id)
+    )
+}
+
 pub fn run_review(
     state_override: Option<PathBuf>,
     config_override: Option<PathBuf>,
@@ -391,18 +398,7 @@ pub fn run_review(
         current.complete_round(&id, now()?, freshness)?;
         storage::save(&state_path, &current)?;
     }
-    if let Some(error) = stop_error {
-        return Err(error).with_context(|| cleanup_pending_context(&key, &id));
-    }
-    shell
-        .delete(&record)
-        .with_context(|| cleanup_pending_context(&key, &id))?;
-    {
-        let _lock = storage::lock(&state_path)?;
-        let mut current = storage::load(&state_path)?;
-        current.mark_round_cleaned(&id)?;
-        storage::save(&state_path, &current)?;
-    }
+    finish_completed_cleanup(&shell, &record, &state_path, stop_error)?;
     println!(
         "Round {id}: private draft available ({freshness}). Run {}.",
         show_draft_command(&key, &id)
@@ -712,6 +708,35 @@ fn save_output_after_stop_attempt(
     Ok(stop_result.err())
 }
 
+fn finish_completed_cleanup(
+    shell: &OpenShell<'_>,
+    record: &RoundRecord,
+    state_path: &Path,
+    stop_error: Option<OpenShellError>,
+) -> Result<()> {
+    let key = record.key();
+    let id = record.id();
+    if let Err(delete_error) = shell.delete(record) {
+        return Err(delete_error).with_context(|| {
+            let stop_context = stop_error
+                .as_ref()
+                .map(|error| format!("sandbox stop also failed: {error}; "))
+                .unwrap_or_default();
+            format!("{stop_context}{}", cleanup_pending_context(key, id))
+        });
+    }
+    {
+        let _lock = storage::lock(state_path)?;
+        let mut current = storage::load(state_path)?;
+        current.mark_round_cleaned(id)?;
+        storage::save(state_path, &current)?;
+    }
+    if let Some(error) = stop_error {
+        return Err(error).with_context(|| cleanup_complete_after_failed_stop_context(key, id));
+    }
+    Ok(())
+}
+
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
@@ -727,6 +752,10 @@ mod tests {
         assert_eq!(
             cleanup_pending_context(&key, &id),
             "draft r-draft saved; sandbox cleanup pending. Run recover-review owner/repo 42. Run show-draft owner/repo 42 --round r-draft."
+        );
+        assert_eq!(
+            cleanup_complete_after_failed_stop_context(&key, &id),
+            "draft r-draft saved; sandbox cleanup complete after stop failed. Run show-draft owner/repo 42 --round r-draft."
         );
     }
 
@@ -756,5 +785,123 @@ mod tests {
         assert_eq!(saved.comments(), "Saved finding");
         assert_eq!(saved.lead_advice(), "Private advice");
         assert_eq!(saved.review_log(), "Review log");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_round_attempts_delete_even_when_stop_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let executable = dir.path().join("openshell");
+        let calls = dir.path().join("calls.txt");
+        let fail_delete = dir.path().join("fail-delete");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in\n  *\" sandbox stop \"*) exit 1;;\n  *\" sandbox delete \"*) if [ -e '{}' ]; then exit 1; fi;;\nesac\nexit 0\n",
+            calls.display(),
+            fail_delete.display()
+        );
+        fs::write(&executable, script).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 5,
+                "execution": {
+                    "openshell": executable,
+                    "gateway": "test-gateway",
+                    "workspace": "default",
+                    "driver": "vm",
+                    "github_provider": "test-github-readonly"
+                },
+                "models": [],
+                "agents": [],
+                "repositories": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let state = serde_json::json!({
+            "schema_version": 5,
+            "requests": [{
+                "key": {"repository": "owner/repo", "number": 42},
+                "head_sha": "a".repeat(40),
+                "authorization": "awaiting_lead",
+                "revision": 2,
+                "discussion": {"author_id": 7, "comments": []},
+                "model_validation": null
+            }],
+            "rounds": [{
+                "id": "r-draft",
+                "key": {"repository": "owner/repo", "number": 42},
+                "status": "draft_available",
+                "sandbox": "rp-722d6472616674",
+                "head_sha": "a".repeat(40),
+                "revision": 2,
+                "discussion": {"author_id": 7, "comments": []},
+                "model": "model-alpha",
+                "agent": "claude",
+                "gateway": "test-gateway",
+                "workspace": "default",
+                "driver": "vm",
+                "model_provider": "test-model-provider",
+                "github_provider": "test-github-readonly",
+                "prompt_sha256": "a".repeat(64),
+                "format_sha256": "b".repeat(64),
+                "archive_sha256": "c".repeat(64),
+                "archive_config_sha256": "d".repeat(64),
+                "execution_sha256": "e".repeat(64),
+                "runner_sha256": "f".repeat(64),
+                "created_at": 1,
+                "dispatched_at": 2,
+                "finished_at": 3,
+                "freshness": "fresh",
+                "failure": null,
+                "incomplete_log": false,
+                "cleanup_pending": true
+            }]
+        });
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let id = RoundId::new("r-draft").unwrap();
+        let record = storage::load(&state_path)
+            .unwrap()
+            .round(&id)
+            .unwrap()
+            .clone();
+        let shell = OpenShell::new(config.execution());
+
+        fs::write(&fail_delete, b"").unwrap();
+        let stop_error = shell.stop(&record).unwrap_err();
+        let error =
+            finish_completed_cleanup(&shell, &record, &state_path, Some(stop_error)).unwrap_err();
+        assert!(error.to_string().contains("sandbox cleanup pending"));
+        assert!(error.to_string().contains("sandbox stop also failed"));
+        assert!(
+            storage::load(&state_path)
+                .unwrap()
+                .round(&id)
+                .unwrap()
+                .cleanup_pending()
+        );
+
+        fs::remove_file(&fail_delete).unwrap();
+        let stop_error = shell.stop(&record).unwrap_err();
+        let error =
+            finish_completed_cleanup(&shell, &record, &state_path, Some(stop_error)).unwrap_err();
+        assert!(error.to_string().contains("sandbox cleanup complete"));
+        assert!(
+            !storage::load(&state_path)
+                .unwrap()
+                .round(&id)
+                .unwrap()
+                .cleanup_pending()
+        );
+        assert_eq!(
+            fs::read_to_string(calls)
+                .unwrap()
+                .matches("sandbox delete")
+                .count(),
+            2
+        );
     }
 }

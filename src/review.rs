@@ -157,6 +157,7 @@ pub struct RoundRecord {
     model_provider: String,
     github_provider: String,
     prompt_sha256: PromptHash,
+    // Serialized name predates tool guidance; this hashes all trusted REVIEW_RULES.
     format_sha256: PromptHash,
     archive_sha256: ArchiveHash,
     archive_config_sha256: ArchiveHash,

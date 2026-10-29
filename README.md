@@ -446,8 +446,7 @@ and a GitHub provider restricted to read-only REST access.
 Review Platform checks authenticated access and named provider availability,
 and rejects a write-capable GitHub policy when the gateway exposes one.
 The operator remains responsible for provider policy and credential rotation.
-The VM gateway must be able to access the staged archive and bind-mount paths
-on the same host.
+The VM gateway must run on the host that holds the staged archive and mount paths.
 The current runner is intended for macOS and Linux VM setups;
 remote gateway deployment is not implemented.
 
@@ -482,6 +481,8 @@ If execution is interrupted or sandbox cleanup fails,
 run `recover-review` after the gateway is available.
 When cleanup fails after a successful agent run,
 the saved draft remains available for `show-draft` while cleanup is pending.
+After a stop failure, the runner still tries to delete the sandbox.
+A successful delete completes cleanup and leaves the draft available for inspection.
 Recovery refuses to stop a sandbox while its review runner is active.
 Recovery stops and deletes the recorded sandbox without replaying Claude.
 One-round authorization is never restored after an uncertain dispatch.

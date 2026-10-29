@@ -673,6 +673,16 @@ mod tests {
             &choice[0],
             1,
         );
+        let review_command = shell.exec_review_agent(&record, &[OsString::from("claude")]);
+        let review_args = review_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            review_args.windows(2).any(|args| {
+                args[0] == "--workdir" && args[1] == sandbox_layout::WORKDIR_TARGET
+            })
+        );
         let args = shell
             .create_args(
                 &record,
