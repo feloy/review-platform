@@ -2,7 +2,7 @@
 
 use crate::config::{AgentRunnerConfig, ExecutionConfig};
 use crate::openshell::OpenShell;
-use crate::review::{FORMAT_RULES, OUTPUT_MARKER, RoundRecord};
+use crate::review::{OUTPUT_MARKER, REVIEW_RULES, RoundRecord};
 use crate::sandbox_layout;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -67,7 +67,7 @@ impl<'a> ClaudeInvocation<'a> {
 }
 
 pub fn compose_system_prompt(configured: &str) -> String {
-    format!("{configured}\n\n{FORMAT_RULES}")
+    format!("{configured}\n\n{REVIEW_RULES}")
 }
 
 pub fn claude_command(
@@ -396,6 +396,82 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ReviewConfig;
+    use crate::review::RoundId;
+    use crate::{HeadSha, InputRevision, ObservedDiscussion, PrKey};
+    use std::num::NonZeroU64;
+
+    fn test_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version":5,
+            "execution": crate::config::test_execution_json(),
+            "models":[{"id":"model-alpha","coauthors":[]}],
+            "agents":[{"id":"claude","models":["model-alpha"],"prompt":"Review.","runner":crate::config::test_runner_json()}],
+            "repositories":[{"name":"owner/repo","review_models":["model-alpha"],"runners":[{
+                "agent":"claude","vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"),"sha256":"a".repeat(64),"config_sha256":"c".repeat(64)}
+            }]}]
+        })
+    }
+
+    fn test_round(config: &ReviewConfig) -> RoundRecord {
+        let key = PrKey::new("owner/repo", 1).unwrap();
+        let choice = config.review_models_for(&key).unwrap();
+        RoundRecord::new(
+            RoundId::new("r-test").unwrap(),
+            key,
+            HeadSha::new("a".repeat(40)).unwrap(),
+            InputRevision::new(1).unwrap(),
+            ObservedDiscussion::new(NonZeroU64::new(1).unwrap(), vec![]).unwrap(),
+            &choice[0],
+            1,
+        )
+    }
+
+    fn flag_value<'a>(command: &'a [OsString], flag: &str) -> &'a str {
+        let index = command.iter().position(|arg| arg == flag).unwrap();
+        command[index + 1].to_str().unwrap()
+    }
+
+    #[test]
+    fn claude_permissions_match_trusted_tool_guidance() {
+        let config =
+            ReviewConfig::from_json(&serde_json::to_vec(&test_config_json()).unwrap()).unwrap();
+        let round = test_round(&config);
+        let command = claude_command(
+            "/usr/bin/claude",
+            &round,
+            "/sandbox/instructions/system-prompt.txt",
+            "b",
+            "/sandbox/output/review-output.json",
+        );
+        assert_eq!(flag_value(&command, "--permission-mode"), "dontAsk");
+        assert_eq!(flag_value(&command, "--tools"), "Read,Bash,Edit");
+
+        let checkout = sandbox_layout::CHECKOUT_TARGET;
+        let output_file = sandbox_layout::OUTPUT_FILE_NAME;
+        let expected = format!(
+            "Read(./src/**),Read(./instructions/**),Read(./output/{output_file}),Bash(git -C {checkout} diff *),Bash(git -C {checkout} log *),Bash(git -C {checkout} show *),Bash(git -C {checkout} status *),Bash(gh api --method GET *),Edit(./output/{output_file})"
+        );
+        let allowed = flag_value(&command, "--allowedTools");
+        assert_eq!(allowed, expected);
+        assert!(REVIEW_RULES.contains(sandbox_layout::WORKDIR_TARGET));
+        for path in ["./src/", "./instructions/", "./output/review-output.json"] {
+            assert!(REVIEW_RULES.contains(path), "missing guidance for {path}");
+        }
+        for grant in allowed
+            .split(',')
+            .filter_map(|grant| grant.strip_prefix("Bash("))
+        {
+            let command = grant.strip_suffix(" *)").unwrap();
+            let documented = format!("{command} ...");
+            assert!(
+                REVIEW_RULES.contains(&documented),
+                "missing guidance for {documented}"
+            );
+        }
+        assert!(REVIEW_RULES.contains(&format!("Use Edit only for ./output/{output_file}")));
+    }
+
     #[test]
     fn captures_full_dialogue_and_fails_on_bad_utf8_or_limit() {
         let stream = b"{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"file_path\":\"src/lib.rs\"}}]}}\n";
@@ -414,48 +490,28 @@ mod tests {
     }
 
     #[test]
-    fn trusted_format_rules_are_last_in_the_explicit_system_prompt() {
+    fn trusted_review_rules_are_last_in_the_explicit_system_prompt() {
         let composed = compose_system_prompt("Configured review instructions.");
         assert!(composed.starts_with("Configured review instructions.\n\n"));
-        assert!(composed.ends_with(FORMAT_RULES));
+        assert!(composed.ends_with(REVIEW_RULES));
     }
 
     #[cfg(unix)]
     #[test]
     fn timeout_keeps_emitted_dialogue_for_an_incomplete_private_log() {
-        use crate::config::ReviewConfig;
-        use crate::review::RoundId;
-        use crate::{HeadSha, InputRevision, ObservedDiscussion, PrKey};
         use std::fs;
-        use std::num::NonZeroU64;
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("fake-openshell");
         fs::write(&executable, b"#!/bin/sh\nprintf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"partial dialogue\"}}}'\nexec sleep 5\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut raw = serde_json::json!({
-            "schema_version":5,
-            "execution": crate::config::test_execution_json(),
-            "models":[{"id":"model-alpha","coauthors":[]}],
-            "agents":[{"id":"claude","models":["model-alpha"],"prompt":"Review.","runner":crate::config::test_runner_json()}],
-            "repositories":[{"name":"owner/repo","review_models":["model-alpha"],"runners":[{
-                "agent":"claude","vm_archive":{"path":"/tmp/reviewer.tar","sha256":"a".repeat(64),"config_sha256":"c".repeat(64)}
-            }]}]
-        });
+        let mut raw = test_config_json();
         raw["execution"]["openshell"] = executable.to_str().unwrap().into();
         raw["execution"]["timeout_seconds"] = 1.into();
         let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
-        let key = PrKey::new("owner/repo", 1).unwrap();
-        let choice = config.review_models_for(&key).unwrap();
-        let record = RoundRecord::new(
-            RoundId::new("r-timeout").unwrap(),
-            key,
-            HeadSha::new("a".repeat(40)).unwrap(),
-            InputRevision::new(1).unwrap(),
-            ObservedDiscussion::new(NonZeroU64::new(1).unwrap(), vec![]).unwrap(),
-            &choice[0],
-            1,
-        );
+        let record = test_round(&config);
+        let key = record.key();
+        let choice = config.review_models_for(key).unwrap();
         let shell = OpenShell::new(config.execution());
         let result = run_claude(
             &shell,

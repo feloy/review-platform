@@ -8,7 +8,7 @@ use crate::model::{
 };
 use crate::preparation::{Preparation, Readiness};
 use crate::review::{
-    FORMAT_RULES, FailureKind, Freshness, RoundId, RoundRecord, RoundStateError, RoundStatus,
+    FailureKind, Freshness, REVIEW_RULES, RoundId, RoundRecord, RoundStateError, RoundStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
@@ -116,7 +116,7 @@ impl ModelValidation {
         self.model == *choice.model().id()
             && self.agent == *choice.agent().id()
             && self.prompt_sha256 == *choice.agent().prompt_hash()
-            && self.format_sha256 == PromptHash::of(FORMAT_RULES)
+            && self.format_sha256 == PromptHash::of(REVIEW_RULES)
             && self.execution_sha256 == *choice.execution().hash()
             && self.runner_sha256 == *choice.agent().runner().hash()
             && self.vm_archive == *choice.archive()
@@ -301,7 +301,7 @@ impl State {
             || round.model() != choice.model().id()
             || round.agent() != choice.agent().id()
             || round.prompt_hash() != choice.agent().prompt_hash()
-            || round.format_hash() != &PromptHash::of(FORMAT_RULES)
+            || round.format_hash() != &PromptHash::of(REVIEW_RULES)
             || round.execution_hash() != choice.execution().hash()
             || round.runner_hash() != choice.agent().runner().hash()
             || round.archive_hash() != choice.archive().checksum()
@@ -552,7 +552,7 @@ impl State {
             head_sha: inspected_head.clone(),
             revision: inspected_revision,
             prompt_sha256: choice.agent().prompt_hash().clone(),
-            format_sha256: PromptHash::of(FORMAT_RULES),
+            format_sha256: PromptHash::of(REVIEW_RULES),
             execution_sha256: choice.execution().hash().clone(),
             runner_sha256: choice.agent().runner().hash().clone(),
             vm_archive: choice.archive().clone(),

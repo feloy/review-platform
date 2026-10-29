@@ -32,8 +32,8 @@ review-platform --help
 Cargo installs the executable in its binary directory, which must be on `PATH`.
 The examples below use the default per-user state and configuration files.
 Pass `--state-file PATH` or `--config-file PATH` before a subcommand to use other files.
-Replace `owner/repo`, `42`, and uppercase placeholders with your PR and the values
-shown by the preceding commands.
+Replace `owner/repo` and `42` with your PR.
+Replace uppercase placeholders with values shown by the preceding commands.
 `HEAD_SHA` comes from `github-pr`, `REVISION` from `status` or `prepare-review`,
 `MODEL_ID` from `prepare-review`, and `ROUND_ID` from `run-review`.
 Inspect the current head and revision before authorizing or validating a model.
@@ -206,9 +206,8 @@ including when loaded from the JSON state file.
   The choice must name a review model configured for the repository.
   The agent is the first configured runner that declares support for that model.
   Validation is saved only when the live gates pass and the inspected head and revision still match.
-  This choice is invalidated by input changes, authorization changes or revocation,
-  or a change to the trusted output and tool rules, selected model's resolved agent,
-  its prompt, archive path, or archive checksum.
+  Input, authorization, or trusted rule changes invalidate the choice.
+  Changes to the selected model's agent, prompt, archive path, or checksum also invalidate it.
   When the other gates allow model validation,
   preparation verifies that the archive is a regular file with the configured SHA-256.
   A missing file or checksum mismatch returns an error and saves no new model choice.
@@ -454,21 +453,20 @@ remote gateway deployment is not implemented.
 
 `run-review` creates a private round directory beside the state file,
 under `rounds/ROUND_ID/`.
-It retains the original `output/review-output.json` agent artifact unchanged,
+It retains the `output/review-output.json` agent artifact,
 stores the assembled private `draft.json`,
 and keeps an incomplete log file if an agent run fails after emitting dialogue.
-The runner seeds the output file with an invalid marker and grants Claude's
-`Edit` tool permission for that file.
-It starts Claude in `/sandbox` so relative read permissions cover the checkout
-and instructions and `Edit(./output/review-output.json)` matches the output file.
+The runner seeds the output file with an invalid marker and grants Claude's `Edit` tool permission for it.
+It starts Claude in `/sandbox`.
+Relative `Read` permissions cover the checkout and instructions.
+`Edit(./output/review-output.json)` matches the output file.
 An unchanged marker cannot become a draft.
 The trusted prompt lists the standalone Git and GitHub Bash commands the runner grants.
-It tells Claude to treat other shell commands as denied and to retry a denied
-compound command only as a standalone granted command.
-Claude Code may still allow some reads and simple shell commands outside the
-explicit `--allowedTools` entries.
-The wildcard Git and GitHub Bash grants do not by themselves restrict every
-read or write option; this remains an open review finding.
+It tells Claude to treat other shell commands as denied.
+If a compound call is denied, it tells Claude to retry as a standalone granted command.
+Claude Code may still allow some reads and simple shell commands outside the explicit `--allowedTools` entries.
+The wildcard Git and GitHub Bash grants do not restrict every read or write option.
+This is a known limitation tracked in [issue #13](https://github.com/feloy/review-platform/issues/13).
 The agent artifact must be regular UTF-8 JSON of at most 1 MiB
 with exactly `status`, `comments`, and `lead_advice`.
 The runner adds `review_log` from the captured Claude dialogue.
@@ -635,7 +633,7 @@ to match the locally recorded values.
 
 Publishing a draft leaves PR-cycle authorization active for the next commit or author comment.
 Rejecting a draft leaves the current authorization unchanged.
-It clears model validation matching that round while preserving a newer choice.
+It clears model validation matching that round and preserves a different later choice.
 Nothing is posted; another round needs active authorization and a validated model.
 The lead can change or revoke authorization at any time.
 
