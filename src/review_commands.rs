@@ -162,7 +162,7 @@ pub fn run_review(
         current.begin_round(record.clone(), choice)?;
         storage::save(&state_path, &current)?;
     }
-    println!("Round {id}: preparing checkout and sandbox.");
+    println!("Round {id}: preparing checkout and review inputs.");
     let mut failure = FailureKind::Preflight;
     let mut sandbox_created = false;
     let mut agent_log = String::new();
@@ -180,6 +180,44 @@ pub fn run_review(
         failure = FailureKind::Checkout;
         let checkout_path = round_dir.join("src");
         checkout::create_checkout(&checkout_path, &key, &inspected_head, pull.base_sha())?;
+        if cancelled.load(Ordering::Relaxed) {
+            failure = FailureKind::Recovery;
+            anyhow::bail!("review interrupted");
+        }
+        failure = FailureKind::Preflight;
+        anyhow::ensure!(
+            report.commits().head_sha() == record.head_sha(),
+            "PR commit history does not match the reviewed head"
+        );
+        let diff = client.diff_for_pull(&key, &pull, None)?;
+        let discussion_context = client.context_for_pull(&key, &pull)?;
+        anyhow::ensure!(
+            discussion_context.head_sha() == record.head_sha()
+                && discussion_context.observed_discussion()? == *record.discussion(),
+            "PR head or author discussion changed while preparing review inputs"
+        );
+        let input = round_dir.join("input");
+        fs::create_dir(&input).context("creating private review input directory")?;
+        let pr_metadata = serde_json::to_vec_pretty(&serde_json::json!({
+            "repository": key.repository(),
+            "number": key.number(),
+            "title": pull.title(),
+            "body": pull.body(),
+            "author": pull.author(),
+            "author_id": pull.author_id(),
+            "head_sha": pull.head_sha(),
+            "base_sha": pull.base_sha(),
+        }))?;
+        write_new(&input.join("pull.json"), &pr_metadata)?;
+        write_new(&input.join("pull.diff"), diff.as_bytes())?;
+        write_new(
+            &input.join("commits.json"),
+            &report.commits().history_json()?,
+        )?;
+        write_new(
+            &input.join("discussion.json"),
+            &discussion_context.context_json()?,
+        )?;
         if cancelled.load(Ordering::Relaxed) {
             failure = FailureKind::Recovery;
             anyhow::bail!("review interrupted");
@@ -212,7 +250,7 @@ pub fn run_review(
             choice.agent().runner(),
             &staged_image,
             &private_policy,
-            &SandboxMounts::new(&checkout_path, &instructions, &output),
+            &SandboxMounts::new(&checkout_path, &input, &instructions, &output),
         )?;
         shell.check_agent_executable(&record, executable)?;
         if cancelled.load(Ordering::Relaxed) {
@@ -258,8 +296,11 @@ pub fn run_review(
         anyhow::ensure!(
             live_pull.head_sha() == record.head_sha()
                 && live_pull.base_sha() == pull.base_sha()
+                && live_pull.title() == pull.title()
+                && live_pull.body() == pull.body()
+                && live_pull.author_id() == pull.author_id()
                 && live_pull.state() == PullRequestState::Open,
-            "PR head, base, or open state changed before dispatch"
+            "PR metadata changed before dispatch"
         );
         let fresh_config = load_config(Some(config_path.clone()))?.1;
         let current_choice = fresh_config

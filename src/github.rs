@@ -34,6 +34,7 @@ pub struct GithubClient {
 /// GitHub PR metadata obtained through [`GithubClient::pull_request`].
 pub struct PullRequest {
     title: String,
+    body: Option<String>,
     author: String,
     author_id: NonZeroU64,
     state: PullRequestState,
@@ -45,6 +46,10 @@ pub struct PullRequest {
 impl PullRequest {
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn body(&self) -> Option<&str> {
+        self.body.as_deref()
     }
 
     pub fn author(&self) -> &str {
@@ -100,6 +105,8 @@ impl std::fmt::Display for PullRequestState {
 struct ApiPullRequest {
     number: u64,
     title: String,
+    #[serde(default)]
+    body: Option<String>,
     state: PullRequestState,
     draft: bool,
     user: ApiUser,
@@ -170,6 +177,7 @@ impl GithubClient {
         }
         Ok(PullRequest {
             title: raw.title,
+            body: raw.body,
             author: raw.user.login,
             author_id: raw.user.id,
             state: raw.state,
@@ -419,6 +427,7 @@ mod tests {
         serde_json::json!({
             "number": 42,
             "title": "Review this change",
+            "body": "Explain the change.",
             "state": "open",
             "draft": false,
             "user": {"id": 7, "login": "author"},
@@ -645,6 +654,7 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(pull.head_sha().as_str(), HEAD);
         assert_eq!(pull.author(), "author");
+        assert_eq!(pull.body(), None);
         assert_eq!(pull.state(), PullRequestState::Open);
     }
 
@@ -1499,9 +1509,112 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(evidence.head_sha(), pull.head_sha());
         assert_eq!(evidence.commit_count(), 1);
+        let history: serde_json::Value =
+            serde_json::from_slice(&evidence.history_json().unwrap()).unwrap();
+        assert_eq!(history["head_sha"], HEAD);
+        assert_eq!(history["commits"][0]["sha"], HEAD);
+        assert_eq!(
+            history["commits"][0]["commit"]["message"],
+            "Change\n\nCo-authored-by: Claude <Claude@Example.com>"
+        );
         assert!(evidence.identities().contains(
             &crate::config::CoauthorIdentity::new("Claude", "claude@example.com").unwrap()
         ));
+    }
+
+    #[test]
+    fn staged_conversation_contains_comments_and_submitted_reviews_for_the_exact_head() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let issues = [serde_json::json!({
+            "id": 1,
+            "user": {"id": 7, "login": "author"},
+            "body": "Author clarification",
+            "created_at": "2026-01-01T00:00:00Z"
+        })];
+        let inline = [serde_json::json!({
+            "id": 2,
+            "user": {"id": 8, "login": "reviewer"},
+            "body": "Check this line",
+            "path": "src/lib.rs",
+            "line": 12,
+            "commit_id": HEAD
+        })];
+        let reviews = [
+            serde_json::json!({
+                "id": 3,
+                "user": {"id": 8, "login": "reviewer"},
+                "body": "Earlier review",
+                "state": "CHANGES_REQUESTED",
+                "commit_id": HEAD
+            }),
+            serde_json::json!({
+                "id": 4,
+                "user": {"id": 8, "login": "reviewer"},
+                "body": "Unsubmitted review",
+                "state": "PENDING"
+            }),
+        ];
+        let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+        replies.extend(discussion_pass_replies(&issues, &inline, &reviews));
+        replies.extend(discussion_pass_replies(&issues, &inline, &reviews));
+        replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        assert_eq!(pull.body(), Some("Explain the change."));
+        let context = client.context_for_pull(&key, &pull).unwrap();
+        handle.join().unwrap();
+        assert_eq!(context.head_sha(), pull.head_sha());
+        assert_eq!(context.observed_discussion().unwrap().comments().len(), 1);
+        let staged: serde_json::Value =
+            serde_json::from_slice(&context.context_json().unwrap()).unwrap();
+        assert_eq!(staged["head_sha"], HEAD);
+        assert_eq!(staged["issue_comments"][0]["body"], "Author clarification");
+        assert_eq!(staged["review_comments"][0]["path"], "src/lib.rs");
+        assert_eq!(staged["review_comments"][0]["line"], 12);
+        assert_eq!(staged["reviews"][0]["body"], "Earlier review");
+        assert_eq!(staged["reviews"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn staged_conversation_rejects_a_head_change() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+        replies.extend(discussion_pass_replies(&[], &[], &[]));
+        replies.extend(discussion_pass_replies(&[], &[], &[]));
+        replies.push(json_reply(pull_route(&key), pr_body(PREVIOUS_HEAD, BASE)));
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let result = client.context_for_pull(&key, &pull);
+        handle.join().unwrap();
+        assert!(matches!(result, Err(GithubError::HeadChanged { .. })));
+    }
+
+    #[test]
+    fn staged_conversation_rejects_an_edited_earlier_review() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let first = [serde_json::json!({
+            "id": 3,
+            "user": {"id": 8, "login": "reviewer"},
+            "body": "Earlier review",
+            "state": "COMMENTED"
+        })];
+        let second = [serde_json::json!({
+            "id": 3,
+            "user": {"id": 8, "login": "reviewer"},
+            "body": "Edited review",
+            "state": "COMMENTED"
+        })];
+        let mut replies = vec![json_reply(pull_route(&key), pr_body(HEAD, BASE))];
+        replies.extend(discussion_pass_replies(&[], &[], &first));
+        replies.extend(discussion_pass_replies(&[], &[], &second));
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let pull = client.pull_request(&key).unwrap();
+        let result = client.context_for_pull(&key, &pull);
+        handle.join().unwrap();
+        assert!(matches!(result, Err(GithubError::ObservationChanged)));
     }
 
     #[test]

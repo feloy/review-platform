@@ -33,6 +33,10 @@ impl PreparationInputs {
         self.coauthors.identities()
     }
 
+    pub fn into_commits(self) -> CommitCoauthors {
+        self.coauthors
+    }
+
     pub fn checks_summary(&self) -> CheckSummary {
         self.checks.summary()
     }

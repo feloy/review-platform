@@ -1,9 +1,9 @@
-//! Read PR commit co-author trailers as untrusted model-selection hints.
+//! Read a stable PR commit history and its untrusted co-author hints.
 
 use super::{GithubClient, GithubError, GithubResult, HttpResponse, PullRequest};
 use crate::config::CoauthorIdentity;
 use crate::{HeadSha, PrKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Read;
 
@@ -16,7 +16,7 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub struct CommitCoauthors {
     head_sha: HeadSha,
     identities: HashSet<CoauthorIdentity>,
-    commit_count: usize,
+    commits: Vec<ApiCommit>,
 }
 
 impl CommitCoauthors {
@@ -29,17 +29,30 @@ impl CommitCoauthors {
     }
 
     pub fn commit_count(&self) -> usize {
-        self.commit_count
+        self.commits.len()
+    }
+
+    /// Serialize the exact-head commit list for the agent's untrusted input mount.
+    pub fn history_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        #[derive(Serialize)]
+        struct History<'a> {
+            head_sha: &'a HeadSha,
+            commits: &'a [ApiCommit],
+        }
+        serde_json::to_vec_pretty(&History {
+            head_sha: &self.head_sha,
+            commits: &self.commits,
+        })
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct ApiCommit {
     sha: HeadSha,
     commit: ApiCommitDetails,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct ApiCommitDetails {
     message: String,
 }
@@ -78,7 +91,7 @@ impl GithubClient {
         Ok(CommitCoauthors {
             head_sha: pull.head_sha().clone(),
             identities,
-            commit_count: second.len(),
+            commits: second,
         })
     }
 
