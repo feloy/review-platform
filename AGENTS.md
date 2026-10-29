@@ -91,6 +91,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Verify an actual agent tool call under its exact CLI flags and working directory
   before relying on an allowlist entry.
   The reported tool list, CLI permission match, and live VM mount access are separate checks.
+  Keep trusted tool instructions aligned with the flags; prompts do not enforce access.
 - Validate external input at its boundary and propagate actionable errors.
   Do not make network calls or run agents from pure domain logic or unit tests.
 - Use platform trust roots for outbound HTTPS so operator-installed certificates work.
