@@ -1484,11 +1484,19 @@ mod tests {
         state
             .complete_round(first.id(), 4, Freshness::Stale)
             .unwrap();
+        let persisted: State =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        persisted.validate().unwrap();
+        let saved = persisted.round(first.id()).unwrap();
+        assert_eq!(saved.status(), RoundStatus::DraftAvailable);
+        assert!(saved.cleanup_pending());
+        assert!(saved.status().has_saved_draft());
         assert_eq!(
             state.reject_round(&key(), first.id()),
             Err(RoundStateError::CleanupPending(first.id().clone()))
         );
         state.mark_round_cleaned(first.id()).unwrap();
+        assert!(state.round(first.id()).unwrap().status().has_saved_draft());
         assert!(state.validate().is_ok());
         state
             .authorize(&key(), &head, revision(2), AuthorizationScope::OneRound)
