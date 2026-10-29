@@ -3,7 +3,7 @@
 use crate::{escape_terminal_controls, storage};
 use anyhow::{Context, Result};
 use review_platform::{
-    Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome,
+    Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome, RejectOutcome,
     agent::{self, AgentRunError},
     archive, checkout,
     config::ReviewConfig,
@@ -405,7 +405,7 @@ pub fn show_draft(
         .with_context(|| format!("round {id} does not exist"))?;
     anyhow::ensure!(record.key() == &key, "round {id} belongs to another PR");
     anyhow::ensure!(
-        record.status() == RoundStatus::DraftAvailable,
+        record.status().has_saved_draft(),
         "round {id} has no available draft"
     );
     let path = round_path(&state_path, &id).join("draft.json");
@@ -415,6 +415,7 @@ pub fn show_draft(
         .map(|observation| freshness_for(record, &observation))
         .unwrap_or(Freshness::Unknown);
     println!("Draft {id} for {key}");
+    println!("  round state: {}", record.status());
     println!("  status: {}", draft.status());
     println!("  freshness: {freshness}");
     println!(
@@ -430,6 +431,29 @@ pub fn show_draft(
             "\nPrivate review log:\n{}",
             escape_terminal_controls(draft.review_log())
         );
+    }
+    Ok(())
+}
+
+pub fn reject_draft(
+    state_override: Option<PathBuf>,
+    repository: String,
+    pr: u64,
+    round: String,
+) -> Result<()> {
+    let key = PrKey::new(repository, pr)?;
+    let id = RoundId::new(round)?;
+    let state_path = storage::resolve_path(state_override)?;
+    let _lock = storage::lock(&state_path)?;
+    let mut state = storage::load(&state_path)?;
+    match state.reject_round(&key, &id)? {
+        RejectOutcome::Rejected => {
+            storage::save(&state_path, &state)?;
+            println!("Round {id} for {key} rejected locally; fresh authorization is required.");
+        }
+        RejectOutcome::AlreadyRejected => {
+            println!("Round {id} for {key} was already rejected; authorization is unchanged.");
+        }
     }
     Ok(())
 }

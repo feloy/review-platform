@@ -98,6 +98,13 @@ enum Command {
         #[arg(long)]
         log: bool,
     },
+    /// Reject a private draft locally without posting it.
+    RejectDraft {
+        repository: String,
+        pr: u64,
+        #[arg(long, value_name = "ROUND_ID")]
+        round: String,
+    },
     /// Clean up an interrupted review without running the agent again.
     RecoverReview { repository: String, pr: u64 },
     /// List locally recorded review requests.
@@ -334,6 +341,13 @@ fn run(cli: Cli) -> Result<()> {
             log,
         } => {
             review_commands::show_draft(state_file, repository, pr, round, log)?;
+        }
+        Command::RejectDraft {
+            repository,
+            pr,
+            round,
+        } => {
+            review_commands::reject_draft(state_file, repository, pr, round)?;
         }
         Command::RecoverReview { repository, pr } => {
             review_commands::recover_review(state_file, config_file, repository, pr)?;

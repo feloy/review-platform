@@ -109,6 +109,89 @@ fn local_authorization_survives_process_restart_and_new_head_clears_one_round() 
 }
 
 #[test]
+fn reject_draft_preserves_the_artifact_and_later_authorization() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
+    assert_eq!(observe_empty_discussion(&state_file, HEAD_A), 2);
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    state["requests"][0]["authorization"] = "pr_cycle".into();
+    let discussion = state["requests"][0]["discussion"].clone();
+    state["rounds"] = serde_json::json!([{
+        "id":"r-draft",
+        "key":{"repository":"owner/repo","number":42},
+        "status":"draft_available",
+        "sandbox":"rp-722d6472616674",
+        "head_sha":HEAD_A,
+        "revision":2,
+        "discussion":discussion,
+        "model":"model-alpha",
+        "agent":"claude",
+        "gateway":"gateway",
+        "workspace":"default",
+        "driver":"vm",
+        "model_provider":"model-provider",
+        "github_provider":"github-provider",
+        "prompt_sha256":"a".repeat(64),
+        "format_sha256":"b".repeat(64),
+        "archive_sha256":"c".repeat(64),
+        "archive_config_sha256":"d".repeat(64),
+        "execution_sha256":"e".repeat(64),
+        "runner_sha256":"f".repeat(64),
+        "created_at":1,
+        "dispatched_at":2,
+        "finished_at":3,
+        "freshness":"fresh",
+        "failure":null,
+        "incomplete_log":false,
+        "cleanup_pending":false
+    }]);
+    std::fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+    let round_dir = dir.path().join("rounds/r-draft");
+    std::fs::create_dir_all(&round_dir).unwrap();
+    let draft_file = round_dir.join("draft.json");
+    let draft =
+        br#"{"status":"REQUEST_CHANGES","comments":"Finding","lead_advice":"","review_log":""}"#;
+    std::fs::write(&draft_file, draft).unwrap();
+
+    let output = run(
+        &state_file,
+        &["reject-draft", "owner/repo", "42", "--round", "r-draft"],
+    );
+    assert!(output.contains("rejected locally"));
+    let status = run(&state_file, &["status", "owner/repo", "42"]);
+    assert!(status.contains("latest round: r-draft (rejected)"));
+    assert!(status.contains("awaiting lead authorization"));
+    assert_eq!(std::fs::read(&draft_file).unwrap(), draft);
+    let stored: State = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    stored.validate().unwrap();
+
+    run(
+        &state_file,
+        &[
+            "authorize",
+            "owner/repo",
+            "42",
+            "--scope",
+            "one-round",
+            "--head",
+            HEAD_A,
+            "--revision",
+            "2",
+        ],
+    );
+    let before_repeat = std::fs::read(&state_file).unwrap();
+    let repeated = run(
+        &state_file,
+        &["reject-draft", "owner/repo", "42", "--round", "r-draft"],
+    );
+    assert!(repeated.contains("already rejected"));
+    assert_eq!(std::fs::read(&state_file).unwrap(), before_repeat);
+    assert!(run(&state_file, &["status", "owner/repo", "42"]).contains("authorized for one round"));
+}
+
+#[test]
 fn authorize_requires_the_head_seen_by_the_lead() {
     let dir = tempfile::tempdir().unwrap();
     let state_file = dir.path().join("state.json");
