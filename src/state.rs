@@ -89,6 +89,7 @@ pub struct ModelValidation {
     head_sha: HeadSha,
     revision: InputRevision,
     prompt_sha256: PromptHash,
+    // Serialized name predates tool guidance; this hashes all trusted REVIEW_RULES.
     format_sha256: PromptHash,
     execution_sha256: PromptHash,
     runner_sha256: PromptHash,

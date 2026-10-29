@@ -280,6 +280,7 @@ struct Renderer {
     limit: u64,
     max_turns: u32,
     turns: u32,
+    counted_turn_ids: HashSet<String>,
     open_text: HashSet<String>,
     streamed_text: HashSet<String>,
 }
@@ -291,6 +292,7 @@ impl Renderer {
             limit,
             max_turns,
             turns: 0,
+            counted_turn_ids: HashSet::new(),
             open_text: HashSet::new(),
             streamed_text: HashSet::new(),
         }
@@ -340,9 +342,15 @@ impl Renderer {
                     self.append("\n")?;
                 }
                 if key == "main" {
-                    self.turns += 1;
-                    if self.turns > self.max_turns {
-                        return Err(AgentRunError::TooManyTurns);
+                    let message_id = event["message"]["id"].as_str().filter(|id| !id.is_empty());
+                    let new_turn = message_id
+                        .map(|id| self.counted_turn_ids.insert(id.to_owned()))
+                        .unwrap_or(true);
+                    if new_turn {
+                        self.turns += 1;
+                        if self.turns > self.max_turns {
+                            return Err(AgentRunError::TooManyTurns);
+                        }
                     }
                 }
                 if let Some(blocks) = event["message"]["content"].as_array() {
@@ -449,6 +457,7 @@ mod tests {
 
         let checkout = sandbox_layout::CHECKOUT_TARGET;
         let output_file = sandbox_layout::OUTPUT_FILE_NAME;
+        // Pin the complete permission surface independently of command construction.
         let expected = format!(
             "Read(./src/**),Read(./instructions/**),Read(./output/{output_file}),Bash(git -C {checkout} diff *),Bash(git -C {checkout} log *),Bash(git -C {checkout} show *),Bash(git -C {checkout} status *),Bash(gh api --method GET *),Edit(./output/{output_file})"
         );
@@ -458,17 +467,23 @@ mod tests {
         for path in ["./src/", "./instructions/", "./output/review-output.json"] {
             assert!(REVIEW_RULES.contains(path), "missing guidance for {path}");
         }
-        for grant in allowed
+        let granted_bash = allowed
             .split(',')
             .filter_map(|grant| grant.strip_prefix("Bash("))
-        {
-            let command = grant.strip_suffix(" *)").unwrap();
-            let documented = format!("{command} ...");
-            assert!(
-                REVIEW_RULES.contains(&documented),
-                "missing guidance for {documented}"
-            );
-        }
+            .map(|grant| format!("{} ...", grant.strip_suffix(" *)").unwrap()))
+            .collect::<Vec<_>>();
+        let documented_bash = REVIEW_RULES
+            .split_once("The runner grants these standalone Bash command forms: ")
+            .unwrap()
+            .1
+            .split_once(". Run one allowed command per Bash call.")
+            .unwrap()
+            .0
+            .replace(", and ", ", ")
+            .split(", ")
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(documented_bash, granted_bash);
         assert!(REVIEW_RULES.contains(&format!("Use Edit only for ./output/{output_file}")));
     }
 
@@ -486,6 +501,22 @@ mod tests {
         assert_eq!(
             capture_stream(&b"\xff\n"[..], 1024, 100).result,
             Err(AgentRunError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn repeated_assistant_events_with_one_message_id_count_as_one_turn() {
+        let repeated = b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[]}}\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[]}}\n";
+        assert!(capture_stream(repeated.as_slice(), 1024, 1).result.is_ok());
+        let distinct = b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[]}}\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg-2\",\"content\":[]}}\n";
+        assert_eq!(
+            capture_stream(distinct.as_slice(), 1024, 1).result,
+            Err(AgentRunError::TooManyTurns)
+        );
+        let missing_ids = b"{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n";
+        assert_eq!(
+            capture_stream(missing_ids.as_slice(), 1024, 1).result,
+            Err(AgentRunError::TooManyTurns)
         );
     }
 
