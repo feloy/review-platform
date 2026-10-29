@@ -384,7 +384,9 @@ pub fn run_review(
         storage::save(&state_path, &current)?;
     }
     println!(
-        "Round {id}: private draft available ({freshness}). Run show-draft {key} --round {id}."
+        "Round {id}: private draft available ({freshness}). Run show-draft {} {} --round {id}.",
+        key.repository(),
+        key.number()
     );
     Ok(())
 }
