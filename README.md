@@ -20,37 +20,132 @@ refreshing their GitHub inputs, recording lead authorization,
 running one review at a time through an existing OpenShell gateway,
 and inspecting private drafts.
 It requires stable Rust 1.85 or newer.
-From the repository root:
+From the repository root, compile and install the CLI:
 
 ```sh
-cargo run -- --help
-cargo run -- request owner/repo 42 0123456789abcdef0123456789abcdef01234567
-cargo run -- refresh owner/repo 42
-cargo run -- status owner/repo 42
-cargo run -- github-pr owner/repo 42
-cargo run -- github-pr owner/repo 42 --checks
-cargo run -- github-pr owner/repo 42 --diff
-cargo run -- github-pr owner/repo 42 --since 0123456789abcdef0123456789abcdef01234567 --checks
-cargo run -- authorize owner/repo 42 --scope one-round --head 0123456789abcdef0123456789abcdef01234567 --revision 2
-cargo run -- --config-file .review-platform/config.json prepare-review owner/repo 42
-cargo run -- --config-file .review-platform/config.json prepare-review owner/repo 42 --model model-beta --head 0123456789abcdef0123456789abcdef01234567 --revision 2
-cargo run -- --config-file .review-platform/config.json gateway status
-cargo run -- --config-file .review-platform/config.json run-review owner/repo 42 --head 0123456789abcdef0123456789abcdef01234567 --revision 2
-cargo run -- show-draft owner/repo 42 --round r-example
-cargo run -- show-draft owner/repo 42 --round r-example --log
-cargo run -- reject-draft owner/repo 42 --round r-example
-cargo run -- --config-file .review-platform/config.json recover-review owner/repo 42
-cargo run -- status owner/repo 42
-cargo run -- list
-cargo run -- state-path
-cargo run -- config-path
-cargo run -- revoke owner/repo 42
-cargo run -- help authorize
+# Compile and install the current CLI.
+cargo install --path . --locked --force
+# Check the available commands.
+review-platform --help
+```
+
+Cargo installs the executable in its binary directory, which must be on `PATH`.
+The examples below use the default per-user state and configuration files.
+Pass `--state-file PATH` or `--config-file PATH` before a subcommand to use other files.
+Replace `owner/repo`, `42`, and uppercase placeholders with your PR and the values
+shown by the preceding commands.
+`HEAD_SHA` comes from `github-pr`, `REVISION` from `status` or `prepare-review`,
+`MODEL_ID` from `prepare-review`, and `ROUND_ID` from `run-review`.
+Inspect the current head and revision before authorizing or validating a model.
+If `prepare-review` refreshes inputs after one-round authorization,
+inspect the new values and authorize again.
+
+### Start a review for a new PR
+
+Inspect the PR, record its current head, and establish the author discussion baseline.
+Authorize one round using the head and revision shown by `status`.
+
+```sh
+# Inspect the live PR, diff, and checks.
+review-platform github-pr owner/repo 42 --diff --checks
+# Record the head you inspected.
+review-platform request owner/repo 42 HEAD_SHA
+# Record the author's current discussion.
+review-platform refresh owner/repo 42
+# Read the head and input revision.
+review-platform status owner/repo 42
+# Authorize one round for those inputs.
+review-platform authorize owner/repo 42 --scope one-round --head HEAD_SHA --revision REVISION
+# See the proposed model and readiness.
+review-platform prepare-review owner/repo 42
+# Validate the chosen model.
+review-platform prepare-review owner/repo 42 --model MODEL_ID --head HEAD_SHA --revision REVISION
+# Check the configured gateway and providers.
+review-platform gateway status
+# Run the authorized review.
+review-platform run-review owner/repo 42 --head HEAD_SHA --revision REVISION
+# Inspect the saved private draft.
+review-platform show-draft owner/repo 42 --round ROUND_ID
+```
+
+The first `prepare-review` shows the proposed model and checks.
+Use its latest head and revision when validating the model and starting the round.
+`run-review` requires green checks for that exact head.
+
+### Review a changed PR with one-round authorization
+
+Inspect the earlier draft and record the lead's decision first.
+The current CLI can reject a draft locally but cannot publish it.
+The following example assumes the lead rejects it.
+`refresh` records the new head or author discussion and the new revision.
+One-round authorization was consumed when the earlier round was dispatched,
+so authorize the new inputs before validating a model and running again.
+
+```sh
+# Inspect the previous private draft.
+review-platform show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+# Record the lead's rejection of that draft.
+review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+# Inspect changes since the previous head and check CI.
+review-platform github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
+# Record the new head or author discussion.
+review-platform refresh owner/repo 42
+# Read the new head and input revision.
+review-platform status owner/repo 42
+# Authorize one round for the new inputs.
+review-platform authorize owner/repo 42 --scope one-round --head NEW_HEAD_SHA --revision NEW_REVISION
+# See the proposed model and readiness.
+review-platform prepare-review owner/repo 42
+# Validate a model for the new inputs.
+review-platform prepare-review owner/repo 42 --model MODEL_ID --head NEW_HEAD_SHA --revision NEW_REVISION
+# Run the newly authorized review.
+review-platform run-review owner/repo 42 --head NEW_HEAD_SHA --revision NEW_REVISION
+# Inspect the new private draft.
+review-platform show-draft owner/repo 42 --round NEW_ROUND_ID
+```
+
+`--since` requires the earlier head to be an ancestor of the new head.
+After a force push that breaks this history, inspect the full diff with `--diff`.
+
+### Review a changed PR with PR-cycle authorization
+
+For the first round, replace the `one-round` authorization command
+in the new PR sequence above with:
+
+```sh
+# Authorize the PR cycle for the inspected inputs.
+review-platform authorize owner/repo 42 --scope pr-cycle --head HEAD_SHA --revision REVISION
+```
+
+After a later commit or author reply, inspect and decide on the earlier draft.
+The `pr-cycle` authorization remains active after rejection and input changes,
+so the next sequence does not need another `authorize` command.
+The new inputs still need green checks and a validated model.
+
+```sh
+# Inspect the previous private draft.
+review-platform show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+# Record the lead's rejection of that draft.
+review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+# Inspect changes since the previous head and check CI.
+review-platform github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
+# Record the new head or author discussion.
+review-platform refresh owner/repo 42
+# Confirm the PR-cycle scope and new revision.
+review-platform status owner/repo 42
+# See the proposed model and readiness.
+review-platform prepare-review owner/repo 42
+# Validate a model for the new inputs.
+review-platform prepare-review owner/repo 42 --model MODEL_ID --head NEW_HEAD_SHA --revision NEW_REVISION
+# Run a new round under PR-cycle authorization.
+review-platform run-review owner/repo 42 --head NEW_HEAD_SHA --revision NEW_REVISION
+# Inspect the new private draft.
+review-platform show-draft owner/repo 42 --round NEW_ROUND_ID
 ```
 
 ### CLI commands
 
-Run each command as `cargo run -- COMMAND` from the repository root.
+Run each command as `review-platform COMMAND` after installing the CLI.
 `REPOSITORY` means `owner/repo`, `PR` is a positive pull request number,
 `HEAD_SHA` is a 40- or 64-character hexadecimal commit ID,
 and `REVISION` is the positive local input revision shown by `status`.
