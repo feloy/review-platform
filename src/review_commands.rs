@@ -455,8 +455,14 @@ pub fn reject_draft(
     let mut state = storage::load(&state_path)?;
     match state.reject_round(&key, &id)? {
         RejectOutcome::Rejected => {
+            let authorization = state
+                .get(&key)
+                .context("review request disappeared after rejection")?
+                .authorization();
             storage::save(&state_path, &state)?;
-            println!("Round {id} for {key} rejected locally; fresh authorization is required.");
+            println!(
+                "Round {id} for {key} rejected locally; authorization: {authorization}; a validated model is required for another round."
+            );
         }
         RejectOutcome::AlreadyRejected => {
             println!("Round {id} for {key} was already rejected; authorization is unchanged.");
