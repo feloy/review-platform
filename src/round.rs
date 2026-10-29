@@ -3,6 +3,7 @@
 use crate::archive::{self, ArchiveError};
 use crate::config::{ConfigError, ModelId, ResolvedReviewModel, ReviewConfig};
 use crate::github::checks::CheckSummary;
+use crate::github::commits::CommitCoauthors;
 use crate::github::discussion::PullObservation;
 use crate::github::{GithubClient, GithubError};
 use crate::preparation::{self, Preparation, PreparationError};
@@ -79,6 +80,7 @@ pub struct RoundPreparation<'a> {
     preparation: Preparation,
     resolved: ResolvedReviewModel<'a>,
     checks: CheckSummary,
+    commits: CommitCoauthors,
     validation_changed: bool,
 }
 
@@ -93,6 +95,10 @@ impl<'a> RoundPreparation<'a> {
 
     pub fn checks(&self) -> CheckSummary {
         self.checks
+    }
+
+    pub fn commits(&self) -> &CommitCoauthors {
+        &self.commits
     }
 
     pub fn validation_changed(&self) -> bool {
@@ -227,10 +233,13 @@ pub fn prepare<'a>(
         let _verified = archive::verify_archive(models[resolved_index].archive())?;
     }
     let resolved = models.remove(resolved_index);
+    let checks = inputs.checks_summary();
+    let commits = inputs.into_commits();
     Ok(RoundPreparation {
         preparation,
         resolved,
-        checks: inputs.checks_summary(),
+        checks,
+        commits,
         validation_changed,
     })
 }

@@ -171,7 +171,8 @@ including when loaded from the JSON state file.
   green checks on the exact head, and an unchanged model validation.
   It copies and verifies the configured rootfs tar and OCI metadata,
   checks out the exact PR head and base without running repository code,
-  and creates a sandbox with read-only checkout and instructions.
+  stages the PR diff, commit history, and conversation,
+  and creates a sandbox with read-only checkout, input, and instructions.
   Immediately before dispatch it rechecks GitHub inputs, CI, authorization,
   configuration, and policy.
   One-round authorization is consumed only when dispatch is recorded.
@@ -322,10 +323,10 @@ may be set in that agent's `runner.environment`.
 Duplicate environment names are rejected.
 The `hold_command` keeps a newly created sandbox alive without starting Claude;
 the runner then rechecks every gate before executing Claude separately.
-The sandbox mounts only the checkout and trusted instructions read-only,
+The sandbox mounts the checkout, fetched PR input, and trusted instructions read-only,
 plus the round's output directory writable.
-Their fixed sandbox paths are `/sandbox/src`, `/sandbox/instructions`,
-and `/sandbox/output`, respectively.
+Their fixed sandbox paths are `/sandbox/src`, `/sandbox/input`,
+`/sandbox/instructions`, and `/sandbox/output`, respectively.
 The runner always disables TTY and restarts and prevents automatic provider creation.
 The shared `timeout_seconds`, `cpu`, `memory`, and `log_limit_bytes`
 default to 1800 seconds, two CPUs, 4 GiB, and 8 MiB.
@@ -354,18 +355,20 @@ remote gateway deployment is not implemented.
 
 `run-review` creates a private round directory beside the state file,
 under `rounds/ROUND_ID/`.
+It keeps the staged PR input under `input/` for inspection after the round.
 It retains the original `output/review-output.json` agent artifact unchanged,
 stores the assembled private `draft.json`,
 and keeps an incomplete log file if an agent run fails after emitting dialogue.
 The runner seeds the output file with an invalid marker and grants Claude's
 `Edit` tool permission for that file.
-It starts Claude in `/sandbox` so relative read permissions cover the checkout
-and instructions and `Edit(./output/review-output.json)` matches the output file.
+It starts Claude in `/sandbox` so relative read permissions cover the checkout,
+input, and instructions and `Edit(./output/review-output.json)` matches the output file.
 An unchanged marker cannot become a draft.
-Claude Code may still allow some reads and simple shell commands outside the
-explicit `--allowedTools` entries.
-The wildcard Git and GitHub Bash grants do not by themselves restrict every
-read or write option; this remains an open review finding.
+The Claude command exposes only `Read` and `Edit`; it grants no Bash tool.
+The checkout and fetched input are separate from trusted instructions.
+The optional `tests/live_vm.rs` check exercises real Read tool calls and VM mount access
+under the exact review flags and working directory.
+Run it against the operator-managed gateway after changing CLI permissions or mounts.
 The agent artifact must be regular UTF-8 JSON of at most 1 MiB
 with exactly `status`, `comments`, and `lead_advice`.
 The runner adds `review_log` from the captured Claude dialogue.
@@ -474,7 +477,8 @@ different from the one that helped author the PR, when possible.
 The lead validates or changes the model choice.
 The daemon resolves an agent that supports that model and runs it in OpenShell with its instructions
 and the verified VM archive configured for that repository and agent.
-The agent reads PR files, discussion, and earlier reviews through read-only GitHub access.
+The daemon fetches the diff, commit history, discussion, and earlier reviews from GitHub.
+It mounts those inputs and the PR checkout read-only for the agent.
 It does not run tools on the code; CI performs validation.
 The agent then writes a draft review.
 The lead inspects the draft and chooses to publish it unchanged or reject it.
@@ -506,7 +510,7 @@ a human maintainer makes the formal approval and merge decision.
   Its operator manages gateway access, provider profiles, provider credentials, and rotation.
 - **OpenShell sandbox**: Runs a selected agent, such as Claude or Codex, from the VM archive configured for that repository and agent,
   with instructions and named providers selected by the daemon.
-  The agent has read-only GitHub access and returns draft text to the daemon;
+  The agent reads staged GitHub inputs and returns draft text to the daemon;
   the daemon holds the publishing authority.
 
 ## Authorization states
@@ -566,7 +570,7 @@ flowchart TD
     T -->|Awaiting lead authorization| D
     U --> I
 
-    I --> J["Agent reads code, discussion, and earlier reviews<br/>with read-only GitHub access"]
+    I --> J["Agent reads code and staged GitHub context<br/>from read-only mounts"]
     J --> K["Agent writes a draft review"]
     K --> L{"Lead publishes the draft?"}
     L -->|Yes| M["Daemon posts the draft unchanged to the PR"]
@@ -602,7 +606,7 @@ and Claude command rules in code.
 The runner accepts only a configured `vm` driver for now and checks that the gateway supports it.
 It reports `podman` as unsupported or an unknown driver as invalid
 before any sandbox is created.
-Round-specific checkout and output paths are filled in when the sandbox is created.
+Round-specific checkout, input, and output paths are filled in when the sandbox is created.
 The runner validates these values against the read-only input and isolated output rules.
 It attaches only those providers and disables automatic provider creation.
 Provider names alone do not prove their permissions;
@@ -612,7 +616,17 @@ If the gateway or required providers are unavailable, the round does not start.
 
 ## Review inputs and CI
 
-The agent may read PR files and GitHub context, but does not execute repository
+Before sandbox creation, the host fetches the full PR diff and commit list
+for the inspected head and fetches PR comments and submitted earlier reviews.
+It writes `input/pull.json` with PR metadata, `input/pull.diff` with the code diff,
+`input/commits.json` with commit SHAs and messages,
+and `input/discussion.json` with general comments, inline comments, and reviews.
+All four files are untrusted review data mounted read-only at `/sandbox/input`.
+The diff is limited to 8 MiB; GitHub's PR commit endpoint is limited to 250 commits.
+Each discussion collection is limited to 1000 items and 8 MiB per retrieval pass.
+If fetching a required input fails or the head or author discussion changes,
+the round fails before agent dispatch.
+The agent may read PR files and staged GitHub context, but does not execute repository
 code, install dependencies, or run tools against the code under review.
 Builds, tests, linters, and other validation steps run in CI.
 The daemon starts a review only after the current PR commit's CI checks are green.
