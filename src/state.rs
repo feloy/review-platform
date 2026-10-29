@@ -48,6 +48,12 @@ pub enum RefreshOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectOutcome {
+    Rejected,
+    AlreadyRejected,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewRequest {
@@ -363,6 +369,41 @@ impl State {
         let round = self.round_mut(id)?;
         round.mark_cleaned();
         Ok(())
+    }
+
+    pub fn reject_round(
+        &mut self,
+        key: &PrKey,
+        id: &RoundId,
+    ) -> Result<RejectOutcome, RoundStateError> {
+        let index = self
+            .rounds
+            .iter()
+            .position(|round| round.id() == id)
+            .ok_or_else(|| RoundStateError::NotFound(id.clone()))?;
+        let round = &self.rounds[index];
+        if round.key() != key {
+            return Err(RoundStateError::WrongRequest {
+                round: id.clone(),
+                request: key.clone(),
+            });
+        }
+        match round.status() {
+            RoundStatus::Rejected => return Ok(RejectOutcome::AlreadyRejected),
+            RoundStatus::DraftAvailable => {}
+            RoundStatus::Starting
+            | RoundStatus::Running
+            | RoundStatus::Failed
+            | RoundStatus::Interrupted => return Err(RoundStateError::WrongStatus(id.clone())),
+        }
+        if round.cleanup_pending() {
+            return Err(RoundStateError::CleanupPending(id.clone()));
+        }
+        let request = self.request_mut(key)?;
+        request.authorization = Authorization::AwaitingLead;
+        request.model_validation = None;
+        self.rounds[index].mark_rejected();
+        Ok(RejectOutcome::Rejected)
     }
 
     pub fn fail_round(
@@ -1359,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn rounds_consume_one_round_authorization_and_saved_drafts_block_retries() {
+    fn rejecting_a_saved_draft_requires_fresh_authorization_for_another_round() {
         let raw = serde_json::json!({
             "schema_version":5,
             "execution": crate::config::test_execution_json(),
@@ -1407,6 +1448,18 @@ mod tests {
             1,
         );
         state.begin_round(first.clone(), choice).unwrap();
+        assert_eq!(
+            state.reject_round(&key(), first.id()),
+            Err(RoundStateError::WrongStatus(first.id().clone()))
+        );
+        let other_key = PrKey::new("other/repo", 42).unwrap();
+        assert_eq!(
+            state.reject_round(&other_key, first.id()),
+            Err(RoundStateError::WrongRequest {
+                round: first.id().clone(),
+                request: other_key,
+            })
+        );
         assert!(matches!(
             state.begin_round(
                 RoundRecord::new(
@@ -1431,6 +1484,10 @@ mod tests {
         state
             .complete_round(first.id(), 4, Freshness::Stale)
             .unwrap();
+        assert_eq!(
+            state.reject_round(&key(), first.id()),
+            Err(RoundStateError::CleanupPending(first.id().clone()))
+        );
         state.mark_round_cleaned(first.id()).unwrap();
         assert!(state.validate().is_ok());
         state
@@ -1453,21 +1510,67 @@ mod tests {
                 &VerifiedArchive::for_test(choice.archive()),
             )
             .unwrap();
+        let third = RoundRecord::new(
+            RoundId::new("r-third").unwrap(),
+            key(),
+            head.clone(),
+            revision(2),
+            discussion,
+            choice,
+            5,
+        );
         assert!(matches!(
-            state.begin_round(
-                RoundRecord::new(
-                    RoundId::new("r-third").unwrap(),
-                    key(),
-                    head,
-                    revision(2),
-                    discussion,
-                    choice,
-                    5
-                ),
-                choice
-            ),
+            state.begin_round(third.clone(), choice),
             Err(RoundStateError::BlocksNewRound(_))
         ));
+        assert_eq!(
+            state.reject_round(&key(), first.id()).unwrap(),
+            RejectOutcome::Rejected
+        );
+        let rejected = state.round(first.id()).unwrap();
+        assert_eq!(rejected.status(), RoundStatus::Rejected);
+        assert!(!rejected.blocks_new_round());
+        assert!(rejected.status().has_saved_draft());
+        assert_eq!(rejected.head_sha(), &head);
+        assert_eq!(rejected.revision(), revision(2));
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::AwaitingLead
+        );
+        assert!(state.get(&key()).unwrap().model_validation().is_none());
+        assert!(matches!(
+            state.begin_round(third.clone(), choice),
+            Err(RoundStateError::State(StateError::AwaitingAuthorization(_)))
+        ));
+        let serialized = serde_json::to_vec(&state).unwrap();
+        let reloaded: State = serde_json::from_slice(&serialized).unwrap();
+        reloaded.validate().unwrap();
+        assert_eq!(
+            reloaded.round(first.id()).unwrap().status(),
+            RoundStatus::Rejected
+        );
+        state
+            .authorize(&key(), &head, revision(2), AuthorizationScope::OneRound)
+            .unwrap();
+        state
+            .validate_model(
+                &prepared,
+                &head,
+                revision(2),
+                choice,
+                &VerifiedArchive::for_test(choice.archive()),
+            )
+            .unwrap();
+        assert_eq!(
+            state.reject_round(&key(), first.id()).unwrap(),
+            RejectOutcome::AlreadyRejected
+        );
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::OneRound
+        );
+        assert!(state.get(&key()).unwrap().model_validation().is_some());
+        state.begin_round(third, choice).unwrap();
     }
 
     #[test]

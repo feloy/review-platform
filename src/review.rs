@@ -66,6 +66,7 @@ pub enum RoundStatus {
     Starting,
     Running,
     DraftAvailable,
+    Rejected,
     Failed,
     Interrupted,
 }
@@ -74,7 +75,14 @@ impl RoundStatus {
     pub fn blocks_new_round(self) -> bool {
         match self {
             Self::Starting | Self::Running | Self::DraftAvailable => true,
-            Self::Failed | Self::Interrupted => false,
+            Self::Rejected | Self::Failed | Self::Interrupted => false,
+        }
+    }
+
+    pub fn has_saved_draft(self) -> bool {
+        match self {
+            Self::DraftAvailable | Self::Rejected => true,
+            Self::Starting | Self::Running | Self::Failed | Self::Interrupted => false,
         }
     }
 }
@@ -85,6 +93,7 @@ impl std::fmt::Display for RoundStatus {
             Self::Starting => "starting",
             Self::Running => "running",
             Self::DraftAvailable => "draft available",
+            Self::Rejected => "rejected",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
         })
@@ -290,6 +299,9 @@ impl RoundRecord {
     pub(crate) fn mark_cleaned(&mut self) {
         self.cleanup_pending = false;
     }
+    pub(crate) fn mark_rejected(&mut self) {
+        self.status = RoundStatus::Rejected;
+    }
     pub(crate) fn mark_failed(
         &mut self,
         at: u64,
@@ -311,8 +323,12 @@ impl RoundRecord {
             || self.created_at == 0
             || (self.status == RoundStatus::Starting && self.dispatched_at.is_some())
             || (self.status == RoundStatus::Running && self.dispatched_at.is_none())
-            || (self.status == RoundStatus::DraftAvailable
-                && (self.finished_at.is_none() || self.freshness.is_none()))
+            || (self.status.has_saved_draft()
+                && (self.finished_at.is_none()
+                    || self.freshness.is_none()
+                    || self.failure.is_some()))
+            || (self.status == RoundStatus::Rejected
+                && (self.dispatched_at.is_none() || self.cleanup_pending || self.incomplete_log))
             || (matches!(self.status, RoundStatus::Failed | RoundStatus::Interrupted)
                 && (self.finished_at.is_none() || self.failure.is_none()))
         {
@@ -338,6 +354,10 @@ pub enum RoundStateError {
     BlocksNewRound(RoundId),
     #[error("round {0} is in the wrong state for this transition")]
     WrongStatus(RoundId),
+    #[error("round {round} does not belong to {request}")]
+    WrongRequest { round: RoundId, request: PrKey },
+    #[error("round {0} still needs sandbox cleanup; run recover-review first")]
+    CleanupPending(RoundId),
     #[error("model validation is missing or no longer matches the selected runner")]
     ModelNotValidated,
 }

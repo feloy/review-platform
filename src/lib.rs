@@ -18,5 +18,6 @@ pub use model::{
     InputRevision, ObservedDiscussion, PrKey, StateError,
 };
 pub use state::{
-    ModelValidation, ModelValidationError, RecordOutcome, RefreshOutcome, ReviewRequest, State,
+    ModelValidation, ModelValidationError, RecordOutcome, RefreshOutcome, RejectOutcome,
+    ReviewRequest, State,
 };

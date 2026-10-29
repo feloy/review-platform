@@ -64,6 +64,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Recheck at round start because an operator display is only a snapshot.
 - Post only the exact draft the lead approved.
   Rejection posts nothing and requires fresh authorization before another round.
+- Record rejection as an explicit decision and preserve the private draft.
+  Do not mark a completed draft as failed merely to unblock another round.
 - When a publisher may share the PR author's GitHub identity,
   exclude only review IDs recorded from confirmed publication from author-comment triggers.
   Treat text markers as display cues, never proof of origin.

@@ -37,6 +37,7 @@ cargo run -- --config-file .review-platform/config.json gateway status
 cargo run -- --config-file .review-platform/config.json run-review owner/repo 42 --head 0123456789abcdef0123456789abcdef01234567 --revision 2
 cargo run -- show-draft owner/repo 42 --round r-example
 cargo run -- show-draft owner/repo 42 --round r-example --log
+cargo run -- reject-draft owner/repo 42 --round r-example
 cargo run -- --config-file .review-platform/config.json recover-review owner/repo 42
 cargo run -- status owner/repo 42
 cargo run -- list
@@ -177,8 +178,17 @@ including when loaded from the JSON state file.
   Progress output names phases and never prints the review dialogue or draft.
 - `show-draft REPOSITORY PR --round ROUND_ID` displays the saved PR-facing comments,
   separate private lead advice, and live freshness.
+  Rejected drafts remain available for inspection.
   Add `--log` to display the sensitive review dialogue.
   A failed freshness check is shown as unknown.
+- `reject-draft REPOSITORY PR --round ROUND_ID` records the lead's decision
+  to discard a saved draft, including when it is stale.
+  It requires completed sandbox cleanup,
+  preserves the private draft,
+  and posts nothing to GitHub.
+  It clears review authorization and model validation,
+  so another round requires a fresh lead decision.
+  Repeating it leaves any newer authorization unchanged.
 - `recover-review REPOSITORY PR` stops and deletes the latest interrupted
   or cleanup-pending sandbox without starting an agent.
   It refuses recovery while that round's runner is still active.
@@ -373,7 +383,10 @@ Recovery refuses to stop a sandbox while its review runner is active.
 Recovery stops and deletes the recorded sandbox without replaying Claude.
 One-round authorization is never restored after an uncertain dispatch.
 A failed PR-cycle round may be retried explicitly after all live gates pass again.
-Saved drafts cannot yet be published, rejected, or superseded through this CLI.
+Saved drafts cannot yet be published through this CLI.
+Use `reject-draft` to close a draft before authorizing another round.
+This interim command identifies the draft by round ID;
+a later publication workflow will add body-hash confirmation and decision receipts.
 
 An opt-in synthetic VM integration test exercises the gateway, provider attachment,
 image environment, read-only mounts, private output retrieval,
@@ -399,11 +412,11 @@ The CLI uses this token only for GitHub reads.
 HTTPS uses the platform's trusted certificates, including organization roots installed for a TLS-intercepting proxy.
 On Linux, `SSL_CERT_FILE` or `SSL_CERT_DIR` can select a PEM certificate bundle or directory instead of the system CA bundle.
 
-This prototype does not discover author review requests, publish or reject drafts,
+This prototype does not discover author review requests, publish drafts,
 schedule background rounds, or manage the gateway and its providers.
 Review requests and lead decisions are still entered manually.
 Saved drafts block further rounds for the same PR, including when they are stale,
-until draft decisions are implemented.
+until the lead rejects them locally.
 The CLI records the head of each round;
 use that value with `github-pr --since` when inspecting later changes.
 Its state is local and protected by a short exclusive lock for mutations.
