@@ -11,7 +11,7 @@ use review_platform::{
     openshell::{OpenShell, OpenShellError, SandboxMounts},
     preparation::Readiness,
     review::{
-        DraftOutput, FORMAT_RULES, FailureKind, Freshness, OUTPUT_MARKER, RoundId, RoundRecord,
+        DraftOutput, FailureKind, Freshness, OUTPUT_MARKER, REVIEW_RULES, RoundId, RoundRecord,
         RoundStatus,
     },
     round, sandbox_layout,
@@ -57,6 +57,23 @@ pub fn gateway_status(config_override: Option<PathBuf>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn show_draft_command(key: &PrKey, id: &RoundId) -> String {
+    format!(
+        "show-draft {} {} --round {id}",
+        key.repository(),
+        key.number()
+    )
+}
+
+fn cleanup_pending_context(key: &PrKey, id: &RoundId) -> String {
+    format!(
+        "draft {id} saved; sandbox cleanup pending. Run recover-review {} {}. Run {}.",
+        key.repository(),
+        key.number(),
+        show_draft_command(key, id)
+    )
 }
 
 pub fn run_review(
@@ -197,8 +214,8 @@ pub fn run_review(
             choice.agent().prompt().as_bytes(),
         )?;
         write_new(
-            &instructions.join("output-format-v1.txt"),
-            FORMAT_RULES.as_bytes(),
+            &instructions.join("review-rules-v1.txt"),
+            REVIEW_RULES.as_bytes(),
         )?;
         let composed = agent::compose_system_prompt(choice.agent().prompt());
         write_new(&instructions.join("system-prompt.txt"), composed.as_bytes())?;
@@ -375,13 +392,11 @@ pub fn run_review(
         storage::save(&state_path, &current)?;
     }
     if let Some(error) = stop_error {
-        return Err(error).with_context(|| {
-            format!("draft {id} saved; sandbox cleanup pending; run recover-review")
-        });
+        return Err(error).with_context(|| cleanup_pending_context(&key, &id));
     }
-    shell.delete(&record).with_context(|| {
-        format!("draft {id} saved; sandbox cleanup pending; run recover-review")
-    })?;
+    shell
+        .delete(&record)
+        .with_context(|| cleanup_pending_context(&key, &id))?;
     {
         let _lock = storage::lock(&state_path)?;
         let mut current = storage::load(&state_path)?;
@@ -389,9 +404,8 @@ pub fn run_review(
         storage::save(&state_path, &current)?;
     }
     println!(
-        "Round {id}: private draft available ({freshness}). Run show-draft {} {} --round {id}.",
-        key.repository(),
-        key.number()
+        "Round {id}: private draft available ({freshness}). Run {}.",
+        show_draft_command(&key, &id)
     );
     Ok(())
 }
@@ -705,6 +719,16 @@ fn now() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_error_includes_copyable_recovery_and_draft_commands() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let id = RoundId::new("r-draft").unwrap();
+        assert_eq!(
+            cleanup_pending_context(&key, &id),
+            "draft r-draft saved; sandbox cleanup pending. Run recover-review owner/repo 42. Run show-draft owner/repo 42 --round r-draft."
+        );
+    }
 
     #[test]
     fn completed_output_is_saved_after_stop_failure() {

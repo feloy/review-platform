@@ -66,7 +66,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Rejection posts nothing and leaves the current authorization unchanged.
 - Record rejection as an explicit decision and preserve the private draft.
   Do not mark a completed draft as failed merely to unblock another round.
-  Clear model validation matching the rejected round while preserving a newer choice.
+  Clear model validation matching the rejected round and preserve a different later choice.
 - When a publisher may share the PR author's GitHub identity,
   exclude only review IDs recorded from confirmed publication from author-comment triggers.
   Treat text markers as display cues, never proof of origin.
