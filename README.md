@@ -10,7 +10,8 @@ or keep authorization active for the PR so later rounds can start automatically.
 The lead can change that choice at any time.
 Each generated review stays private until the lead publishes it unchanged;
 the lead can also reject it.
-Rejecting a draft starts another review round only after fresh lead authorization.
+Rejecting a draft keeps the current authorization.
+Another round still needs a valid lead model choice.
 
 ## Run the Rust prototype
 
@@ -188,8 +189,9 @@ including when loaded from the JSON state file.
   It requires completed sandbox cleanup,
   preserves the private draft,
   and posts nothing to GitHub.
-  It clears review authorization and model validation,
-  so another round requires a fresh lead decision.
+  It leaves authorization unchanged and clears model validation
+  when it still matches the rejected round.
+  Another round requires active authorization and a validated model.
   Repeating it leaves any newer authorization unchanged.
 - `recover-review REPOSITORY PR` stops and deletes the latest interrupted
   or cleanup-pending sandbox without starting an agent.
@@ -388,7 +390,9 @@ Recovery stops and deletes the recorded sandbox without replaying Claude.
 One-round authorization is never restored after an uncertain dispatch.
 A failed PR-cycle round may be retried explicitly after all live gates pass again.
 Saved drafts cannot yet be published through this CLI.
-Use `reject-draft` to close a draft before authorizing another round.
+Use `reject-draft` to close a draft before running another round.
+A retry with the rejected round's exact model choice needs fresh validation.
+If one-round authorization was consumed at dispatch, authorize again.
 This interim command identifies the draft by round ID;
 a later publication workflow will add body-hash confirmation and decision receipts.
 
@@ -483,8 +487,8 @@ It does not run tools on the code; CI performs validation.
 The agent then writes a draft review.
 The lead inspects the draft and chooses to publish it unchanged or reject it.
 If the lead chooses to publish, the daemon posts the unchanged text to the PR.
-If the lead rejects it, nothing is posted;
-the daemon waits for the lead to authorize a new review round.
+If the lead rejects it, nothing is posted and the current authorization remains.
+Another round requires a valid lead model choice.
 An agent recommendation to approve is informational;
 a human maintainer makes the formal approval and merge decision.
 
@@ -500,11 +504,12 @@ a human maintainer makes the formal approval and merge decision.
   It connects to the configured OpenShell gateway and manages only the sandboxes it creates for review rounds.
   It waits for green checks, starts review rounds after lead validation, tracks progress, holds draft reviews,
   and posts only drafts the lead has chosen to publish.
-  After a rejection, it waits for fresh lead authorization before starting another round.
+  After a rejection, it waits for valid model validation and active authorization
+  before starting another round.
 - **Operator interface**: Shows the lead pending requests and draft reviews.
   It lets the lead edit agent prompts, authorize one round or the full cycle, change that choice,
-  publish or reject drafts, authorize a new round after rejection,
-  validate or change the daemon's proposed model, and monitor reviews.
+  publish or reject drafts, validate or change the daemon's proposed model,
+  and monitor reviews.
   It may be a CLI, terminal UI, or graphical UI.
 - **OpenShell gateway**: Runs independently of Review Platform.
   Its operator manages gateway access, provider profiles, provider credentials, and rotation.
@@ -527,11 +532,12 @@ to match the locally recorded values.
 | --- | --- | --- |
 | **Awaiting lead authorization** | No new round may start. | A new request starts here; the lead can authorize one round or the PR cycle. |
 | **Authorized for one round** | One round may start for the current PR head and author discussion. | The authorization is consumed when the round starts. A new commit or author comment before then clears it. The lead can also switch or revoke it. |
-| **Authorized for the PR cycle** | The current round and later rounds triggered by new commits or author comments may start, subject to the checks and model gate each time. | It persists across those events until the lead switches or revokes it, or rejects a draft. |
+| **Authorized for the PR cycle** | The current round and later rounds triggered by new commits or author comments may start, subject to the checks and model gate each time. | It persists across those events and draft rejection until the lead switches or revokes it. |
 
 Publishing a draft leaves PR-cycle authorization active for the next commit or author comment.
-Rejecting a draft always returns the PR to awaiting lead authorization;
-nothing is posted and another round needs a fresh lead decision.
+Rejecting a draft leaves the current authorization unchanged.
+It clears model validation matching that round while preserving a newer choice.
+Nothing is posted; another round needs active authorization and a validated model.
 The lead can change or revoke authorization at any time.
 
 Round progress is separate: waiting for current-head CI, waiting for model validation,
@@ -577,14 +583,14 @@ flowchart TD
     L -->|No| N["Reject draft; nothing posted"]
 
     M --> O([Wait for next commit or author comment])
-    N --> RESET{{"Clear authorization<br/>(awaiting lead)"}}
-    RESET -->|Fresh authorization required| D
+    N --> CLEAR_MODEL{{"Keep authorization;<br/>clear rejected model validation"}}
+    CLEAR_MODEL --> O
     O --> P{"PR-cycle authorization still active?"}
     P -->|Yes| G
     P -->|No| D
 
     classDef stateChange fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#172554;
-    class INIT,E,F,U,RESET stateChange;
+    class INIT,E,F,U,CLEAR_MODEL stateChange;
 ```
 
 Blue hexagons show authorization state changes;

@@ -160,9 +160,10 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
         &["reject-draft", "owner/repo", "42", "--round", "r-draft"],
     );
     assert!(output.contains("rejected locally"));
+    assert!(output.contains("authorized for the PR cycle"));
     let status = run(&state_file, &["status", "owner/repo", "42"]);
     assert!(status.contains("latest round: r-draft (rejected)"));
-    assert!(status.contains("awaiting lead authorization"));
+    assert!(status.contains("authorized for the PR cycle"));
     assert_eq!(std::fs::read(&draft_file).unwrap(), draft);
     let stored: State = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
     stored.validate().unwrap();

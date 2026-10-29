@@ -399,9 +399,14 @@ impl State {
         if round.cleanup_pending() {
             return Err(RoundStateError::CleanupPending(id.clone()));
         }
+        let clear_validation = self
+            .get(key)
+            .and_then(ReviewRequest::model_validation)
+            .is_some_and(|validation| validation.matches_round(round));
         let request = self.request_mut(key)?;
-        request.authorization = Authorization::AwaitingLead;
-        request.model_validation = None;
+        if clear_validation {
+            request.model_validation = None;
+        }
         self.rounds[index].mark_rejected();
         Ok(RejectOutcome::Rejected)
     }
@@ -1400,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn rejecting_a_saved_draft_requires_fresh_authorization_for_another_round() {
+    fn rejection_preserves_authorization_and_only_clears_matching_model_validation() {
         let raw = serde_json::json!({
             "schema_version":5,
             "execution": crate::config::test_execution_json(),
@@ -1498,6 +1503,50 @@ mod tests {
         state.mark_round_cleaned(first.id()).unwrap();
         assert!(state.round(first.id()).unwrap().status().has_saved_draft());
         assert!(state.validate().is_ok());
+
+        let mut later_state = state.clone();
+        let later_head = HeadSha::new(HEAD_B).unwrap();
+        later_state
+            .refresh(&key(), &later_head, &discussion)
+            .unwrap();
+        later_state
+            .authorize(
+                &key(),
+                &later_head,
+                revision(3),
+                AuthorizationScope::PrCycle,
+            )
+            .unwrap();
+        let later_prepared = prepare(
+            later_state.get(&key()).unwrap(),
+            PullObservation::new(&later_head, PullAvailability::Open),
+            CiObservation::new(&later_head, CiState::Green),
+            &choices,
+            &HashSet::new(),
+        )
+        .unwrap();
+        later_state
+            .validate_model(
+                &later_prepared,
+                &later_head,
+                revision(3),
+                choice,
+                &VerifiedArchive::for_test(choice.archive()),
+            )
+            .unwrap();
+        later_state.reject_round(&key(), first.id()).unwrap();
+        assert_eq!(
+            later_state.get(&key()).unwrap().authorization(),
+            Authorization::PrCycle
+        );
+        assert!(
+            later_state
+                .get(&key())
+                .unwrap()
+                .model_validation()
+                .is_some()
+        );
+
         state
             .authorize(&key(), &head, revision(2), AuthorizationScope::OneRound)
             .unwrap();
@@ -1543,12 +1592,12 @@ mod tests {
         assert_eq!(rejected.revision(), revision(2));
         assert_eq!(
             state.get(&key()).unwrap().authorization(),
-            Authorization::AwaitingLead
+            Authorization::OneRound
         );
         assert!(state.get(&key()).unwrap().model_validation().is_none());
         assert!(matches!(
             state.begin_round(third.clone(), choice),
-            Err(RoundStateError::State(StateError::AwaitingAuthorization(_)))
+            Err(RoundStateError::ModelNotValidated)
         ));
         let serialized = serde_json::to_vec(&state).unwrap();
         let reloaded: State = serde_json::from_slice(&serialized).unwrap();
@@ -1557,9 +1606,6 @@ mod tests {
             reloaded.round(first.id()).unwrap().status(),
             RoundStatus::Rejected
         );
-        state
-            .authorize(&key(), &head, revision(2), AuthorizationScope::OneRound)
-            .unwrap();
         state
             .validate_model(
                 &prepared,
