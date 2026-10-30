@@ -182,6 +182,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     let displayed = show_draft_offline(&state_file);
     assert!(displayed.contains("Finding\n\n_Agent review via Review Platform (round r-draft)._"));
     assert!(displayed.contains(&format!("--body-hash {body_hash}")));
+    assert!(displayed.contains("Publish command:"));
     assert!(displayed.contains("freshness: unknown"));
 
     let published_file = dir.path().join("published-state.json");
@@ -210,6 +211,23 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
         serde_json::to_vec(&published_state).unwrap(),
     )
     .unwrap();
+    let publishing = show_draft_offline(&uncertain_file);
+    assert!(!publishing.contains("Publish command:"));
+    assert!(publishing.contains("Recovery command:"));
+    let mut unknown_state = published_state.clone();
+    unknown_state
+        .finish_publication_attempt(
+            &round_id,
+            attempt,
+            review_platform::publication::AttemptOutcome::Unknown,
+            6,
+        )
+        .unwrap();
+    let unknown_file = dir.path().join("unknown-state.json");
+    std::fs::write(&unknown_file, serde_json::to_vec(&unknown_state).unwrap()).unwrap();
+    let unknown = show_draft_offline(&unknown_file);
+    assert!(!unknown.contains("Publish command:"));
+    assert!(unknown.contains("Recovery command:"));
     let recovered = run(
         &uncertain_file,
         &[
@@ -230,6 +248,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
         recovered.round(&round_id).unwrap().status(),
         review_platform::review::RoundStatus::AwaitingDecision
     );
+    assert!(show_draft_offline(&uncertain_file).contains("Publish command:"));
 
     published_state
         .record_publication(
@@ -251,6 +270,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
         serde_json::to_vec(&published_state).unwrap(),
     )
     .unwrap();
+    assert!(!show_draft_offline(&published_file).contains("Publish command:"));
     let repeated = run(
         &published_file,
         &[
@@ -359,6 +379,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     let status = run(&state_file, &["status", "owner/repo", "42"]);
     assert!(status.contains("latest round: r-draft (rejected)"));
     assert!(status.contains("authorized for the PR cycle"));
+    assert!(!show_draft_offline(&state_file).contains("Publish command:"));
     assert_eq!(std::fs::read(&draft_file).unwrap(), draft);
     let stored: State = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
     stored.validate().unwrap();

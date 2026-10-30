@@ -280,8 +280,8 @@ including when loaded from the JSON state file.
   and live freshness.
   The body contains the unchanged agent comments followed by a visible agent-review footer.
   The CLI verifies and hashes the original agent output while leaving that file unchanged.
-  It prints the complete `publish-draft` command when the body fits
-  GitHub's 65,536-character review limit.
+  It prints the complete `publish-draft` command only while the round awaits a decision
+  and the body fits GitHub's 65,536-character review limit.
   Oversized bodies stay sealed for inspection and rejection.
   Rejected drafts remain available for inspection.
   Add `--log` to display the sensitive review dialogue.
