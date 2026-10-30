@@ -95,7 +95,7 @@ pub fn run_review(
     let inspected_head = HeadSha::new(head)?;
     let inspected_revision = InputRevision::new(revision)?;
     let state_path = storage::resolve_path(state_override)?;
-    let _pr_lock = storage::pr_lock(&state_path, &key)?;
+    let pr_lock = storage::pr_lock(&state_path, &key)?;
     let (config_path, config) = load_config(config_override)?;
     let shell = OpenShell::new(config.execution());
     {
@@ -188,6 +188,9 @@ pub fn run_review(
         current.begin_round(record.clone(), choice)?;
         storage::save(&state_path, &current)?;
     }
+    // The saved Starting round blocks another round; the runner lock protects
+    // this sandbox until execution and cleanup finish.
+    drop(pr_lock);
     println!("Round {id}: preparing checkout and sandbox.");
     let mut failure = FailureKind::Preflight;
     let mut sandbox_created = false;
@@ -437,7 +440,7 @@ pub fn recover_review(
 ) -> Result<()> {
     let key = PrKey::new(repository, pr)?;
     let state_path = storage::resolve_path(state_override)?;
-    let _pr_lock = storage::pr_lock(&state_path, &key)?;
+    let _pr_lock = storage::try_pr_lock(&state_path, &key)?;
     let (_, config) = load_config(config_override)?;
     let record = {
         let _lock = storage::lock(&state_path)?;
@@ -713,6 +716,103 @@ mod tests {
             cleanup_complete_after_failed_stop_context(&key, &id),
             "draft r-draft saved; sandbox cleanup complete after stop failed. Run show-draft owner/repo 42 --round r-draft."
         );
+    }
+
+    #[test]
+    fn recovery_refuses_promptly_while_a_runner_is_active() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let config_path = dir.path().join("config.json");
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let id = RoundId::new("r-test").unwrap();
+        let config = serde_json::json!({
+            "schema_version": 5,
+            "execution": {
+                "openshell": dir.path().join("openshell"),
+                "gateway": "test-gateway",
+                "workspace": "default",
+                "driver": "vm",
+                "github_provider": "test-github-readonly"
+            },
+            "models": [],
+            "agents": [],
+            "repositories": []
+        });
+        fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let state = serde_json::json!({
+            "schema_version": 6,
+            "requests": [{
+                "key": {"repository": "owner/repo", "number": 42},
+                "head_sha": "a".repeat(40),
+                "authorization": "pr_cycle",
+                "revision": 2,
+                "discussion": {"author_id": 7, "comments": []},
+                "model_validation": null
+            }],
+            "rounds": [{
+                "id": "r-test",
+                "key": {"repository": "owner/repo", "number": 42},
+                "status": "running",
+                "sandbox": "rp-722d74657374",
+                "head_sha": "a".repeat(40),
+                "revision": 2,
+                "discussion": {"author_id": 7, "comments": []},
+                "model": "model-alpha",
+                "agent": "claude",
+                "gateway": "test-gateway",
+                "workspace": "default",
+                "driver": "vm",
+                "model_provider": "test-model-provider",
+                "github_provider": "test-github-readonly",
+                "prompt_sha256": "a".repeat(64),
+                "format_sha256": "b".repeat(64),
+                "archive_sha256": "c".repeat(64),
+                "archive_config_sha256": "d".repeat(64),
+                "execution_sha256": "e".repeat(64),
+                "runner_sha256": "f".repeat(64),
+                "created_at": 1,
+                "dispatched_at": 2,
+                "finished_at": null,
+                "freshness": null,
+                "failure": null,
+                "incomplete_log": false,
+                "cleanup_pending": false
+            }]
+        });
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        storage::load(&state_path).unwrap();
+
+        let _runner_lock = storage::try_lock(&round_path(&state_path, &id).join("runner")).unwrap();
+        let pr_lock = storage::pr_lock(&state_path, &key).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let worker_state = state_path.clone();
+        let worker_config = config_path.clone();
+        let worker = std::thread::spawn(move || {
+            let result = recover_review(
+                Some(worker_state),
+                Some(worker_config),
+                "owner/repo".to_owned(),
+                42,
+            )
+            .map_err(|error| error.to_string());
+            sender.send(result).unwrap();
+        });
+        let blocked = receiver.recv_timeout(Duration::from_secs(3));
+        drop(pr_lock);
+        worker.join().unwrap();
+        assert_eq!(
+            blocked
+                .expect("recovery waited for the PR lock")
+                .unwrap_err(),
+            "another operation on this PR is active"
+        );
+
+        let error = recover_review(Some(state_path), Some(config_path), "owner/repo".into(), 42)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "review runner is still active");
     }
 
     #[test]

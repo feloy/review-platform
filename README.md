@@ -313,6 +313,7 @@ including when loaded from the JSON state file.
 - `recover-review REPOSITORY PR` stops and deletes the latest interrupted
   or cleanup-pending sandbox without starting an agent.
   It refuses recovery while that round's runner is still active.
+  It also refuses promptly while another operation holds that PR's lock.
   It does not restore consumed one-round authorization.
 - `help` prints the command summary; `help COMMAND` prints help for one command.
   `--help` and `--version` are also available.
@@ -559,6 +560,8 @@ use that value with `github-pr --since` when inspecting later changes.
 Its state is local and protected by a short exclusive lock for mutations.
 Operations involving one PR also hold a per-PR lock across publication,
 recovery, rejection, refresh, and round startup.
+Round startup releases that lock after saving the `Starting` round;
+the runner lock stays held through agent execution and sandbox cleanup.
 The `authorize` command's `--head` and `--revision` checks compare local state only.
 `prepare-review` refreshes live GitHub inputs before checking those values.
 Concurrent CLI mutations reload the state under the lock before saving.

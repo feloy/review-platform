@@ -58,13 +58,29 @@ pub fn lock(path: &Path) -> Result<StateLock> {
 
 /// Serialize operations with external side effects for one PR across processes.
 pub fn pr_lock(state_path: &Path, key: &PrKey) -> Result<StateLock> {
+    lock(&pr_lock_path(state_path, key))
+}
+
+/// Refuse recovery promptly when another operation owns this PR.
+pub fn try_pr_lock(state_path: &Path, key: &PrKey) -> Result<StateLock> {
+    try_lock_with_message(
+        &pr_lock_path(state_path, key),
+        "another operation on this PR is active",
+    )
+}
+
+fn pr_lock_path(state_path: &Path, key: &PrKey) -> PathBuf {
     let digest = Sha256::digest(key.to_string().as_bytes());
     let name = format!("pr-{:x}", digest);
-    lock(&parent_dir(state_path).join("operations").join(name))
+    parent_dir(state_path).join("operations").join(name)
 }
 
 /// Nonblocking process lock used to keep recovery from stopping a live runner.
 pub fn try_lock(path: &Path) -> Result<StateLock> {
+    try_lock_with_message(path, "review runner is still active")
+}
+
+fn try_lock_with_message(path: &Path, busy_message: &'static str) -> Result<StateLock> {
     let parent = parent_dir(path);
     fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
     let mut lock_name = path.as_os_str().to_os_string();
@@ -78,7 +94,7 @@ pub fn try_lock(path: &Path) -> Result<StateLock> {
         options.share_mode(0);
         let file = options.open(&lock_path).map_err(|error| {
             if lock_is_busy(&error) {
-                anyhow::anyhow!("review runner is still active")
+                anyhow::anyhow!(busy_message)
             } else {
                 anyhow::Error::new(error).context(format!("locking {}", lock_path.display()))
             }
@@ -93,7 +109,7 @@ pub fn try_lock(path: &Path) -> Result<StateLock> {
         rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
             |error| {
                 if std::io::Error::from(error).kind() == std::io::ErrorKind::WouldBlock {
-                    anyhow::anyhow!("review runner is still active")
+                    anyhow::anyhow!(busy_message)
                 } else {
                     anyhow::Error::new(error).context(format!("locking {}", lock_path.display()))
                 }
