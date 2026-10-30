@@ -39,6 +39,22 @@ fn run_failing(state_file: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stderr).unwrap()
 }
 
+fn show_draft_offline(state_file: &Path) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+        .arg("--state-file")
+        .arg(state_file)
+        .args(["show-draft", "owner/repo", "42", "--round", "r-draft"])
+        .env("REVIEW_PLATFORM_GITHUB_TOKEN_RO", "bad\nheader")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "show-draft failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 fn observe_empty_discussion(state_file: &Path, head: &str) -> u64 {
     let mut state: State = serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
     let key = PrKey::new("owner/repo", 42).unwrap();
@@ -163,15 +179,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     let body_hash = SealedBody::new("Finding", "r-draft", PublicationHash::of(original))
         .hash()
         .to_string();
-    let displayed = Command::new(env!("CARGO_BIN_EXE_review-platform"))
-        .arg("--state-file")
-        .arg(&state_file)
-        .args(["show-draft", "owner/repo", "42", "--round", "r-draft"])
-        .env("REVIEW_PLATFORM_GITHUB_TOKEN_RO", "bad\nheader")
-        .output()
-        .unwrap();
-    assert!(displayed.status.success());
-    let displayed = String::from_utf8(displayed.stdout).unwrap();
+    let displayed = show_draft_offline(&state_file);
     assert!(displayed.contains("Finding\n\n_Agent review via Review Platform (round r-draft)._"));
     assert!(displayed.contains(&format!("--body-hash {body_hash}")));
     assert!(displayed.contains("freshness: unknown"));
@@ -385,6 +393,120 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     assert!(repeated.contains("already rejected"));
     assert_eq!(std::fs::read(&state_file).unwrap(), before_repeat);
     assert!(run(&state_file, &["status", "owner/repo", "42"]).contains("authorized for one round"));
+}
+
+#[test]
+fn oversized_draft_stays_sealed_and_rejectable_without_a_publish_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
+    assert_eq!(observe_empty_discussion(&state_file, HEAD_A), 2);
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    let discussion = state["requests"][0]["discussion"].clone();
+    state["rounds"] = serde_json::json!([{
+        "id":"r-draft",
+        "key":{"repository":"owner/repo","number":42},
+        "status":"draft_available",
+        "sandbox":"rp-722d6472616674",
+        "head_sha":HEAD_A,
+        "revision":2,
+        "discussion":discussion,
+        "model":"model-alpha",
+        "agent":"claude",
+        "gateway":"gateway",
+        "workspace":"default",
+        "driver":"vm",
+        "model_provider":"model-provider",
+        "github_provider":"github-provider",
+        "prompt_sha256":"a".repeat(64),
+        "format_sha256":"b".repeat(64),
+        "archive_sha256":"c".repeat(64),
+        "archive_config_sha256":"d".repeat(64),
+        "execution_sha256":"e".repeat(64),
+        "runner_sha256":"f".repeat(64),
+        "created_at":1,
+        "dispatched_at":2,
+        "finished_at":3,
+        "freshness":"fresh",
+        "failure":null,
+        "incomplete_log":false,
+        "cleanup_pending":false
+    }]);
+    std::fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+
+    let comments = "é".repeat(65_536);
+    let agent = serde_json::to_vec(&serde_json::json!({
+        "status":"REQUEST_CHANGES",
+        "comments":comments,
+        "lead_advice":""
+    }))
+    .unwrap();
+    let draft = serde_json::to_vec(&serde_json::json!({
+        "status":"REQUEST_CHANGES",
+        "comments":comments,
+        "lead_advice":"",
+        "review_log":""
+    }))
+    .unwrap();
+    let round_dir = dir.path().join("rounds/r-draft");
+    std::fs::create_dir_all(round_dir.join("output")).unwrap();
+    std::fs::write(round_dir.join("draft.json"), &draft).unwrap();
+    std::fs::write(round_dir.join("output/review-output.json"), &agent).unwrap();
+    let seal = SealedBody::new(&comments, "r-draft", PublicationHash::of(&agent));
+    let output = show_draft_offline(&state_file);
+    assert!(output.contains("Publication unavailable: GitHub review body has"));
+    assert!(!output.contains("Publish command:"));
+    assert!(output.contains(&format!("publication body SHA-256: {}", seal.hash())));
+
+    let mut stored: State = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    stored.validate().unwrap();
+    let round_id = RoundId::new("r-draft").unwrap();
+    assert!(stored.round(&round_id).unwrap().sealed_body().is_some());
+    assert!(matches!(
+        stored.reserve_publication(
+            &PrKey::new("owner/repo", 42).unwrap(),
+            &round_id,
+            seal.hash(),
+            "uid:1".into(),
+            "publisher".into(),
+            NonZeroU64::new(7).unwrap(),
+            vec![],
+            4
+        ),
+        Err(review_platform::review::RoundStateError::Publication(
+            review_platform::publication::PublicationStateError::BodyTooLong { .. }
+        ))
+    ));
+    let error = run_failing(
+        &state_file,
+        &[
+            "publish-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            seal.hash().as_str(),
+        ],
+    );
+    assert!(error.contains("GitHub review body has"));
+    assert!(!error.contains("config"));
+    let rejected = run(
+        &state_file,
+        &[
+            "reject-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            seal.hash().as_str(),
+        ],
+    );
+    assert!(rejected.contains("rejected locally"));
+    assert!(!show_draft_offline(&state_file).contains("Publish command:"));
+    assert_eq!(std::fs::read(round_dir.join("draft.json")).unwrap(), draft);
 }
 
 #[cfg(unix)]

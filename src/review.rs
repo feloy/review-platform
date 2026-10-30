@@ -400,6 +400,7 @@ impl RoundRecord {
             .sealed_body
             .as_ref()
             .ok_or(PublicationStateError::DraftChanged)?;
+        seal.ensure_github_limit()?;
         let next = self
             .attempts
             .last()
