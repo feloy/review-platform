@@ -332,6 +332,7 @@ Without overrides, the CLI uses the per-user locations for each platform:
 On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
+The state file and configuration file have separate schema versions.
 The current state schema is version 6.
 Version 5 state is upgraded in memory and saved as version 6 on the next mutation;
 older and future versions are rejected.
@@ -345,7 +346,8 @@ Keep the state file private to the lead operator.
 
 Create a private JSON configuration before using `prepare-review`,
 `gateway status`, or `run-review`.
-The file has schema version 5.
+The configuration file has schema version 5;
+the state file uses schema version 6.
 Earlier configuration schemas are rejected during development;
 update the private file before running review commands.
 `models` defines selectable models and their co-author signatures;
