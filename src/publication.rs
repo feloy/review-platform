@@ -14,6 +14,10 @@ pub enum PublicationStateError {
     BodyHashMismatch,
     #[error("the saved draft does not match its sealed publication body")]
     DraftChanged,
+    #[error(
+        "GitHub review body has {characters} characters; maximum is {limit}; reject this draft and run another round"
+    )]
+    BodyTooLong { characters: usize, limit: usize },
     #[error("publication attempt {0} does not exist or is no longer current")]
     AttemptNotCurrent(u64),
     #[error("publication attempt ID overflow")]
@@ -21,6 +25,8 @@ pub enum PublicationStateError {
     #[error("the supplied review was present before this publication attempt")]
     PreexistingReview,
 }
+
+pub const GITHUB_REVIEW_BODY_LIMIT: usize = 65_536;
 
 /// SHA-256 of exact UTF-8 bytes, parsed identically from CLI and persisted JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +103,18 @@ impl SealedBody {
 
     pub fn artifact_hash(&self) -> &PublicationHash {
         &self.artifact_hash
+    }
+
+    /// A large body remains sealed so the lead can inspect and reject the draft.
+    pub fn ensure_github_limit(&self) -> Result<(), PublicationStateError> {
+        let characters = self.body.chars().count();
+        if characters > GITHUB_REVIEW_BODY_LIMIT {
+            return Err(PublicationStateError::BodyTooLong {
+                characters,
+                limit: GITHUB_REVIEW_BODY_LIMIT,
+            });
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> bool {
@@ -380,5 +398,27 @@ mod tests {
         );
         assert_eq!(seal.hash(), &PublicationHash::of(seal.body().as_bytes()));
         assert!(seal.validate());
+    }
+
+    #[test]
+    fn github_limit_counts_characters_including_the_footer() {
+        let artifact_hash = PublicationHash::of(b"artifact");
+        let footer_characters = SealedBody::new("", "r-test", artifact_hash.clone())
+            .body()
+            .chars()
+            .count();
+        let comments = "é".repeat(GITHUB_REVIEW_BODY_LIMIT - footer_characters);
+        let maximum = SealedBody::new(&comments, "r-test", artifact_hash.clone());
+        assert!(maximum.ensure_github_limit().is_ok());
+
+        let oversized = SealedBody::new(&(comments + "é"), "r-test", artifact_hash);
+        assert!(oversized.validate());
+        assert_eq!(
+            oversized.ensure_github_limit(),
+            Err(PublicationStateError::BodyTooLong {
+                characters: GITHUB_REVIEW_BODY_LIMIT + 1,
+                limit: GITHUB_REVIEW_BODY_LIMIT,
+            })
+        );
     }
 }

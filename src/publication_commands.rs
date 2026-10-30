@@ -161,13 +161,17 @@ pub fn show_draft(
         "\nExact GitHub publication body:\n{}",
         escape_terminal_controls(seal.body())
     );
-    println!(
-        "\nPublish command:\nreview-platform publish-draft {} {} --round {} --body-hash {}",
-        key.repository(),
-        key.number(),
-        id,
-        seal.hash()
-    );
+    if let Err(error) = seal.ensure_github_limit() {
+        println!("\nPublication unavailable: {error}");
+    } else {
+        println!(
+            "\nPublish command:\nreview-platform publish-draft {} {} --round {} --body-hash {}",
+            key.repository(),
+            key.number(),
+            id,
+            seal.hash()
+        );
+    }
     if matches!(
         record.status(),
         RoundStatus::Publishing | RoundStatus::PublicationUnknown
@@ -344,6 +348,7 @@ pub fn publish_draft(
         !record.cleanup_pending(),
         "round {id} still needs sandbox cleanup"
     );
+    seal.ensure_github_limit()?;
 
     let config_path = storage::resolve_config_path(config_override)?;
     let config_bytes = std::fs::read(&config_path)

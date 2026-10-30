@@ -280,7 +280,9 @@ including when loaded from the JSON state file.
   and live freshness.
   The body contains the unchanged agent comments followed by a visible agent-review footer.
   The CLI verifies and hashes the original agent output while leaving that file unchanged.
-  It prints the complete `publish-draft` command for that body.
+  It prints the complete `publish-draft` command when the body fits
+  GitHub's 65,536-character review limit.
+  Oversized bodies stay sealed for inspection and rejection.
   Rejected drafts remain available for inspection.
   Add `--log` to display the sensitive review dialogue.
   A failed freshness check is shown as unknown.
@@ -289,6 +291,7 @@ including when loaded from the JSON state file.
   refreshes the live head and author discussion,
   then posts one `COMMENT` review bound to the reviewed commit.
   It refuses closed PRs, stale drafts, and unknown freshness.
+  It also refuses a body over GitHub's 65,536-character review limit before contacting GitHub.
   Repeating a successful command shows its saved receipt without another POST.
 - `reject-draft REPOSITORY PR --round ROUND_ID --body-hash SHA256` records the lead's decision
   to discard a saved draft, including when it is stale.
