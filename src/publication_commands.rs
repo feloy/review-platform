@@ -163,7 +163,7 @@ pub fn show_draft(
     );
     if let Err(error) = seal.ensure_github_limit() {
         println!("\nPublication unavailable: {error}");
-    } else {
+    } else if record.status() == RoundStatus::AwaitingDecision {
         println!(
             "\nPublish command:\nreview-platform publish-draft {} {} --round {} --body-hash {}",
             key.repository(),
