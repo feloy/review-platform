@@ -196,7 +196,7 @@ fn run(cli: Cli) -> Result<()> {
         command,
     } = cli;
     match command {
-        Command::Gui => gui::run()?,
+        Command::Gui => gui::run(state_file)?,
         Command::Request {
             repository,
             pr,

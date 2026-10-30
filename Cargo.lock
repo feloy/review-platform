@@ -702,6 +702,7 @@ dependencies = [
  "axum",
  "clap",
  "directories",
+ "futures-util",
  "include_dir",
  "libc",
  "rustix",

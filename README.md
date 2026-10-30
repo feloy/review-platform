@@ -42,20 +42,31 @@ inspect the new values and authorize again.
 
 ### Run the graphical shell
 
-The initial graphical interface is a Svelte and Material Web Hello page.
-It calls the local JSON endpoint at `/api/hello`;
-`/api` reports the API name and version.
+The graphical interface is a Svelte and Material Web page showing locally recorded PR requests.
+It shows each request's recorded head, input revision, authorization, and latest round.
+The list comes from the local state file; it does not query live GitHub data.
 Review workflow operations remain available through the CLI while the GUI grows.
 
 ```sh
 review-platform gui
 # Open http://localhost:8080/ in a browser.
-# Inspect the Hello API directly.
-curl http://localhost:8080/api/hello
+# Inspect the current local request list.
+curl http://localhost:8080/api/requests
+# Watch request updates from the server.
+curl -N http://localhost:8080/api/requests/events
 ```
 
 The command serves the compiled HTML, JavaScript, and CSS from the executable
 and listens only on IPv4 loopback at port 8080.
+`GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
+`GET /api/requests/events` is a server-sent event stream.
+It sends a `requests` event with the same JSON snapshot on connection
+and whenever displayed local state changes, within about one second of a CLI update.
+It sends `state_error` if the local state cannot be read,
+then resumes snapshots when the read succeeds.
+The browser reconnects automatically if the stream is interrupted;
+reloading the page also starts a new connection.
+`/api` reports the API name and version, and `/api/hello` remains available.
 The current API serves read-only endpoints.
 State-changing operations will need lead authentication and protection
 against requests from other sites before they are added.
@@ -189,7 +200,7 @@ except `.` and `..`.
 Repository names and head SHAs are normalized to lowercase,
 including when loaded from the JSON state file.
 
-- `gui` serves the embedded graphical interface and read-only Hello API
+- `gui` serves the embedded request list and read-only API
   over HTTP on `localhost:8080` until interrupted.
 - `request REPOSITORY PR HEAD_SHA` manually records a review request and its current PR head.
   A new request starts in `awaiting lead authorization`.
