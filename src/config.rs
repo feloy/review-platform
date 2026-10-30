@@ -1,6 +1,6 @@
 //! Validated model choices, compatible agent runners, and VM archives.
 
-use crate::{PrKey, StateError, sandbox_layout};
+use crate::{PrKey, StateError, model::valid_github_login, sandbox_layout};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1006,15 +1006,11 @@ impl ReviewConfig {
             execution: ExecutionConfig::try_from(raw.execution)?,
             publisher_login: raw.publisher_login.map(|login| login.to_ascii_lowercase()),
         };
-        if config.publisher_login.as_deref().is_some_and(|login| {
-            login.is_empty()
-                || login.len() > 39
-                || login.starts_with('-')
-                || login.ends_with('-')
-                || !login
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        }) {
+        if config
+            .publisher_login
+            .as_deref()
+            .is_some_and(|login| !valid_github_login(login))
+        {
             return Err(ConfigError::InvalidPublisherLogin);
         }
         for agent in &config.agents {

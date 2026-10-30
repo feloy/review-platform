@@ -1,5 +1,6 @@
 //! Write credential boundary for exact GitHub review publication and recovery.
 
+use crate::model::valid_github_login;
 use crate::publication::{PublicationAttempt, PublicationReceipt};
 use crate::{HeadSha, PrKey};
 use serde::Deserialize;
@@ -216,14 +217,7 @@ impl GithubPublisher {
         if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(PublisherError::InvalidToken);
         }
-        if expected_login.is_empty()
-            || expected_login.len() > 39
-            || expected_login.starts_with('-')
-            || expected_login.ends_with('-')
-            || !expected_login
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
+        if !valid_github_login(&expected_login) {
             return Err(PublisherError::InvalidExpectedLogin);
         }
         let config = ureq::Agent::config_builder()
