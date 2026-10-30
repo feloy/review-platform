@@ -1,0 +1,17 @@
+{
+  "name": "review-platform-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@material/web": "2.5.0",
+    "svelte": "5.57.3"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "vite": "8.3.5"
+  }
+}

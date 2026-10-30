@@ -1,5 +1,6 @@
 //! Operator CLI for PR authorization, review rounds, and draft decisions.
 
+mod gui;
 mod publication_commands;
 mod review_commands;
 mod storage;
@@ -38,6 +39,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve the local graphical interface and API over HTTP.
+    Gui,
     /// Manually record a PR review request at its current head SHA.
     Request {
         repository: String,
@@ -193,6 +196,7 @@ fn run(cli: Cli) -> Result<()> {
         command,
     } = cli;
     match command {
+        Command::Gui => gui::run()?,
         Command::Request {
             repository,
             pr,

@@ -1,0 +1,89 @@
+:root {
+  font-family: Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #1d1b20;
+  background: #f8f7fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  --md-sys-color-primary: #465b9a;
+  --md-sys-color-on-primary: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+.page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.welcome {
+  width: min(100%, 520px);
+  padding: 40px;
+  border: 1px solid #e1e2ec;
+  border-radius: 28px;
+  background: #ffffff;
+  box-shadow: 0 8px 30px rgb(30 35 65 / 6%);
+}
+
+.eyebrow,
+.label {
+  color: #505b76;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.eyebrow {
+  margin: 0 0 18px;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2.4rem, 7vw, 3.5rem);
+  font-weight: 500;
+  line-height: 1.1;
+}
+
+.intro {
+  margin: 18px 0 30px;
+  color: #4a4852;
+  line-height: 1.6;
+}
+
+.api-result {
+  margin-bottom: 28px;
+  padding: 16px 20px;
+  border-radius: 16px;
+  background: #eef0fa;
+}
+
+.label {
+  margin: 0 0 8px;
+}
+
+.message,
+.error {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.error {
+  color: #b3261e;
+}
+
+@media (max-width: 480px) {
+  .welcome {
+    padding: 28px;
+  }
+}
