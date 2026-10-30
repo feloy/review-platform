@@ -15,7 +15,7 @@ Another round still needs a valid lead model choice.
 
 ## Run the Rust prototype
 
-The runnable prototype is a local operator CLI for recording PR review requests,
+The runnable prototype is a local operator command for recording PR review requests,
 refreshing their GitHub inputs, recording lead authorization,
 running one review at a time through an existing OpenShell gateway,
 inspecting private drafts, and publishing or rejecting them.
@@ -39,6 +39,38 @@ Replace uppercase placeholders with values shown by the preceding commands.
 Inspect the current head and revision before authorizing or validating a model.
 If `prepare-review` refreshes inputs after one-round authorization,
 inspect the new values and authorize again.
+
+### Run the graphical shell
+
+The initial graphical interface is a Svelte and Material Web Hello page.
+It calls the local JSON endpoint at `/api/hello`;
+`/api` reports the API name and version.
+Review workflow operations remain available through the CLI while the GUI grows.
+
+```sh
+review-platform gui
+# Open http://localhost:8080/ in a browser.
+# Inspect the Hello API directly.
+curl http://localhost:8080/api/hello
+```
+
+The command serves the compiled HTML, JavaScript, and CSS from the executable
+and listens only on IPv4 loopback at port 8080.
+The current API serves read-only endpoints.
+State-changing operations will need lead authentication and protection
+against requests from other sites before they are added.
+
+Keep the compiled UI in `ui/dist` under version control
+so Rust installation does not need to run the frontend build.
+To change the UI, use Node 24 and rebuild the assets before compiling Rust:
+
+```sh
+cd ui
+npm ci
+npm run build
+cd ..
+cargo install --path . --locked --force
+```
 
 ### Start a review for a new PR
 
@@ -157,6 +189,8 @@ except `.` and `..`.
 Repository names and head SHAs are normalized to lowercase,
 including when loaded from the JSON state file.
 
+- `gui` serves the embedded graphical interface and read-only Hello API
+  over HTTP on `localhost:8080` until interrupted.
 - `request REPOSITORY PR HEAD_SHA` manually records a review request and its current PR head.
   A new request starts in `awaiting lead authorization`.
   Repeating the same head changes nothing.
