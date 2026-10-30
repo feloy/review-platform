@@ -238,6 +238,8 @@ fn refreshed_freshness(
     round: &RoundRecord,
 ) -> Result<Freshness> {
     let key = round.key();
+    // save() atomically replaces the state file, so an unlocked read sees a complete snapshot.
+    // Reload under the lock before applying the GitHub observation.
     let state = storage::load(state_path)?;
     let confirmed_ids = state.confirmed_review_ids(key);
     let observation = client.observe_pull_excluding(key, &confirmed_ids)?;
