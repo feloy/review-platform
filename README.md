@@ -560,10 +560,13 @@ until the lead publishes or rejects them locally.
 The CLI records the head of each round;
 use that value with `github-pr --since` when inspecting later changes.
 Its state is local and protected by a short exclusive lock for mutations.
-Operations involving one PR also hold a per-PR lock across publication,
-recovery, rejection, refresh, and round startup.
+Commands involving one PR also hold a per-PR lock across publication,
+recovery, rejection, the `refresh` command, and round startup.
 Round startup releases that lock after saving the `Starting` round;
 the runner lock stays held through agent execution and sandbox cleanup.
+The round's later pre-dispatch recheck of GitHub inputs uses the short state lock
+when it saves an observation.
+A concurrent `refresh` that changes inputs makes the round stop before dispatch.
 The `authorize` command's `--head` and `--revision` checks compare local state only.
 `prepare-review` refreshes live GitHub inputs before checking those values.
 Concurrent CLI mutations reload the state under the lock before saving.
