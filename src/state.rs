@@ -523,9 +523,7 @@ impl State {
         let round = self.current_publication_round(id, attempt_id)?;
         if !matches!(
             outcome,
-            AttemptOutcome::DefinitiveFailure
-                | AttemptOutcome::Unknown
-                | AttemptOutcome::ConfirmedNotPosted
+            AttemptOutcome::DefinitiveFailure | AttemptOutcome::Unknown
         ) {
             return Err(RoundStateError::WrongStatus(id.clone()));
         }
@@ -537,14 +535,6 @@ impl State {
             return Err(RoundStateError::WrongStatus(id.clone()));
         }
         if outcome == AttemptOutcome::DefinitiveFailure && round.status() != RoundStatus::Publishing
-        {
-            return Err(RoundStateError::WrongStatus(id.clone()));
-        }
-        if outcome == AttemptOutcome::ConfirmedNotPosted
-            && round.status() != RoundStatus::PublicationUnknown
-            && round
-                .current_attempt()
-                .is_none_or(|attempt| attempt.outcome() != AttemptOutcome::Dispatched)
         {
             return Err(RoundStateError::WrongStatus(id.clone()));
         }
@@ -2061,6 +2051,14 @@ mod tests {
         state
             .finish_publication_attempt(&id, attempt, AttemptOutcome::Unknown, 6)
             .unwrap();
+        assert!(matches!(
+            state.finish_publication_attempt(&id, attempt, AttemptOutcome::ConfirmedNotPosted, 7),
+            Err(RoundStateError::WrongStatus(_))
+        ));
+        assert_eq!(
+            state.round(&id).unwrap().status(),
+            RoundStatus::PublicationUnknown
+        );
         assert_eq!(
             state.refresh(&key(), &head(HEAD_A), &discussion(&[])),
             Err(StateError::PublicationUnresolved(key()))
