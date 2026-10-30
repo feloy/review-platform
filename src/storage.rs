@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use review_platform::State;
+use review_platform::{PrKey, State};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,13 @@ pub fn lock(path: &Path) -> Result<StateLock> {
             .with_context(|| format!("locking {}", lock_path.display()))?;
         Ok(StateLock { _file: file })
     }
+}
+
+/// Serialize operations with external side effects for one PR across processes.
+pub fn pr_lock(state_path: &Path, key: &PrKey) -> Result<StateLock> {
+    let digest = Sha256::digest(key.to_string().as_bytes());
+    let name = format!("pr-{:x}", digest);
+    lock(&parent_dir(state_path).join("operations").join(name))
 }
 
 /// Nonblocking process lock used to keep recovery from stopping a live runner.
@@ -146,10 +154,10 @@ pub fn load(path: &Path) -> Result<State> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(State::default()),
         Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
     };
-    let state: State = serde_json::from_slice(&bytes)
+    let mut state: State = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing state file {}", path.display()))?;
     state
-        .validate()
+        .migrate_v5()
         .with_context(|| format!("validating state file {}", path.display()))?;
     Ok(state)
 }
@@ -208,5 +216,24 @@ mod tests {
         assert_eq!(error.to_string(), "review runner is still active");
         drop(held);
         assert!(try_lock(&path).is_ok());
+    }
+
+    #[test]
+    fn pr_operation_locks_serialize_only_the_same_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let other = PrKey::new("owner/repo", 43).unwrap();
+        let held = pr_lock(&path, &key).unwrap();
+        let _other = pr_lock(&path, &other).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _next = pr_lock(&path, &key).unwrap();
+            sender.send(()).unwrap();
+        });
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(held);
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
     }
 }

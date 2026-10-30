@@ -56,6 +56,8 @@ pub enum StateError {
     UnsupportedSchema(u32),
     #[error("invalid stored round {0}")]
     InvalidRound(String),
+    #[error("publication outcome for {0} is unresolved; run recover-publication first")]
+    PublicationUnresolved(PrKey),
 }
 
 #[derive(Deserialize)]

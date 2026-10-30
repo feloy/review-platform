@@ -1,9 +1,9 @@
 //! Foreground review CLI orchestration and private draft presentation.
 
-use crate::{escape_terminal_controls, storage};
+use crate::storage;
 use anyhow::{Context, Result};
 use review_platform::{
-    Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome, RejectOutcome,
+    Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome,
     agent::{self, AgentRunError},
     archive, checkout,
     config::ReviewConfig,
@@ -95,6 +95,7 @@ pub fn run_review(
     let inspected_head = HeadSha::new(head)?;
     let inspected_revision = InputRevision::new(revision)?;
     let state_path = storage::resolve_path(state_override)?;
+    let _pr_lock = storage::pr_lock(&state_path, &key)?;
     let (config_path, config) = load_config(config_override)?;
     let shell = OpenShell::new(config.execution());
     {
@@ -119,7 +120,8 @@ pub fn run_review(
     // A missing or unsupported gateway cannot consume authorization.
     shell.preflight_gateway()?;
     let client = github::GithubClient::new()?;
-    let observation = client.observe_pull(&key)?;
+    let observation =
+        client.observe_pull_excluding(&key, &state_confirmed_ids(&state_path, &key)?)?;
     let mut state = {
         let _lock = storage::lock(&state_path)?;
         let mut state = storage::load(&state_path)?;
@@ -191,7 +193,11 @@ pub fn run_review(
     let mut sandbox_created = false;
     let mut agent_log = String::new();
     let mut incomplete_log = false;
-    let operation = (|| -> Result<(Freshness, Option<OpenShellError>)> {
+    let operation = (|| -> Result<(
+        Freshness,
+        Option<OpenShellError>,
+        review_platform::publication::SealedBody,
+    )> {
         let staged_image = archive::stage_archive(
             choice.archive(),
             &private_parent(&state_path).join("archives"),
@@ -245,7 +251,7 @@ pub fn run_review(
         }
         println!("Round {id}: rechecking PR inputs and authorization.");
         failure = FailureKind::Preflight;
-        let live = client.observe_pull(&key)?;
+        let live = client.observe_pull_excluding(&key, &state_confirmed_ids(&state_path, &key)?)?;
         let mut current = {
             let _lock = storage::lock(&state_path)?;
             let mut current = storage::load(&state_path)?;
@@ -346,9 +352,25 @@ pub fn run_review(
             &round_dir.join("draft.json"),
             agent_log.clone(),
         )?;
-        Ok((refresh_freshness(&client, &state_path, &record), stop_error))
+        let draft = review_platform::review::read_saved_draft(&round_dir.join("draft.json"))?;
+        let (agent, artifact_hash) = review_platform::review::read_agent_output_with_hash(
+            &output.join(sandbox_layout::OUTPUT_FILE_NAME),
+            String::new(),
+        )?;
+        anyhow::ensure!(
+            draft.status() == agent.status()
+                && draft.comments() == agent.comments()
+                && draft.lead_advice() == agent.lead_advice(),
+            "saved draft differs from the original agent artifact"
+        );
+        let seal = review_platform::publication::SealedBody::new(
+            draft.comments(),
+            id.as_str(),
+            artifact_hash,
+        );
+        Ok((refresh_freshness(&client, &state_path, &record), stop_error, seal))
     })();
-    let (freshness, stop_error) = match operation {
+    let (freshness, stop_error, seal) = match operation {
         Ok(result) => result,
         Err(error) => {
             let cleaned = if sandbox_created {
@@ -396,6 +418,7 @@ pub fn run_review(
         let _lock = storage::lock(&state_path)?;
         let mut current = storage::load(&state_path)?;
         current.complete_round(&id, now()?, freshness)?;
+        current.seal_round(&id, seal)?;
         storage::save(&state_path, &current)?;
     }
     finish_completed_cleanup(&shell, &record, &state_path, stop_error)?;
@@ -403,81 +426,6 @@ pub fn run_review(
         "Round {id}: private draft available ({freshness}). Run {}.",
         show_draft_command(&key, &id)
     );
-    Ok(())
-}
-
-pub fn show_draft(
-    state_override: Option<PathBuf>,
-    repository: String,
-    pr: u64,
-    round: String,
-    show_log: bool,
-) -> Result<()> {
-    let key = PrKey::new(repository, pr)?;
-    let id = RoundId::new(round)?;
-    let state_path = storage::resolve_path(state_override)?;
-    let state = storage::load(&state_path)?;
-    let record = state
-        .round(&id)
-        .with_context(|| format!("round {id} does not exist"))?;
-    anyhow::ensure!(record.key() == &key, "round {id} belongs to another PR");
-    anyhow::ensure!(
-        record.status().has_saved_draft(),
-        "round {id} has no available draft"
-    );
-    let path = round_path(&state_path, &id).join("draft.json");
-    let draft = review_platform::review::read_saved_draft(&path)?;
-    let freshness = github::GithubClient::new()
-        .and_then(|client| client.observe_pull(&key))
-        .map(|observation| freshness_for(record, &observation))
-        .unwrap_or(Freshness::Unknown);
-    println!("Draft {id} for {key}");
-    println!("  round state: {}", record.status());
-    println!("  status: {}", draft.status());
-    println!("  freshness: {freshness}");
-    println!(
-        "\nPR-facing comments:\n{}",
-        escape_terminal_controls(draft.comments())
-    );
-    println!(
-        "\nPrivate lead advice:\n{}",
-        escape_terminal_controls(draft.lead_advice())
-    );
-    if show_log {
-        println!(
-            "\nPrivate review log:\n{}",
-            escape_terminal_controls(draft.review_log())
-        );
-    }
-    Ok(())
-}
-
-pub fn reject_draft(
-    state_override: Option<PathBuf>,
-    repository: String,
-    pr: u64,
-    round: String,
-) -> Result<()> {
-    let key = PrKey::new(repository, pr)?;
-    let id = RoundId::new(round)?;
-    let state_path = storage::resolve_path(state_override)?;
-    let _lock = storage::lock(&state_path)?;
-    let mut state = storage::load(&state_path)?;
-    match state.reject_round(&key, &id)? {
-        RejectOutcome::Rejected => {
-            let authorization = state
-                .get(&key)
-                .context("review request disappeared after rejection")?
-                .authorization();
-            storage::save(&state_path, &state)?;
-            println!(
-                "Round {id} for {key} rejected locally; authorization: {authorization}; a validated model is required for another round."
-            );
-        }
-        RejectOutcome::AlreadyRejected => {
-            println!("Round {id} for {key} was already rejected; authorization is unchanged.");
-        }
-    }
     Ok(())
 }
 
@@ -489,6 +437,7 @@ pub fn recover_review(
 ) -> Result<()> {
     let key = PrKey::new(repository, pr)?;
     let state_path = storage::resolve_path(state_override)?;
+    let _pr_lock = storage::pr_lock(&state_path, &key)?;
     let (_, config) = load_config(config_override)?;
     let record = {
         let _lock = storage::lock(&state_path)?;
@@ -562,7 +511,10 @@ fn refresh_freshness(
         Some(revision) => revision,
         None => return Freshness::Unknown,
     };
-    let Ok(observation) = client.observe_pull(round.key()) else {
+    let Ok(observation) = client.observe_pull_excluding(
+        round.key(),
+        &state_confirmed_ids(state_path, round.key()).unwrap_or_default(),
+    ) else {
         return Freshness::Unknown;
     };
     let freshness = freshness_for(round, &observation);
@@ -592,6 +544,10 @@ fn refresh_freshness(
     } else {
         freshness
     }
+}
+
+fn state_confirmed_ids(state_path: &Path, key: &PrKey) -> Result<Vec<u64>> {
+    Ok(storage::load(state_path)?.confirmed_review_ids(key))
 }
 
 fn persist_changed_observation(

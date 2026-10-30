@@ -1,5 +1,7 @@
 //! CLI integration tests for persisted decisions and platform file paths.
 
+use review_platform::publication::{PublicationHash, PublicationReceipt, SealedBody};
+use review_platform::review::RoundId;
 use review_platform::{HeadSha, ObservedDiscussion, PrKey, State};
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -154,13 +156,198 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     let draft =
         br#"{"status":"REQUEST_CHANGES","comments":"Finding","lead_advice":"","review_log":""}"#;
     std::fs::write(&draft_file, draft).unwrap();
+    let agent_file = round_dir.join("output/review-output.json");
+    std::fs::create_dir_all(agent_file.parent().unwrap()).unwrap();
+    let original = br#"{"status":"REQUEST_CHANGES","comments":"Finding","lead_advice":""}"#;
+    std::fs::write(&agent_file, original).unwrap();
+    let body_hash = SealedBody::new("Finding", "r-draft", PublicationHash::of(original))
+        .hash()
+        .to_string();
+    let displayed = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+        .arg("--state-file")
+        .arg(&state_file)
+        .args(["show-draft", "owner/repo", "42", "--round", "r-draft"])
+        .env("REVIEW_PLATFORM_GITHUB_TOKEN_RO", "bad\nheader")
+        .output()
+        .unwrap();
+    assert!(displayed.status.success());
+    let displayed = String::from_utf8(displayed.stdout).unwrap();
+    assert!(displayed.contains("Finding\n\n_Agent review via Review Platform (round r-draft)._"));
+    assert!(displayed.contains(&format!("--body-hash {body_hash}")));
+    assert!(displayed.contains("freshness: unknown"));
+
+    let published_file = dir.path().join("published-state.json");
+    let mut published_state: State =
+        serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    let round_id = RoundId::new("r-draft").unwrap();
+    let hash = PublicationHash::new(&body_hash).unwrap();
+    let attempt = published_state
+        .reserve_publication(
+            &PrKey::new("owner/repo", 42).unwrap(),
+            &round_id,
+            &hash,
+            "uid:1".into(),
+            "publisher".into(),
+            NonZeroU64::new(7).unwrap(),
+            vec![],
+            4,
+        )
+        .unwrap();
+    published_state
+        .mark_publication_dispatched(&round_id, attempt, 5)
+        .unwrap();
+    let uncertain_file = dir.path().join("uncertain-state.json");
+    std::fs::write(
+        &uncertain_file,
+        serde_json::to_vec(&published_state).unwrap(),
+    )
+    .unwrap();
+    let recovered = run(
+        &uncertain_file,
+        &[
+            "recover-publication",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--confirm-not-posted",
+            "1",
+        ],
+    );
+    assert!(recovered.contains("confirmed attempt 1 was not posted"));
+    let recovered: State =
+        serde_json::from_slice(&std::fs::read(&uncertain_file).unwrap()).unwrap();
+    recovered.validate().unwrap();
+    assert_eq!(
+        recovered.round(&round_id).unwrap().status(),
+        review_platform::review::RoundStatus::AwaitingDecision
+    );
+
+    published_state
+        .record_publication(
+            &round_id,
+            attempt,
+            PublicationReceipt::new(
+                NonZeroU64::new(71).unwrap(),
+                "https://github.com/owner/repo/pull/42#pullrequestreview-71".into(),
+                "publisher".into(),
+                NonZeroU64::new(7).unwrap(),
+                HeadSha::new(HEAD_A).unwrap(),
+                "2026-10-30T10:00:00Z".into(),
+            ),
+            6,
+        )
+        .unwrap();
+    std::fs::write(
+        &published_file,
+        serde_json::to_vec(&published_state).unwrap(),
+    )
+    .unwrap();
+    let repeated = run(
+        &published_file,
+        &[
+            "publish-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            &body_hash,
+        ],
+    );
+    assert!(repeated.contains("GitHub review 71"));
+
+    let wrong_hash = "0".repeat(64);
+    let error = run_failing(
+        &state_file,
+        &[
+            "reject-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            &wrong_hash,
+        ],
+    );
+    assert!(error.contains("supplied body hash does not match"));
+
+    let config_file = dir.path().join("config.json");
+    let config = serde_json::json!({
+        "schema_version": 5,
+        "publisher_login": "publisher",
+        "execution": {
+            "openshell": std::env::current_exe().unwrap(),
+            "gateway": "gateway",
+            "workspace": "default",
+            "driver": "vm",
+            "github_provider": "github-readonly"
+        },
+        "models": [],
+        "agents": [],
+        "repositories": []
+    });
+    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    let missing_token = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+        .arg("--state-file")
+        .arg(&state_file)
+        .arg("--config-file")
+        .arg(&config_file)
+        .args([
+            "publish-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            &body_hash,
+        ])
+        .env_remove("REVIEW_PLATFORM_GITHUB_TOKEN_RW")
+        .output()
+        .unwrap();
+    assert!(!missing_token.status.success());
+    assert!(
+        String::from_utf8(missing_token.stderr)
+            .unwrap()
+            .contains("REVIEW_PLATFORM_GITHUB_TOKEN_RW")
+    );
+    assert_eq!(std::fs::read(&draft_file).unwrap(), draft);
+    assert_eq!(std::fs::read(&agent_file).unwrap(), original);
+
+    std::fs::write(
+        &agent_file,
+        br#"{"status":"REQUEST_CHANGES","comments":"Altered","lead_advice":""}"#,
+    )
+    .unwrap();
+    let changed_artifact = run_failing(
+        &state_file,
+        &[
+            "reject-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            &body_hash,
+        ],
+    );
+    assert!(changed_artifact.contains("saved draft differs from the original agent artifact"));
+    std::fs::write(&agent_file, original).unwrap();
 
     let output = run(
         &state_file,
-        &["reject-draft", "owner/repo", "42", "--round", "r-draft"],
+        &[
+            "reject-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            &body_hash,
+        ],
     );
     assert!(output.contains("rejected locally"));
-    assert!(output.contains("authorized for the PR cycle"));
+    assert!(output.contains("current authorization is preserved"));
     let status = run(&state_file, &["status", "owner/repo", "42"]);
     assert!(status.contains("latest round: r-draft (rejected)"));
     assert!(status.contains("authorized for the PR cycle"));
@@ -185,7 +372,15 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     let before_repeat = std::fs::read(&state_file).unwrap();
     let repeated = run(
         &state_file,
-        &["reject-draft", "owner/repo", "42", "--round", "r-draft"],
+        &[
+            "reject-draft",
+            "owner/repo",
+            "42",
+            "--round",
+            "r-draft",
+            "--body-hash",
+            &body_hash,
+        ],
     );
     assert!(repeated.contains("already rejected"));
     assert_eq!(std::fs::read(&state_file).unwrap(), before_repeat);
@@ -286,7 +481,7 @@ fn recovery_preserves_a_saved_draft_when_sandbox_stop_fails() {
     let stored: State = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
     stored.validate().unwrap();
     let round = stored.round(&RoundId::new("r-draft").unwrap()).unwrap();
-    assert_eq!(round.status(), RoundStatus::DraftAvailable);
+    assert_eq!(round.status(), RoundStatus::AwaitingDecision);
     assert!(!round.cleanup_pending());
     assert_eq!(
         read_saved_draft(&draft_file).unwrap().comments(),
@@ -487,7 +682,7 @@ fn new_state_uses_current_schema_and_older_schema_is_rejected() {
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 5);
+    assert_eq!(saved["schema_version"], 6);
     assert_eq!(saved["requests"][0]["revision"], 1);
     assert!(saved["requests"][0]["discussion"].is_null());
     assert!(saved["requests"][0]["model_validation"].is_null());

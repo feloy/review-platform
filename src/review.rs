@@ -1,10 +1,16 @@
-//! Persisted review rounds and the strict boundary for private agent output.
+//! Persisted review rounds, publication decisions, and private agent output checks.
 
 use crate::config::{AgentId, ArchiveHash, ModelId, PromptHash, ResolvedReviewModel};
+use crate::preparation::PullAvailability;
+use crate::publication::{
+    AttemptOutcome, PublicationAttempt, PublicationHash, PublicationReceipt, PublicationStateError,
+    RejectionDecision, SealedBody,
+};
 use crate::{HeadSha, InputRevision, ObservedDiscussion, PrKey};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -71,7 +77,11 @@ impl std::fmt::Display for RoundId {
 pub enum RoundStatus {
     Starting,
     Running,
-    DraftAvailable,
+    #[serde(alias = "draft_available")]
+    AwaitingDecision,
+    Publishing,
+    PublicationUnknown,
+    Published,
     Rejected,
     Failed,
     Interrupted,
@@ -80,14 +90,22 @@ pub enum RoundStatus {
 impl RoundStatus {
     pub fn blocks_new_round(self) -> bool {
         match self {
-            Self::Starting | Self::Running | Self::DraftAvailable => true,
-            Self::Rejected | Self::Failed | Self::Interrupted => false,
+            Self::Starting
+            | Self::Running
+            | Self::AwaitingDecision
+            | Self::Publishing
+            | Self::PublicationUnknown => true,
+            Self::Published | Self::Rejected | Self::Failed | Self::Interrupted => false,
         }
     }
 
     pub fn has_saved_draft(self) -> bool {
         match self {
-            Self::DraftAvailable | Self::Rejected => true,
+            Self::AwaitingDecision
+            | Self::Publishing
+            | Self::PublicationUnknown
+            | Self::Published
+            | Self::Rejected => true,
             Self::Starting | Self::Running | Self::Failed | Self::Interrupted => false,
         }
     }
@@ -98,7 +116,10 @@ impl std::fmt::Display for RoundStatus {
         f.write_str(match self {
             Self::Starting => "starting",
             Self::Running => "running",
-            Self::DraftAvailable => "draft available",
+            Self::AwaitingDecision => "awaiting decision",
+            Self::Publishing => "publishing",
+            Self::PublicationUnknown => "publication outcome unknown",
+            Self::Published => "published",
             Self::Rejected => "rejected",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
@@ -170,6 +191,14 @@ pub struct RoundRecord {
     failure: Option<FailureKind>,
     incomplete_log: bool,
     cleanup_pending: bool,
+    #[serde(default)]
+    sealed_body: Option<SealedBody>,
+    #[serde(default)]
+    attempts: Vec<PublicationAttempt>,
+    #[serde(default)]
+    receipt: Option<PublicationReceipt>,
+    #[serde(default)]
+    rejection: Option<RejectionDecision>,
 }
 
 impl RoundRecord {
@@ -212,6 +241,10 @@ impl RoundRecord {
             failure: None,
             incomplete_log: false,
             cleanup_pending: true,
+            sealed_body: None,
+            attempts: Vec::new(),
+            receipt: None,
+            rejection: None,
         }
     }
 
@@ -293,13 +326,46 @@ impl RoundRecord {
     pub fn created_at(&self) -> u64 {
         self.created_at
     }
+    pub fn publication_freshness(
+        &self,
+        observed_head: &HeadSha,
+        observed_discussion: &ObservedDiscussion,
+        live_head: &HeadSha,
+        availability: PullAvailability,
+    ) -> Freshness {
+        match availability {
+            PullAvailability::Open
+                if observed_head == &self.head_sha
+                    && observed_discussion == &self.discussion
+                    && live_head == &self.head_sha =>
+            {
+                Freshness::Fresh
+            }
+            PullAvailability::Open | PullAvailability::Closed => Freshness::Stale,
+        }
+    }
+    pub fn sealed_body(&self) -> Option<&SealedBody> {
+        self.sealed_body.as_ref()
+    }
+    pub fn attempts(&self) -> &[PublicationAttempt] {
+        &self.attempts
+    }
+    pub fn current_attempt(&self) -> Option<&PublicationAttempt> {
+        self.attempts.last()
+    }
+    pub fn receipt(&self) -> Option<&PublicationReceipt> {
+        self.receipt.as_ref()
+    }
+    pub fn rejection(&self) -> Option<&RejectionDecision> {
+        self.rejection.as_ref()
+    }
 
     pub(crate) fn mark_running(&mut self, at: u64) {
         self.status = RoundStatus::Running;
         self.dispatched_at = Some(at);
     }
     pub(crate) fn mark_draft(&mut self, at: u64, freshness: Freshness) {
-        self.status = RoundStatus::DraftAvailable;
+        self.status = RoundStatus::AwaitingDecision;
         self.finished_at = Some(at);
         self.freshness = Some(freshness);
         self.cleanup_pending = true;
@@ -307,8 +373,86 @@ impl RoundRecord {
     pub(crate) fn mark_cleaned(&mut self) {
         self.cleanup_pending = false;
     }
-    pub(crate) fn mark_rejected(&mut self) {
+    pub(crate) fn mark_rejected(&mut self, operator: String, at: u64) {
         self.status = RoundStatus::Rejected;
+        self.rejection = Some(RejectionDecision::new(operator, at));
+    }
+    pub(crate) fn seal(&mut self, seal: SealedBody) -> Result<bool, PublicationStateError> {
+        if let Some(existing) = &self.sealed_body {
+            if existing.body() != seal.body() || existing.artifact_hash() != seal.artifact_hash() {
+                return Err(PublicationStateError::DraftChanged);
+            }
+            return Ok(false);
+        }
+        self.sealed_body = Some(seal);
+        Ok(true)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reserve_publication(
+        &mut self,
+        operator: String,
+        expected_publisher_login: String,
+        publisher_id: NonZeroU64,
+        preexisting_review_ids: Vec<NonZeroU64>,
+        at: u64,
+    ) -> Result<u64, PublicationStateError> {
+        let seal = self
+            .sealed_body
+            .as_ref()
+            .ok_or(PublicationStateError::DraftChanged)?;
+        let next = self
+            .attempts
+            .last()
+            .map_or(Some(1), |attempt| attempt.id().checked_add(1))
+            .and_then(NonZeroU64::new)
+            .ok_or(PublicationStateError::AttemptOverflow)?;
+        self.attempts.push(PublicationAttempt::new(
+            next,
+            seal,
+            self.head_sha.clone(),
+            self.revision,
+            self.discussion.clone(),
+            operator,
+            expected_publisher_login,
+            publisher_id,
+            at,
+            preexisting_review_ids,
+        ));
+        self.status = RoundStatus::Publishing;
+        Ok(next.get())
+    }
+    pub(crate) fn mark_publication_dispatched(&mut self, at: u64) {
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.dispatch(at);
+        }
+    }
+    pub(crate) fn finish_publication_attempt(&mut self, outcome: AttemptOutcome, at: u64) {
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.finish(outcome, at);
+        }
+        self.status = match outcome {
+            AttemptOutcome::DefinitiveFailure | AttemptOutcome::ConfirmedNotPosted => {
+                RoundStatus::AwaitingDecision
+            }
+            AttemptOutcome::Unknown => RoundStatus::PublicationUnknown,
+            AttemptOutcome::Published => RoundStatus::Published,
+            AttemptOutcome::Reserved | AttemptOutcome::Dispatched => RoundStatus::Publishing,
+        };
+    }
+    pub(crate) fn confirm_not_posted(&mut self, operator: String, at: u64) {
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.confirm_not_posted(operator, at);
+        }
+        self.status = RoundStatus::AwaitingDecision;
+    }
+    pub(crate) fn set_receipt(&mut self, receipt: PublicationReceipt, at: u64) {
+        self.receipt = Some(receipt);
+        self.finish_publication_attempt(AttemptOutcome::Published, at);
+    }
+    pub(crate) fn confirm_recovery(&mut self, operator: String, at: u64) {
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.confirm_recovery(operator, at);
+        }
     }
     pub(crate) fn mark_failed(
         &mut self,
@@ -339,6 +483,57 @@ impl RoundRecord {
                 && (self.dispatched_at.is_none() || self.cleanup_pending || self.incomplete_log))
             || (matches!(self.status, RoundStatus::Failed | RoundStatus::Interrupted)
                 && (self.finished_at.is_none() || self.failure.is_none()))
+            || self.sealed_body.as_ref().is_some_and(|seal| {
+                !seal.validate()
+                    || !seal.body().ends_with(&format!(
+                        "_Agent review via Review Platform (round {})._",
+                        self.id
+                    ))
+            })
+            || (!self.attempts.is_empty() && self.sealed_body.is_none())
+            || self.attempts.iter().any(|attempt| {
+                self.sealed_body.as_ref().is_none_or(|seal| {
+                    !attempt.validate(seal, &self.head_sha, self.revision, &self.discussion)
+                })
+            })
+            || self
+                .rejection
+                .as_ref()
+                .is_some_and(|decision| !decision.validate())
+            || (self.status != RoundStatus::Rejected && self.rejection.is_some())
+            || (self.status == RoundStatus::Published && self.receipt.is_none())
+            || (self.status != RoundStatus::Published && self.receipt.is_some())
+            || (self.status == RoundStatus::Published
+                && self
+                    .current_attempt()
+                    .is_none_or(|attempt| attempt.outcome() != AttemptOutcome::Published))
+            || self.receipt.as_ref().is_some_and(|receipt| {
+                self.current_attempt()
+                    .is_none_or(|attempt| !receipt.validate(&self.key, &self.head_sha, attempt))
+            })
+            || (matches!(
+                self.status,
+                RoundStatus::AwaitingDecision | RoundStatus::Rejected
+            ) && self.current_attempt().is_some_and(|attempt| {
+                matches!(
+                    attempt.outcome(),
+                    AttemptOutcome::Reserved | AttemptOutcome::Dispatched | AttemptOutcome::Unknown
+                )
+            }))
+            || (self.status == RoundStatus::Publishing
+                && self.current_attempt().is_none_or(|attempt| {
+                    !matches!(
+                        attempt.outcome(),
+                        AttemptOutcome::Reserved | AttemptOutcome::Dispatched
+                    )
+                }))
+            || (self.status == RoundStatus::PublicationUnknown
+                && self.current_attempt().is_none_or(|attempt| {
+                    !matches!(
+                        attempt.outcome(),
+                        AttemptOutcome::Dispatched | AttemptOutcome::Unknown
+                    )
+                }))
         {
             return Err(RoundStateError::InvalidRecord(self.id.clone()));
         }
@@ -360,6 +555,8 @@ pub enum RoundStateError {
     DuplicateId(RoundId),
     #[error("round {0} blocks another review of this PR")]
     BlocksNewRound(RoundId),
+    #[error("round {0} already published a review of these inputs; wait for changed PR inputs")]
+    InputsAlreadyReviewed(RoundId),
     #[error("round {0} is in the wrong state for this transition")]
     WrongStatus(RoundId),
     #[error("round {round} does not belong to {request}")]
@@ -368,6 +565,8 @@ pub enum RoundStateError {
     CleanupPending(RoundId),
     #[error("model validation is missing or no longer matches the selected runner")]
     ModelNotValidated,
+    #[error(transparent)]
+    Publication(#[from] PublicationStateError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +648,14 @@ pub enum ArtifactError {
 }
 
 pub fn read_agent_output(path: &Path, review_log: String) -> Result<DraftOutput, ArtifactError> {
+    read_agent_output_with_hash(path, review_log).map(|(draft, _)| draft)
+}
+
+/// Validate the original agent file and hash the bytes read from that opened file.
+pub fn read_agent_output_with_hash(
+    path: &Path,
+    review_log: String,
+) -> Result<(DraftOutput, PublicationHash), ArtifactError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| ArtifactError::Read {
         path: path.to_owned(),
         source,
@@ -497,6 +704,7 @@ pub fn read_agent_output(path: &Path, review_log: String) -> Result<DraftOutput,
     if bytes.len() as u64 > AGENT_OUTPUT_LIMIT {
         return Err(ArtifactError::TooLarge);
     }
+    let hash = PublicationHash::of(&bytes);
     let text = String::from_utf8(bytes).map_err(ArtifactError::NotUtf8)?;
     if text == OUTPUT_MARKER {
         return Err(ArtifactError::OutputNotWritten);
@@ -505,12 +713,15 @@ pub fn read_agent_output(path: &Path, review_log: String) -> Result<DraftOutput,
     if agent.comments.trim().is_empty() {
         return Err(ArtifactError::EmptyComments);
     }
-    Ok(DraftOutput {
-        status: agent.status,
-        comments: agent.comments,
-        lead_advice: agent.lead_advice,
-        review_log,
-    })
+    Ok((
+        DraftOutput {
+            status: agent.status,
+            comments: agent.comments,
+            lead_advice: agent.lead_advice,
+            review_log,
+        },
+        hash,
+    ))
 }
 
 pub fn read_saved_draft(path: &Path) -> Result<DraftOutput, ArtifactError> {

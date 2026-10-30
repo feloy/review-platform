@@ -86,6 +86,10 @@ pub enum ConfigError {
     InvalidRunnerKind(String),
     #[error("driver {0:?} is invalid; expected vm or podman")]
     InvalidDriver(String),
+    #[error(
+        "publisher_login must be a valid GitHub login of 1-39 ASCII letters, digits, or hyphens"
+    )]
+    InvalidPublisherLogin,
 }
 
 /// Stable configured agent identifier, independent of GitHub commit text.
@@ -372,6 +376,7 @@ pub struct ReviewConfig {
     agents: Vec<Agent>,
     repositories: Vec<RepositoryConfig>,
     execution: ExecutionConfig,
+    publisher_login: Option<String>,
 }
 
 /// Trusted, non-secret OpenShell and Claude execution settings.
@@ -824,6 +829,8 @@ struct RawConfig {
     agents: Vec<RawAgent>,
     repositories: Vec<RawRepository>,
     execution: RawExecution,
+    #[serde(default)]
+    publisher_login: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -863,6 +870,10 @@ struct RawRunner {
 }
 
 impl ReviewConfig {
+    pub fn publisher_login(&self) -> Option<&str> {
+        self.publisher_login.as_deref()
+    }
+
     pub fn execution(&self) -> &ExecutionConfig {
         &self.execution
     }
@@ -993,7 +1004,19 @@ impl ReviewConfig {
             agents,
             repositories,
             execution: ExecutionConfig::try_from(raw.execution)?,
+            publisher_login: raw.publisher_login.map(|login| login.to_ascii_lowercase()),
         };
+        if config.publisher_login.as_deref().is_some_and(|login| {
+            login.is_empty()
+                || login.len() > 39
+                || login.starts_with('-')
+                || login.ends_with('-')
+                || !login
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }) {
+            return Err(ConfigError::InvalidPublisherLogin);
+        }
         for agent in &config.agents {
             if agent.runner.model_provider() == config.execution.github_provider() {
                 return Err(ConfigError::InvalidRunner(format!(

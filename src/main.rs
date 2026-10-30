@@ -1,5 +1,6 @@
-//! Operator CLI for local authorization, PR inspection, and round preparation.
+//! Operator CLI for PR authorization, review rounds, and draft decisions.
 
+mod publication_commands;
 mod review_commands;
 mod storage;
 
@@ -12,6 +13,7 @@ use review_platform::{
     github, round,
 };
 use std::fs;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -19,7 +21,7 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Local operator prototype for Review Platform",
-    long_about = "Record PR requests and lead decisions, prepare and run reviews through an existing OpenShell gateway, and inspect private drafts."
+    long_about = "Record PR requests and lead decisions, prepare and run reviews through an existing OpenShell gateway, and inspect, publish, reject, or recover private drafts."
 )]
 struct Cli {
     /// Override the per-user state file; keep this private to the lead operator.
@@ -104,6 +106,31 @@ enum Command {
         pr: u64,
         #[arg(long, value_name = "ROUND_ID")]
         round: String,
+        /// SHA-256 of the exact body displayed by show-draft.
+        #[arg(long, value_name = "SHA256")]
+        body_hash: String,
+    },
+    /// Publish the sealed draft as a COMMENT review on its reviewed commit.
+    PublishDraft {
+        repository: String,
+        pr: u64,
+        #[arg(long, value_name = "ROUND_ID")]
+        round: String,
+        #[arg(long, value_name = "SHA256")]
+        body_hash: String,
+    },
+    /// Resolve a reserved or uncertain publication attempt.
+    RecoverPublication {
+        repository: String,
+        pr: u64,
+        #[arg(long, value_name = "ROUND_ID")]
+        round: String,
+        /// Select one matching new GitHub review when recovery finds several.
+        #[arg(long, conflicts_with = "confirm_not_posted")]
+        review_id: Option<NonZeroU64>,
+        /// Record the lead's manual assertion that this attempt did not post.
+        #[arg(long, value_name = "ATTEMPT_ID")]
+        confirm_not_posted: Option<NonZeroU64>,
     },
     /// Clean up an interrupted review without running the agent again.
     RecoverReview { repository: String, pr: u64 },
@@ -174,6 +201,7 @@ fn run(cli: Cli) -> Result<()> {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
             let head_sha = HeadSha::new(head_sha)?;
+            let _pr_lock = storage::pr_lock(&state_file, &key)?;
             let _lock = storage::lock(&state_file)?;
             let mut state = storage::load(&state_file)?;
             let outcome = state.record_request(key.clone(), head_sha)?;
@@ -194,13 +222,15 @@ fn run(cli: Cli) -> Result<()> {
         Command::Refresh { repository, pr } => {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
+            let _pr_lock = storage::pr_lock(&state_file, &key)?;
             let state = storage::load(&state_file)?;
             let prior_revision = state
                 .get(&key)
                 .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
                 .revision();
             let client = github::GithubClient::new()?;
-            let observation = client.observe_pull(&key)?;
+            let observation =
+                client.observe_pull_excluding(&key, &state.confirmed_review_ids(&key))?;
             let _lock = storage::lock(&state_file)?;
             let mut state = storage::load(&state_file)?;
             let current_revision = state
@@ -304,6 +334,18 @@ fn run(cli: Cli) -> Result<()> {
                 if round.cleanup_pending() {
                     println!("  cleanup pending: run recover-review");
                 }
+                if matches!(
+                    round.status(),
+                    review_platform::review::RoundStatus::Publishing
+                        | review_platform::review::RoundStatus::PublicationUnknown
+                ) {
+                    println!(
+                        "  publication recovery: review-platform recover-publication {} {} --round {}",
+                        key.repository(),
+                        key.number(),
+                        round.id()
+                    );
+                }
             }
         }
         Command::PrepareReview {
@@ -340,14 +382,46 @@ fn run(cli: Cli) -> Result<()> {
             round,
             log,
         } => {
-            review_commands::show_draft(state_file, repository, pr, round, log)?;
+            publication_commands::show_draft(state_file, repository, pr, round, log)?;
         }
         Command::RejectDraft {
             repository,
             pr,
             round,
+            body_hash,
         } => {
-            review_commands::reject_draft(state_file, repository, pr, round)?;
+            publication_commands::reject_draft(state_file, repository, pr, round, body_hash)?;
+        }
+        Command::PublishDraft {
+            repository,
+            pr,
+            round,
+            body_hash,
+        } => {
+            publication_commands::publish_draft(
+                state_file,
+                config_file,
+                repository,
+                pr,
+                round,
+                body_hash,
+            )?;
+        }
+        Command::RecoverPublication {
+            repository,
+            pr,
+            round,
+            review_id,
+            confirm_not_posted,
+        } => {
+            publication_commands::recover_publication(
+                state_file,
+                repository,
+                pr,
+                round,
+                review_id,
+                confirm_not_posted,
+            )?;
         }
         Command::RecoverReview { repository, pr } => {
             review_commands::recover_review(state_file, config_file, repository, pr)?;
@@ -479,6 +553,7 @@ fn run_prepare(
     };
     let key = PrKey::new(repository, pr)?;
     let state_file = storage::resolve_path(state_override)?;
+    let _pr_lock = storage::pr_lock(&state_file, &key)?;
     let config_file = storage::resolve_config_path(config_override)?;
     let config_bytes = fs::read(&config_file)
         .with_context(|| format!("reading review configuration {}", config_file.display()))?;
@@ -490,7 +565,7 @@ fn run_prepare(
         .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
         .revision();
     let client = github::GithubClient::new()?;
-    let observation = client.observe_pull(&key)?;
+    let observation = client.observe_pull_excluding(&key, &initial.confirmed_review_ids(&key))?;
     let _lock = storage::lock(&state_file)?;
     let mut state = storage::load(&state_file)?;
     let current_revision = state

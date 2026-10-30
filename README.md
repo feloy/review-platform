@@ -18,7 +18,7 @@ Another round still needs a valid lead model choice.
 The runnable prototype is a local operator CLI for recording PR review requests,
 refreshing their GitHub inputs, recording lead authorization,
 running one review at a time through an existing OpenShell gateway,
-and inspecting private drafts.
+inspecting private drafts, and publishing or rejecting them.
 It requires stable Rust 1.85 or newer.
 From the repository root, compile and install the CLI:
 
@@ -75,8 +75,8 @@ Use its latest head and revision when validating the model and starting the roun
 ### Review a changed PR with one-round authorization
 
 Inspect the earlier draft and record the lead's decision first.
-The current CLI can reject a draft locally but cannot publish it.
 The following example assumes the lead rejects it.
+Copy `PREVIOUS_BODY_SHA256` from `show-draft`.
 `refresh` records the new head or author discussion and the new revision.
 One-round authorization was consumed when the earlier round was dispatched,
 so authorize the new inputs before validating a model and running again.
@@ -85,7 +85,7 @@ so authorize the new inputs before validating a model and running again.
 # Inspect the previous private draft.
 review-platform show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
 # Record the lead's rejection of that draft.
-review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID --body-hash PREVIOUS_BODY_SHA256
 # Inspect changes since the previous head and check CI.
 review-platform github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
 # Record the new head or author discussion.
@@ -121,12 +121,13 @@ After a later commit or author reply, inspect and decide on the earlier draft.
 The `pr-cycle` authorization remains active after rejection and input changes,
 so the next sequence does not need another `authorize` command.
 The new inputs still need green checks and a validated model.
+Copy `PREVIOUS_BODY_SHA256` from `show-draft`.
 
 ```sh
 # Inspect the previous private draft.
 review-platform show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
 # Record the lead's rejection of that draft.
-review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID --body-hash PREVIOUS_BODY_SHA256
 # Inspect changes since the previous head and check CI.
 review-platform github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
 # Record the new head or author discussion.
@@ -274,12 +275,22 @@ including when loaded from the JSON state file.
   Progress output names phases and never prints the review dialogue or draft.
   A completed output is validated and saved even if sandbox stop fails;
   `recover-review` can finish cleanup without losing the draft.
-- `show-draft REPOSITORY PR --round ROUND_ID` displays the saved PR-facing comments,
-  separate private lead advice, and live freshness.
+- `show-draft REPOSITORY PR --round ROUND_ID` seals and displays the complete GitHub review body,
+  its SHA-256, reviewed head, input revision, decision, separate private lead advice,
+  and live freshness.
+  The body contains the unchanged agent comments followed by a visible agent-review footer.
+  The CLI verifies and hashes the original agent output while leaving that file unchanged.
+  It prints the complete `publish-draft` command for that body.
   Rejected drafts remain available for inspection.
   Add `--log` to display the sensitive review dialogue.
   A failed freshness check is shown as unknown.
-- `reject-draft REPOSITORY PR --round ROUND_ID` records the lead's decision
+- `publish-draft REPOSITORY PR --round ROUND_ID --body-hash SHA256`
+  verifies the selected sealed body and the configured write-token identity,
+  refreshes the live head and author discussion,
+  then posts one `COMMENT` review bound to the reviewed commit.
+  It refuses closed PRs, stale drafts, and unknown freshness.
+  Repeating a successful command shows its saved receipt without another POST.
+- `reject-draft REPOSITORY PR --round ROUND_ID --body-hash SHA256` records the lead's decision
   to discard a saved draft, including when it is stale.
   It requires completed sandbox cleanup,
   preserves the private draft,
@@ -288,6 +299,17 @@ including when loaded from the JSON state file.
   when it still matches the rejected round.
   Another round requires active authorization and a validated model.
   Repeating it leaves any newer authorization unchanged.
+- `recover-publication REPOSITORY PR --round ROUND_ID`
+  checks GitHub for a new review matching the recorded publisher ID,
+  reviewed commit, exact sealed body, and `COMMENTED` state.
+  A reserved attempt with no recorded dispatch returns to awaiting decision locally.
+  One new match records a receipt; multiple require `--review-id ID` to select one.
+  No match leaves the outcome unknown.
+  After checking GitHub manually, the lead can use
+  `--confirm-not-posted ATTEMPT_ID` to record that nothing was posted
+  and return the draft to awaiting decision.
+  Refresh and new round startup are blocked until an uncertain publication is resolved,
+  so an unconfirmed review cannot be mistaken for a new author comment.
 - `recover-review REPOSITORY PR` stops and deletes the latest interrupted
   or cleanup-pending sandbox without starting an agent.
   It refuses recovery while that round's runner is still active.
@@ -309,8 +331,10 @@ Without overrides, the CLI uses the per-user locations for each platform:
 On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
-The current state schema is version 5.
-Other state schema versions are rejected; there is no schema migration during development.
+The current state schema is version 6.
+Version 5 state is upgraded in memory and saved as version 6 on the next mutation;
+older and future versions are rejected.
+Existing private draft artifacts are left unchanged.
 For project-local files, pass both `--state-file .review-platform/state.json`
 and `--config-file .review-platform/config.json`.
 Git ignores the `.review-platform/` directory.
@@ -332,6 +356,7 @@ For example:
 ```json
 {
   "schema_version": 5,
+  "publisher_login": "expected-publisher-account",
   "execution": {
     "openshell": "/absolute/path/to/openshell",
     "gateway": "operator-gateway",
@@ -469,7 +494,7 @@ This is a known limitation tracked in [issue #13](https://github.com/feloy/revie
 The agent artifact must be regular UTF-8 JSON of at most 1 MiB
 with exactly `status`, `comments`, and `lead_advice`.
 The runner adds `review_log` from the captured Claude dialogue.
-Only `comments` is suitable for a future GitHub review body;
+Only `comments` becomes the GitHub review body, followed by the visible footer;
 `lead_advice` and `review_log` remain private.
 The rendered log limit defaults to 8 MiB;
 exceeding it fails the round instead of truncating it.
@@ -487,12 +512,11 @@ Recovery refuses to stop a sandbox while its review runner is active.
 Recovery stops and deletes the recorded sandbox without replaying Claude.
 One-round authorization is never restored after an uncertain dispatch.
 A failed PR-cycle round may be retried explicitly after all live gates pass again.
-Saved drafts cannot yet be published through this CLI.
-Use `reject-draft` to close a draft before running another round.
+Use the body hash displayed by `show-draft` to publish or reject a saved draft
+before running another round.
 A retry with the rejected round's exact model choice needs fresh validation.
 If one-round authorization was consumed at dispatch, authorize again.
-This interim command identifies the draft by round ID;
-a later publication workflow will add body-hash confirmation and decision receipts.
+Publication and rejection use local state and GitHub without contacting OpenShell.
 
 An opt-in synthetic VM integration test exercises the gateway, provider attachment,
 image environment, read-only mounts, private output retrieval,
@@ -515,17 +539,26 @@ For private repositories or a higher GitHub API rate limit,
 set `REVIEW_PLATFORM_GITHUB_TOKEN_RO` to a token with pull request, contents,
 checks, and commit statuses read access.
 The CLI uses this token only for GitHub reads.
+To publish, set `REVIEW_PLATFORM_GITHUB_TOKEN_RW` to a separate token
+with pull-request write permission and set `publisher_login` in the private configuration
+to the GitHub account expected to own that token.
+The CLI verifies the account through `GET /user` before publication.
+Write credentials remain in the operator process and never enter review sandboxes,
+prompts, state files, or routine logs.
+Rejection needs neither token nor GitHub access.
 HTTPS uses the platform's trusted certificates, including organization roots installed for a TLS-intercepting proxy.
 On Linux, `SSL_CERT_FILE` or `SSL_CERT_DIR` can select a PEM certificate bundle or directory instead of the system CA bundle.
 
-This prototype does not discover author review requests, publish drafts,
+This prototype does not discover author review requests,
 schedule background rounds, or manage the gateway and its providers.
 Review requests and lead decisions are still entered manually.
 Saved drafts block further rounds for the same PR, including when they are stale,
-until the lead rejects them locally.
+until the lead publishes or rejects them locally.
 The CLI records the head of each round;
 use that value with `github-pr --since` when inspecting later changes.
 Its state is local and protected by a short exclusive lock for mutations.
+Operations involving one PR also hold a per-PR lock across publication,
+recovery, rejection, refresh, and round startup.
 The `authorize` command's `--head` and `--revision` checks compare local state only.
 `prepare-review` refreshes live GitHub inputs before checking those values.
 Concurrent CLI mutations reload the state under the lock before saving.
@@ -536,12 +569,20 @@ A failed `refresh` leaves local state unchanged.
 a later GitHub error can leave the updated inputs in the state file.
 The result is an observation, not a guarantee that GitHub stays unchanged afterward.
 Changes made and reverted between observations may be missed.
-The current CLI cannot identify agent reviews posted under the PR author's GitHub account.
-Until publication records trusted review IDs, `refresh` counts their submitted bodies as author discussion.
+When a confirmed publication uses the PR author's GitHub account,
+`refresh` excludes only that recorded review ID from author-comment triggers.
+The visible footer alone never identifies a Review Platform publication.
 Closed and draft PRs can be refreshed; refreshing grants no permission to run a review.
 Round startup fetches fresh inputs and checks before creating a sandbox
 and again immediately before dispatch.
-Publication will need to recheck them in the next milestone.
+Publication rechecks the live head, open state, and author discussion before posting.
+GitHub can change after that check.
+The posted review remains tied to the original commit;
+the CLI rechecks afterward and reports any change without deleting or reposting it.
+Network failures after dispatch can leave publication outcome unknown.
+Recovery never automatically retries the POST.
+Manual confirmation that nothing was posted allows another decision,
+but a delayed first request can still create a duplicate review.
 Use `github-pr --diff` or `github-pr --since HEAD_SHA` to inspect the code and live head
 before recording or authorizing a request.
 GitHub may still change after that inspection.
