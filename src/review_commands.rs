@@ -550,6 +550,8 @@ fn refresh_freshness(
 }
 
 fn state_confirmed_ids(state_path: &Path, key: &PrKey) -> Result<Vec<u64>> {
+    // save() atomically replaces the state file, so this unlocked read sees a complete snapshot.
+    // Callers recheck freshness or state under the lock before using the observation.
     Ok(storage::load(state_path)?.confirmed_review_ids(key))
 }
 
