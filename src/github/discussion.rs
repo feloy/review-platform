@@ -84,6 +84,7 @@ trait DiscussionItem: DeserializeOwned {
         &self,
         source: CommentSource,
         author_id: NonZeroU64,
+        confirmed_publications: &HashSet<u64>,
     ) -> Option<CommentFingerprint>;
 }
 
@@ -96,6 +97,7 @@ impl DiscussionItem for ApiComment {
         &self,
         source: CommentSource,
         author_id: NonZeroU64,
+        _confirmed_publications: &HashSet<u64>,
     ) -> Option<CommentFingerprint> {
         (self.user.as_ref().is_some_and(|user| user.id == author_id))
             .then(|| fingerprint(source, self.id, &self.body))
@@ -111,9 +113,11 @@ impl DiscussionItem for ApiReview {
         &self,
         source: CommentSource,
         author_id: NonZeroU64,
+        confirmed_publications: &HashSet<u64>,
     ) -> Option<CommentFingerprint> {
         if !self.user.as_ref().is_some_and(|user| user.id == author_id)
             || self.state == ReviewState::Pending
+            || confirmed_publications.contains(&self.id.get())
         {
             return None;
         }
@@ -132,9 +136,19 @@ fn fingerprint(source: CommentSource, id: NonZeroU64, body: &str) -> CommentFing
 impl GithubClient {
     /// Read every discussion collection twice, then recheck head and author identity.
     pub fn observe_pull(&self, key: &PrKey) -> GithubResult<PullObservation> {
+        self.observe_pull_excluding(key, &[])
+    }
+
+    /// Exclude only review IDs previously recorded from confirmed publication.
+    pub fn observe_pull_excluding(
+        &self,
+        key: &PrKey,
+        confirmed_review_ids: &[u64],
+    ) -> GithubResult<PullObservation> {
+        let confirmed_publications: HashSet<u64> = confirmed_review_ids.iter().copied().collect();
         let pull = self.pull_request(key)?;
-        let first = self.discussion_pass(key, pull.author_id)?;
-        let second = self.discussion_pass(key, pull.author_id)?;
+        let first = self.discussion_pass(key, pull.author_id, &confirmed_publications)?;
+        let second = self.discussion_pass(key, pull.author_id, &confirmed_publications)?;
         if first != second {
             return Err(GithubError::ObservationChanged);
         }
@@ -160,6 +174,7 @@ impl GithubClient {
         &self,
         key: &PrKey,
         author_id: NonZeroU64,
+        confirmed_publications: &HashSet<u64>,
     ) -> GithubResult<ObservedDiscussion> {
         let issue_route = format!(
             "/repos/{}/issues/{}/comments",
@@ -178,6 +193,7 @@ impl GithubClient {
             "issue comments",
             CommentSource::IssueComment,
             author_id,
+            confirmed_publications,
         )?;
         comments.extend(self.collect::<ApiComment>(
             key,
@@ -185,6 +201,7 @@ impl GithubClient {
             "review comments",
             CommentSource::ReviewComment,
             author_id,
+            confirmed_publications,
         )?);
         comments.extend(self.collect::<ApiReview>(
             key,
@@ -192,6 +209,7 @@ impl GithubClient {
             "reviews",
             CommentSource::Review,
             author_id,
+            confirmed_publications,
         )?);
         ObservedDiscussion::new(author_id, comments).map_err(|error| GithubError::InvalidResponse {
             resource: format!("author discussion for {key}"),
@@ -206,6 +224,7 @@ impl GithubClient {
         kind: &'static str,
         source: CommentSource,
         author_id: NonZeroU64,
+        confirmed_publications: &HashSet<u64>,
     ) -> GithubResult<Vec<CommentFingerprint>> {
         let mut seen = HashSet::new();
         let mut fingerprints = Vec::new();
@@ -241,7 +260,9 @@ impl GithubClient {
                         detail: format!("ID {} appeared twice", item.id()),
                     });
                 }
-                if let Some(fingerprint) = item.fingerprint(source, author_id) {
+                if let Some(fingerprint) =
+                    item.fingerprint(source, author_id, confirmed_publications)
+                {
                     fingerprints.push(fingerprint);
                 }
             }

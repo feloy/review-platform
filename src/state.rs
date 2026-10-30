@@ -1,4 +1,4 @@
-//! Review requests, authorization, and model-validation transitions.
+//! Review requests, authorization, model validation, and round decision transitions.
 
 use crate::archive::VerifiedArchive;
 use crate::config::{AgentId, ModelId, PromptHash, ResolvedReviewModel, VmArchive};
@@ -7,6 +7,7 @@ use crate::model::{
     StateError,
 };
 use crate::preparation::{Preparation, Readiness};
+use crate::publication::{AttemptOutcome, PublicationHash, PublicationReceipt, SealedBody};
 use crate::review::{
     FailureKind, Freshness, REVIEW_RULES, RoundId, RoundRecord, RoundStateError, RoundStatus,
 };
@@ -14,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Error)]
 pub enum ModelValidationError {
@@ -205,6 +206,17 @@ impl Default for State {
 }
 
 impl State {
+    /// Upgrade the immediately preceding state format; draft artifacts are untouched.
+    pub fn migrate_v5(&mut self) -> Result<bool, StateError> {
+        if self.schema_version == 5 {
+            self.schema_version = SCHEMA_VERSION;
+            self.validate()?;
+            return Ok(true);
+        }
+        self.validate()?;
+        Ok(false)
+    }
+
     pub fn validate(&self) -> Result<(), StateError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(StateError::UnsupportedSchema(self.schema_version));
@@ -240,6 +252,7 @@ impl State {
         }
         let mut round_ids = HashSet::new();
         let mut blocking_keys = HashSet::new();
+        let mut published_review_ids = HashSet::new();
         for round in &self.rounds {
             round
                 .validate()
@@ -252,6 +265,11 @@ impl State {
             }
             if round.blocks_new_round() && !blocking_keys.insert(round.key()) {
                 return Err(StateError::InvalidRound(round.id().to_string()));
+            }
+            if let Some(receipt) = round.receipt() {
+                if !published_review_ids.insert(receipt.review_id()) {
+                    return Err(StateError::InvalidRound(round.id().to_string()));
+                }
             }
         }
         Ok(())
@@ -287,6 +305,15 @@ impl State {
             .find(|existing| existing.key() == round.key() && existing.blocks_new_round())
         {
             return Err(RoundStateError::BlocksNewRound(blocking.id().clone()));
+        }
+        if let Some(published) = self.rounds.iter().find(|existing| {
+            existing.key() == round.key()
+                && existing.status() == RoundStatus::Published
+                && existing.revision() == round.revision()
+        }) {
+            return Err(RoundStateError::InputsAlreadyReviewed(
+                published.id().clone(),
+            ));
         }
         let request = self
             .get(round.key())
@@ -376,6 +403,9 @@ impl State {
         &mut self,
         key: &PrKey,
         id: &RoundId,
+        body_hash: &PublicationHash,
+        operator: String,
+        at: u64,
     ) -> Result<RejectOutcome, RoundStateError> {
         let index = self
             .rounds
@@ -390,8 +420,14 @@ impl State {
             });
         }
         match round.status() {
-            RoundStatus::Rejected => return Ok(RejectOutcome::AlreadyRejected),
-            RoundStatus::DraftAvailable => {}
+            RoundStatus::Rejected => {
+                ensure_body_hash(round, body_hash)?;
+                return Ok(RejectOutcome::AlreadyRejected);
+            }
+            RoundStatus::AwaitingDecision => {}
+            RoundStatus::Publishing | RoundStatus::PublicationUnknown | RoundStatus::Published => {
+                return Err(RoundStateError::WrongStatus(id.clone()));
+            }
             RoundStatus::Starting
             | RoundStatus::Running
             | RoundStatus::Failed
@@ -400,6 +436,7 @@ impl State {
         if round.cleanup_pending() {
             return Err(RoundStateError::CleanupPending(id.clone()));
         }
+        ensure_body_hash(round, body_hash)?;
         let clear_validation = self
             .get(key)
             .and_then(ReviewRequest::model_validation)
@@ -408,8 +445,226 @@ impl State {
         if clear_validation {
             request.model_validation = None;
         }
-        self.rounds[index].mark_rejected();
+        self.rounds[index].mark_rejected(operator, at);
         Ok(RejectOutcome::Rejected)
+    }
+
+    pub fn seal_round(&mut self, id: &RoundId, seal: SealedBody) -> Result<bool, RoundStateError> {
+        let round = self.round_mut(id)?;
+        if !round.status().has_saved_draft() {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        Ok(round.seal(seal)?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_publication(
+        &mut self,
+        key: &PrKey,
+        id: &RoundId,
+        body_hash: &PublicationHash,
+        operator: String,
+        expected_publisher_login: String,
+        publisher_id: std::num::NonZeroU64,
+        preexisting_review_ids: Vec<std::num::NonZeroU64>,
+        at: u64,
+    ) -> Result<u64, RoundStateError> {
+        let recorded = self
+            .get(key)
+            .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+        let current_round = self
+            .round(id)
+            .ok_or_else(|| RoundStateError::NotFound(id.clone()))?;
+        recorded.ensure_inspected(current_round.head_sha(), current_round.revision())?;
+        if recorded.discussion() != Some(current_round.discussion()) {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        let round = self.round_mut_for(key, id)?;
+        if round.status() != RoundStatus::AwaitingDecision {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        if round.cleanup_pending() {
+            return Err(RoundStateError::CleanupPending(id.clone()));
+        }
+        ensure_body_hash(round, body_hash)?;
+        Ok(round.reserve_publication(
+            operator,
+            expected_publisher_login,
+            publisher_id,
+            preexisting_review_ids,
+            at,
+        )?)
+    }
+
+    pub fn mark_publication_dispatched(
+        &mut self,
+        id: &RoundId,
+        attempt_id: u64,
+        at: u64,
+    ) -> Result<(), RoundStateError> {
+        let round = self.current_publication_round(id, attempt_id)?;
+        if round
+            .current_attempt()
+            .is_none_or(|attempt| attempt.outcome() != AttemptOutcome::Reserved)
+        {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        round.mark_publication_dispatched(at);
+        Ok(())
+    }
+
+    pub fn finish_publication_attempt(
+        &mut self,
+        id: &RoundId,
+        attempt_id: u64,
+        outcome: AttemptOutcome,
+        at: u64,
+    ) -> Result<(), RoundStateError> {
+        let round = self.current_publication_round(id, attempt_id)?;
+        if !matches!(
+            outcome,
+            AttemptOutcome::DefinitiveFailure
+                | AttemptOutcome::Unknown
+                | AttemptOutcome::ConfirmedNotPosted
+        ) {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        if outcome == AttemptOutcome::Unknown
+            && round
+                .current_attempt()
+                .is_none_or(|attempt| attempt.outcome() != AttemptOutcome::Dispatched)
+        {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        if outcome == AttemptOutcome::DefinitiveFailure && round.status() != RoundStatus::Publishing
+        {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        if outcome == AttemptOutcome::ConfirmedNotPosted
+            && round.status() != RoundStatus::PublicationUnknown
+            && round
+                .current_attempt()
+                .is_none_or(|attempt| attempt.outcome() != AttemptOutcome::Dispatched)
+        {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        round.finish_publication_attempt(outcome, at);
+        Ok(())
+    }
+
+    pub fn record_publication(
+        &mut self,
+        id: &RoundId,
+        attempt_id: u64,
+        receipt: PublicationReceipt,
+        at: u64,
+    ) -> Result<(), RoundStateError> {
+        let round = self.current_publication_round(id, attempt_id)?;
+        let attempt = round
+            .current_attempt()
+            .ok_or_else(|| RoundStateError::WrongStatus(id.clone()))?;
+        if !matches!(
+            attempt.outcome(),
+            AttemptOutcome::Dispatched | AttemptOutcome::Unknown
+        ) {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        if attempt.is_preexisting(receipt.review_id()) {
+            return Err(crate::publication::PublicationStateError::PreexistingReview.into());
+        }
+        if receipt.commit_id() != round.head_sha()
+            || receipt.publisher_id() != attempt.publisher_id()
+        {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        round.set_receipt(receipt, at);
+        Ok(())
+    }
+
+    pub fn record_recovered_publication(
+        &mut self,
+        id: &RoundId,
+        attempt_id: u64,
+        receipt: PublicationReceipt,
+        operator: String,
+        at: u64,
+    ) -> Result<(), RoundStateError> {
+        self.record_publication(id, attempt_id, receipt, at)?;
+        self.round_mut(id)?.confirm_recovery(operator, at);
+        Ok(())
+    }
+
+    pub fn confirm_not_posted(
+        &mut self,
+        id: &RoundId,
+        attempt_id: u64,
+        operator: String,
+        at: u64,
+    ) -> Result<(), RoundStateError> {
+        let round = self.current_publication_round(id, attempt_id)?;
+        if round.current_attempt().is_none_or(|attempt| {
+            !matches!(
+                attempt.outcome(),
+                AttemptOutcome::Dispatched | AttemptOutcome::Unknown
+            )
+        }) {
+            return Err(RoundStateError::WrongStatus(id.clone()));
+        }
+        round.confirm_not_posted(operator, at);
+        Ok(())
+    }
+
+    pub fn confirmed_review_ids(&self, key: &PrKey) -> Vec<u64> {
+        self.rounds
+            .iter()
+            .filter(|round| round.key() == key)
+            .filter_map(|round| round.receipt().map(|receipt| receipt.review_id()))
+            .collect()
+    }
+
+    pub fn has_unresolved_publication(&self, key: &PrKey) -> bool {
+        self.rounds.iter().any(|round| {
+            round.key() == key
+                && matches!(
+                    round.status(),
+                    RoundStatus::Publishing | RoundStatus::PublicationUnknown
+                )
+        })
+    }
+
+    fn round_mut_for(
+        &mut self,
+        key: &PrKey,
+        id: &RoundId,
+    ) -> Result<&mut RoundRecord, RoundStateError> {
+        let round = self.round_mut(id)?;
+        if round.key() != key {
+            return Err(RoundStateError::WrongRequest {
+                round: id.clone(),
+                request: key.clone(),
+            });
+        }
+        Ok(round)
+    }
+
+    fn current_publication_round(
+        &mut self,
+        id: &RoundId,
+        attempt_id: u64,
+    ) -> Result<&mut RoundRecord, RoundStateError> {
+        let round = self.round_mut(id)?;
+        if !matches!(
+            round.status(),
+            RoundStatus::Publishing | RoundStatus::PublicationUnknown
+        ) || round
+            .current_attempt()
+            .is_none_or(|attempt| attempt.id() != attempt_id)
+        {
+            return Err(
+                crate::publication::PublicationStateError::AttemptNotCurrent(attempt_id).into(),
+            );
+        }
+        Ok(round)
     }
 
     pub fn fail_round(
@@ -444,6 +699,9 @@ impl State {
         key: PrKey,
         head_sha: HeadSha,
     ) -> Result<RecordOutcome, StateError> {
+        if self.has_unresolved_publication(&key) {
+            return Err(StateError::PublicationUnresolved(key));
+        }
         if let Some(request) = self.requests.iter_mut().find(|request| request.key == key) {
             if request.head_sha == head_sha {
                 return Ok(RecordOutcome::Unchanged);
@@ -480,6 +738,9 @@ impl State {
         head_sha: &HeadSha,
         discussion: &ObservedDiscussion,
     ) -> Result<RefreshOutcome, StateError> {
+        if self.has_unresolved_publication(key) {
+            return Err(StateError::PublicationUnresolved(key.clone()));
+        }
         let request = self.request_mut(key)?;
         let head_changed = &request.head_sha != head_sha;
         let discussion_changed = request.discussion.as_ref() != Some(discussion);
@@ -579,6 +840,16 @@ impl State {
     }
 }
 
+fn ensure_body_hash(
+    round: &RoundRecord,
+    body_hash: &PublicationHash,
+) -> Result<(), RoundStateError> {
+    if round.sealed_body().map(|seal| seal.hash()) != Some(body_hash) {
+        return Err(crate::publication::PublicationStateError::BodyHashMismatch.into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,6 +871,14 @@ mod tests {
 
     fn revision(value: u64) -> InputRevision {
         InputRevision::new(value).unwrap()
+    }
+
+    fn test_seal(id: &RoundId) -> SealedBody {
+        SealedBody::new("Finding", id.as_str(), PublicationHash::of(b"saved draft"))
+    }
+
+    fn test_hash(id: &RoundId) -> PublicationHash {
+        test_seal(id).hash().clone()
     }
 
     fn discussion(comments: &[(CommentSource, u64, u8)]) -> ObservedDiscussion {
@@ -742,7 +1021,7 @@ mod tests {
             ),
         ] {
             let invalid_state = serde_json::json!({
-                "schema_version": 5,
+                "schema_version": 6,
                 "rounds": [],
                 "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}]
             });
@@ -750,7 +1029,7 @@ mod tests {
             assert!(error.to_string().contains(expected_error), "{error}");
         }
         let invalid_head = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}
@@ -797,7 +1076,7 @@ mod tests {
     #[test]
     fn state_json_keeps_its_shape_and_normalizes_identifiers() {
         let raw = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "rounds": [],
             "requests": [
                 {
@@ -819,7 +1098,7 @@ mod tests {
         assert_eq!(serialized["requests"][0]["key"]["number"], 42);
         assert_eq!(serialized["requests"][0]["head_sha"], HEAD_A);
         assert_eq!(serialized["requests"][0]["authorization"], "awaiting_lead");
-        assert_eq!(serialized["schema_version"], 5);
+        assert_eq!(serialized["schema_version"], 6);
         assert_eq!(serialized["rounds"], serde_json::json!([]));
         assert_eq!(serialized["requests"][0]["revision"], 1);
         assert!(serialized["requests"][0]["discussion"].is_null());
@@ -829,7 +1108,7 @@ mod tests {
     #[test]
     fn corrupt_or_future_state_is_rejected() {
         let duplicate = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": HEAD_A, "authorization": "one_round", "revision": 1, "discussion": {"author_id": 7, "comments": []}, "model_validation": null},
@@ -840,8 +1119,8 @@ mod tests {
         assert_eq!(state.validate(), Err(StateError::DuplicateRequest(key())));
 
         let future: State =
-            serde_json::from_str(r#"{"schema_version":6,"requests":[],"rounds":[]}"#).unwrap();
-        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(6)));
+            serde_json::from_str(r#"{"schema_version":7,"requests":[],"rounds":[]}"#).unwrap();
+        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(7)));
     }
 
     #[test]
@@ -942,7 +1221,7 @@ mod tests {
     #[test]
     fn current_state_rejects_one_round_authorization_without_observed_discussion() {
         let state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
@@ -1082,7 +1361,7 @@ mod tests {
     #[test]
     fn malformed_observations_and_revision_overflow_are_rejected() {
         let base = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
@@ -1455,12 +1734,24 @@ mod tests {
         );
         state.begin_round(first.clone(), choice).unwrap();
         assert_eq!(
-            state.reject_round(&key(), first.id()),
+            state.reject_round(
+                &key(),
+                first.id(),
+                &test_hash(first.id()),
+                "uid:1".into(),
+                4
+            ),
             Err(RoundStateError::WrongStatus(first.id().clone()))
         );
         let other_key = PrKey::new("other/repo", 42).unwrap();
         assert_eq!(
-            state.reject_round(&other_key, first.id()),
+            state.reject_round(
+                &other_key,
+                first.id(),
+                &test_hash(first.id()),
+                "uid:1".into(),
+                4
+            ),
             Err(RoundStateError::WrongRequest {
                 round: first.id().clone(),
                 request: other_key,
@@ -1490,15 +1781,49 @@ mod tests {
         state
             .complete_round(first.id(), 4, Freshness::Stale)
             .unwrap();
+        state.seal_round(first.id(), test_seal(first.id())).unwrap();
+        let round = state.round(first.id()).unwrap();
+        assert_eq!(
+            round.publication_freshness(&head, &discussion, &head, PullAvailability::Open),
+            Freshness::Fresh
+        );
+        assert_eq!(
+            round.publication_freshness(&head, &discussion, &head, PullAvailability::Closed),
+            Freshness::Stale
+        );
+        assert_eq!(
+            round.publication_freshness(
+                &self::head(HEAD_B),
+                &discussion,
+                &head,
+                PullAvailability::Open
+            ),
+            Freshness::Stale
+        );
+        assert_eq!(
+            round.publication_freshness(
+                &head,
+                &self::discussion(&[(CommentSource::IssueComment, 99, 9)]),
+                &head,
+                PullAvailability::Open,
+            ),
+            Freshness::Stale
+        );
         let persisted: State =
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         persisted.validate().unwrap();
         let saved = persisted.round(first.id()).unwrap();
-        assert_eq!(saved.status(), RoundStatus::DraftAvailable);
+        assert_eq!(saved.status(), RoundStatus::AwaitingDecision);
         assert!(saved.cleanup_pending());
         assert!(saved.status().has_saved_draft());
         assert_eq!(
-            state.reject_round(&key(), first.id()),
+            state.reject_round(
+                &key(),
+                first.id(),
+                &test_hash(first.id()),
+                "uid:1".into(),
+                4
+            ),
             Err(RoundStateError::CleanupPending(first.id().clone()))
         );
         state.mark_round_cleaned(first.id()).unwrap();
@@ -1535,7 +1860,15 @@ mod tests {
                 &VerifiedArchive::for_test(choice.archive()),
             )
             .unwrap();
-        later_state.reject_round(&key(), first.id()).unwrap();
+        later_state
+            .reject_round(
+                &key(),
+                first.id(),
+                &test_hash(first.id()),
+                "uid:1".into(),
+                5,
+            )
+            .unwrap();
         assert_eq!(
             later_state.get(&key()).unwrap().authorization(),
             Authorization::PrCycle
@@ -1582,7 +1915,15 @@ mod tests {
             Err(RoundStateError::BlocksNewRound(_))
         ));
         assert_eq!(
-            state.reject_round(&key(), first.id()).unwrap(),
+            state
+                .reject_round(
+                    &key(),
+                    first.id(),
+                    &test_hash(first.id()),
+                    "uid:1".into(),
+                    6
+                )
+                .unwrap(),
             RejectOutcome::Rejected
         );
         let rejected = state.round(first.id()).unwrap();
@@ -1617,7 +1958,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            state.reject_round(&key(), first.id()).unwrap(),
+            state
+                .reject_round(
+                    &key(),
+                    first.id(),
+                    &test_hash(first.id()),
+                    "uid:1".into(),
+                    7
+                )
+                .unwrap(),
             RejectOutcome::AlreadyRejected
         );
         assert_eq!(
@@ -1626,6 +1975,151 @@ mod tests {
         );
         assert!(state.get(&key()).unwrap().model_validation().is_some());
         state.begin_round(third, choice).unwrap();
+    }
+
+    #[test]
+    fn publication_attempts_require_explicit_recovery_and_exclude_only_confirmed_review_ids() {
+        let id = RoundId::new("r-publish").unwrap();
+        let mut state: State = serde_json::from_value(serde_json::json!({
+            "schema_version": 6,
+            "requests": [{
+                "key": {"repository":"owner/repo","number":42},
+                "head_sha": HEAD_A,
+                "authorization": "pr_cycle",
+                "revision": 2,
+                "discussion": {"author_id":7,"comments":[]},
+                "model_validation": null
+            }],
+            "rounds": [{
+                "id": "r-publish",
+                "key": {"repository":"owner/repo","number":42},
+                "status": "awaiting_decision",
+                "sandbox": "rp-722d7075626c697368",
+                "head_sha": HEAD_A,
+                "revision": 2,
+                "discussion": {"author_id":7,"comments":[]},
+                "model": "model-alpha",
+                "agent": "claude",
+                "gateway": "gateway",
+                "workspace": "default",
+                "driver": "vm",
+                "model_provider": "model-provider",
+                "github_provider": "github-provider",
+                "prompt_sha256": "a".repeat(64),
+                "format_sha256": "b".repeat(64),
+                "archive_sha256": "c".repeat(64),
+                "archive_config_sha256": "d".repeat(64),
+                "execution_sha256": "e".repeat(64),
+                "runner_sha256": "f".repeat(64),
+                "created_at": 1,
+                "dispatched_at": 2,
+                "finished_at": 3,
+                "freshness": "fresh",
+                "failure": null,
+                "incomplete_log": false,
+                "cleanup_pending": false
+            }]
+        }))
+        .unwrap();
+        state.validate().unwrap();
+        let seal = test_seal(&id);
+        let hash = seal.hash().clone();
+        state.seal_round(&id, seal).unwrap();
+        let attempt = state
+            .reserve_publication(
+                &key(),
+                &id,
+                &hash,
+                "uid:1".into(),
+                "publisher".into(),
+                NonZeroU64::new(7).unwrap(),
+                vec![NonZeroU64::new(9).unwrap()],
+                4,
+            )
+            .unwrap();
+        assert_eq!(attempt, 1);
+        assert_eq!(state.round(&id).unwrap().status(), RoundStatus::Publishing);
+        assert!(matches!(
+            state.reject_round(&key(), &id, &hash, "uid:1".into(), 5),
+            Err(RoundStateError::WrongStatus(_))
+        ));
+        state.mark_publication_dispatched(&id, attempt, 5).unwrap();
+        let preexisting = PublicationReceipt::new(
+            NonZeroU64::new(9).unwrap(),
+            "https://github.com/owner/repo/pull/42#pullrequestreview-9".into(),
+            "publisher".into(),
+            NonZeroU64::new(7).unwrap(),
+            head(HEAD_A),
+            "2026-10-30T10:00:00Z".into(),
+        );
+        assert!(matches!(
+            state.record_publication(&id, attempt, preexisting, 6),
+            Err(RoundStateError::Publication(
+                crate::publication::PublicationStateError::PreexistingReview
+            ))
+        ));
+        state
+            .finish_publication_attempt(&id, attempt, AttemptOutcome::Unknown, 6)
+            .unwrap();
+        assert_eq!(
+            state.refresh(&key(), &head(HEAD_A), &discussion(&[])),
+            Err(StateError::PublicationUnresolved(key()))
+        );
+        assert!(matches!(
+            state.reserve_publication(
+                &key(),
+                &id,
+                &hash,
+                "uid:1".into(),
+                "publisher".into(),
+                NonZeroU64::new(7).unwrap(),
+                vec![],
+                7
+            ),
+            Err(RoundStateError::WrongStatus(_))
+        ));
+        state
+            .confirm_not_posted(&id, attempt, "uid:2".into(), 7)
+            .unwrap();
+        assert_eq!(
+            state.round(&id).unwrap().status(),
+            RoundStatus::AwaitingDecision
+        );
+        let second = state
+            .reserve_publication(
+                &key(),
+                &id,
+                &hash,
+                "uid:1".into(),
+                "publisher".into(),
+                NonZeroU64::new(7).unwrap(),
+                vec![],
+                8,
+            )
+            .unwrap();
+        assert_eq!(second, 2);
+        state.mark_publication_dispatched(&id, second, 9).unwrap();
+        let receipt = PublicationReceipt::new(
+            NonZeroU64::new(10).unwrap(),
+            "https://github.com/owner/repo/pull/42#pullrequestreview-10".into(),
+            "publisher".into(),
+            NonZeroU64::new(7).unwrap(),
+            head(HEAD_A),
+            "2026-10-30T10:00:00Z".into(),
+        );
+        state.record_publication(&id, second, receipt, 10).unwrap();
+        assert_eq!(state.confirmed_review_ids(&key()), vec![10]);
+        assert_eq!(
+            state.get(&key()).unwrap().authorization(),
+            Authorization::PrCycle
+        );
+        assert!(matches!(
+            state.reject_round(&key(), &id, &hash, "uid:1".into(), 11),
+            Err(RoundStateError::WrongStatus(_))
+        ));
+        state.validate().unwrap();
+        let reloaded: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        reloaded.validate().unwrap();
     }
 
     #[test]

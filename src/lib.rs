@@ -1,4 +1,4 @@
-//! Workflow state, review preparation, and read-only adapters.
+//! Workflow state, review preparation, and bounded external adapters.
 
 pub mod agent;
 pub mod archive;
@@ -8,6 +8,7 @@ pub mod github;
 mod model;
 pub mod openshell;
 pub mod preparation;
+pub mod publication;
 pub mod review;
 pub mod round;
 pub mod sandbox_layout;

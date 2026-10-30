@@ -107,7 +107,7 @@ pub fn refresh<'a>(
     config: &'a ReviewConfig,
     key: &PrKey,
 ) -> Result<RefreshedRound<'a>, RoundError> {
-    let observation = client.observe_pull(key)?;
+    let observation = client.observe_pull_excluding(key, &state.confirmed_review_ids(key))?;
     refresh_observation(state, config, observation)
 }
 

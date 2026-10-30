@@ -1,10 +1,11 @@
-//! Read-only GitHub REST API adapter for PR metadata, diffs, and checks.
+//! GitHub REST adapters for read-only PR inspection and separate review publication.
 
 pub mod checks;
 pub mod commits;
 pub mod discussion;
 mod error;
 mod preparation;
+pub mod publisher;
 
 pub use error::GithubError;
 pub use preparation::PreparationInputs;
@@ -59,6 +60,13 @@ impl PullRequest {
         self.state
     }
 
+    pub fn availability(&self) -> PullAvailability {
+        match self.state {
+            PullRequestState::Open => PullAvailability::Open,
+            PullRequestState::Closed => PullAvailability::Closed,
+        }
+    }
+
     pub fn draft(&self) -> bool {
         self.draft
     }
@@ -68,11 +76,7 @@ impl PullRequest {
     }
 
     pub fn preparation_observation(&self) -> PullObservation<'_> {
-        let availability = match self.state {
-            PullRequestState::Open => PullAvailability::Open,
-            PullRequestState::Closed => PullAvailability::Closed,
-        };
-        PullObservation::new(&self.head_sha, availability)
+        PullObservation::new(&self.head_sha, self.availability())
     }
 
     pub fn base_sha(&self) -> &HeadSha {
@@ -1231,6 +1235,24 @@ mod tests {
         assert!(
             stored.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
         );
+    }
+
+    #[test]
+    fn confirmed_publication_id_is_excluded_but_a_copied_footer_still_triggers() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let body = "Finding\n\n_Agent review via Review Platform (round r-one)._";
+        let reviews = vec![
+            serde_json::json!({"id": 41, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),
+            serde_json::json!({"id": 42, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),
+        ];
+        let (url, handle) = serve_many(observation_replies(&[], &[], &reviews));
+        let observation = GithubClient::for_api(url, Some("test-token".into()))
+            .observe_pull_excluding(&key, &[41])
+            .unwrap();
+        handle.join().unwrap();
+        let comments = observation.discussion().comments();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id(), 42);
     }
 
     #[test]
