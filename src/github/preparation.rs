@@ -58,7 +58,8 @@ impl GithubClient {
         }
         let checks = self.checks_for_pull(key, &pull)?;
         let coauthors = self.coauthors_for_pull(key, &pull)?;
-        let final_observation = self.observe_pull(key)?;
+        let final_observation =
+            self.observe_pull_excluding(key, observed.confirmed_review_ids())?;
         if final_observation.head_sha() != observed.head_sha()
             || final_observation.discussion() != observed.discussion()
         {

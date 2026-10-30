@@ -505,7 +505,10 @@ mod tests {
         replies
     }
 
-    fn preparation_replies(final_issues: &[serde_json::Value]) -> Vec<MockReply> {
+    fn preparation_replies(
+        final_issues: &[serde_json::Value],
+        final_reviews: &[serde_json::Value],
+    ) -> Vec<MockReply> {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let commits_route = "/repos/owner/repo/pulls/42/commits?per_page=100&page=1";
         let commit = serde_json::json!([{
@@ -530,7 +533,7 @@ mod tests {
             json_reply(commits_route.to_owned(), commit.to_string()),
             json_reply(pull_route(&key), pr_body(HEAD, BASE)),
         ];
-        replies.extend(observation_replies(final_issues, &[], &[]));
+        replies.extend(observation_replies(final_issues, &[], final_reviews));
         replies
     }
 
@@ -1610,7 +1613,7 @@ mod tests {
     fn preparation_inputs_bind_checks_and_coauthors_to_stable_observation() {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let mut replies = observation_replies(&[], &[], &[]);
-        replies.extend(preparation_replies(&[]));
+        replies.extend(preparation_replies(&[], &[]));
         replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
         let (url, handle) = serve_many(replies);
         let client = GithubClient::for_api(url, Some("test-token".to_owned()));
@@ -1622,6 +1625,34 @@ mod tests {
         assert!(inputs.coauthors().contains(
             &crate::config::CoauthorIdentity::new("Claude", "claude@example.com").unwrap()
         ));
+    }
+
+    #[test]
+    fn preparation_rechecks_with_the_original_confirmed_review_exclusions() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let body = "Finding\n\n_Agent review via Review Platform (round r-one)._";
+        let reviews = vec![
+            serde_json::json!({"id": 41, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),
+            serde_json::json!({"id": 42, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),
+        ];
+        let mut replies = observation_replies(&[], &[], &reviews);
+        replies.extend(preparation_replies(&[], &reviews));
+        replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
+        let (url, handle) = serve_many(replies);
+        let client = GithubClient::for_api(url, Some("test-token".to_owned()));
+        let observed = client.observe_pull_excluding(&key, &[41]).unwrap();
+        assert_eq!(
+            observed
+                .discussion()
+                .comments()
+                .iter()
+                .map(crate::CommentFingerprint::id)
+                .collect::<Vec<_>>(),
+            vec![42]
+        );
+        let inputs = client.preparation_inputs(observed).unwrap();
+        handle.join().unwrap();
+        assert_eq!(inputs.checks_summary(), CheckSummary::Green);
     }
 
     #[test]
@@ -1656,7 +1687,7 @@ mod tests {
     fn preparation_inputs_reject_author_discussion_change_on_final_pass() {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let mut replies = observation_replies(&[], &[], &[]);
-        replies.extend(preparation_replies(&[author_comment(9, "new reply")]));
+        replies.extend(preparation_replies(&[author_comment(9, "new reply")], &[]));
         let (url, handle) = serve_many(replies);
         let client = GithubClient::for_api(url, Some("test-token".to_owned()));
         let observed = client.observe_pull(&key).unwrap();
@@ -1676,7 +1707,7 @@ mod tests {
             (changed_author.to_string(), false),
         ] {
             let mut replies = observation_replies(&[], &[], &[]);
-            replies.extend(preparation_replies(&[]));
+            replies.extend(preparation_replies(&[], &[]));
             replies.push(json_reply(pull_route(&key), changed_pull));
             let (url, handle) = serve_many(replies);
             let client = GithubClient::for_api(url, Some("test-token".to_owned()));
@@ -1782,7 +1813,7 @@ mod tests {
             }
 
             let mut replies = observation_replies(&[], &[], &[]);
-            replies.extend(preparation_replies(&[]));
+            replies.extend(preparation_replies(&[], &[]));
             replies.push(json_reply(pull_route(&key), pr_body(HEAD, BASE)));
             let (url, handle) = serve_many(replies);
             let client = GithubClient::for_api(url, Some("test-token".to_owned()));

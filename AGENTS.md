@@ -69,6 +69,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Clear model validation matching the rejected round and preserve a different later choice.
 - When a publisher may share the PR author's GitHub identity,
   exclude only review IDs recorded from confirmed publication from author-comment triggers.
+  Apply the same exclusions to every discussion pass and final recheck.
   Treat text markers as display cues, never proof of origin.
 - Keep GitHub posting credentials in the daemon.
   Agents receive read-only GitHub access.

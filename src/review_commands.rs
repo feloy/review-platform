@@ -719,14 +719,36 @@ mod tests {
     }
 
     #[test]
-    fn recovery_refuses_promptly_while_a_runner_is_active() {
+    fn recovery_refuses_promptly_while_a_pr_operation_is_active() {
         use std::sync::mpsc;
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("state.json");
-        let config_path = dir.path().join("config.json");
         let key = PrKey::new("owner/repo", 42).unwrap();
+        let pr_lock = storage::pr_lock(&state_path, &key).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = recover_review(Some(state_path), None, "owner/repo".to_owned(), 42)
+                .map_err(|error| error.to_string());
+            sender.send(result).unwrap();
+        });
+        let blocked = receiver.recv_timeout(Duration::from_secs(3));
+        drop(pr_lock);
+        worker.join().unwrap();
+        assert_eq!(
+            blocked
+                .expect("recovery waited for the PR lock")
+                .unwrap_err(),
+            "another operation on this PR is active"
+        );
+    }
+
+    #[test]
+    fn recovery_refuses_while_a_runner_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let config_path = dir.path().join("config.json");
         let id = RoundId::new("r-test").unwrap();
         let config = serde_json::json!({
             "schema_version": 5,
@@ -786,30 +808,6 @@ mod tests {
         storage::load(&state_path).unwrap();
 
         let _runner_lock = storage::try_lock(&round_path(&state_path, &id).join("runner")).unwrap();
-        let pr_lock = storage::pr_lock(&state_path, &key).unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let worker_state = state_path.clone();
-        let worker_config = config_path.clone();
-        let worker = std::thread::spawn(move || {
-            let result = recover_review(
-                Some(worker_state),
-                Some(worker_config),
-                "owner/repo".to_owned(),
-                42,
-            )
-            .map_err(|error| error.to_string());
-            sender.send(result).unwrap();
-        });
-        let blocked = receiver.recv_timeout(Duration::from_secs(3));
-        drop(pr_lock);
-        worker.join().unwrap();
-        assert_eq!(
-            blocked
-                .expect("recovery waited for the PR lock")
-                .unwrap_err(),
-            "another operation on this PR is active"
-        );
-
         let error = recover_review(Some(state_path), Some(config_path), "owner/repo".into(), 42)
             .unwrap_err();
         assert_eq!(error.to_string(), "review runner is still active");
