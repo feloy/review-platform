@@ -106,17 +106,21 @@ impl fmt::Display for PrKey {
     }
 }
 
+pub(crate) fn valid_github_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= MAX_OWNER_LEN
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 fn validate_repository(repository: &str) -> Result<(), StateError> {
     let Some((owner, name)) = repository.split_once('/') else {
         return Err(StateError::InvalidRepository(repository.to_owned()));
     };
-    let valid_owner = !owner.is_empty()
-        && owner.len() <= MAX_OWNER_LEN
-        && !owner.starts_with('-')
-        && !owner.ends_with('-')
-        && owner
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-');
+    let valid_owner = valid_github_login(owner);
     let valid_name = !name.is_empty()
         && name.len() <= MAX_REPOSITORY_NAME_LEN
         && name != "."

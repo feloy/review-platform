@@ -1,6 +1,6 @@
 //! Sealed review bodies, publication attempts, and lead decision receipts.
 
-use crate::{HeadSha, InputRevision, ObservedDiscussion, PrKey};
+use crate::{HeadSha, InputRevision, ObservedDiscussion, PrKey, model::valid_github_login};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::num::NonZeroU64;
@@ -229,7 +229,7 @@ impl PublicationAttempt {
         self.reserved_at > 0
             && !self.operator.is_empty()
             && !self.operator.chars().any(char::is_control)
-            && valid_login(&self.expected_publisher_login)
+            && valid_github_login(&self.expected_publisher_login)
             && &self.head_sha == head
             && self.revision == revision
             && &self.discussion == discussion
@@ -331,7 +331,7 @@ impl PublicationReceipt {
             self.review_id
         );
         self.url.eq_ignore_ascii_case(&expected_url)
-            && valid_login(&self.publisher_login)
+            && valid_github_login(&self.publisher_login)
             && self.publisher_id.get() == attempt.publisher_id()
             && &self.commit_id == head
             && !self.published_at.is_empty()
@@ -364,16 +364,6 @@ impl RejectionDecision {
     pub(crate) fn validate(&self) -> bool {
         !self.operator.is_empty() && !self.operator.chars().any(char::is_control) && self.at > 0
     }
-}
-
-fn valid_login(login: &str) -> bool {
-    !login.is_empty()
-        && login.len() <= 39
-        && !login.starts_with('-')
-        && !login.ends_with('-')
-        && login
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 #[cfg(test)]
