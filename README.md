@@ -573,7 +573,8 @@ a later GitHub error can leave the updated inputs in the state file.
 The result is an observation, not a guarantee that GitHub stays unchanged afterward.
 Changes made and reverted between observations may be missed.
 When a confirmed publication uses the PR author's GitHub account,
-`refresh` excludes only that recorded review ID from author-comment triggers.
+GitHub observations exclude only that recorded review ID from author-comment triggers,
+including preparation's final recheck.
 The visible footer alone never identifies a Review Platform publication.
 Closed and draft PRs can be refreshed; refreshing grants no permission to run a review.
 Round startup fetches fresh inputs and checks before creating a sandbox

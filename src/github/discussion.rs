@@ -18,6 +18,7 @@ pub struct PullObservation {
     key: PrKey,
     head_sha: HeadSha,
     discussion: ObservedDiscussion,
+    confirmed_review_ids: Vec<u64>,
 }
 
 impl PullObservation {
@@ -35,6 +36,10 @@ impl PullObservation {
 
     pub fn discussion(&self) -> &ObservedDiscussion {
         &self.discussion
+    }
+
+    pub(crate) fn confirmed_review_ids(&self) -> &[u64] {
+        &self.confirmed_review_ids
     }
 }
 
@@ -167,6 +172,7 @@ impl GithubClient {
             key: key.clone(),
             head_sha: current.head_sha,
             discussion: second,
+            confirmed_review_ids: confirmed_review_ids.to_vec(),
         })
     }
 
