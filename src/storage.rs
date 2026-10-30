@@ -21,6 +21,12 @@ fn lock_is_busy(error: &std::io::Error) -> bool {
 }
 
 pub fn lock(path: &Path) -> Result<StateLock> {
+    blocking_lock(path, "another operation may be active")
+}
+
+fn blocking_lock(path: &Path, timeout_detail: &'static str) -> Result<StateLock> {
+    #[cfg(unix)]
+    let _ = timeout_detail;
     let parent = parent_dir(path);
     fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
     let mut lock_name = path.as_os_str().to_os_string();
@@ -43,7 +49,10 @@ pub fn lock(path: &Path) -> Result<StateLock> {
                 }
             }
         }
-        anyhow::bail!("timed out locking {}", lock_path.display());
+        anyhow::bail!(
+            "timed out after 10 seconds waiting for lock {}: {timeout_detail}",
+            lock_path.display(),
+        );
     }
     #[cfg(unix)]
     {
@@ -58,7 +67,10 @@ pub fn lock(path: &Path) -> Result<StateLock> {
 
 /// Serialize operations with external side effects for one PR across processes.
 pub fn pr_lock(state_path: &Path, key: &PrKey) -> Result<StateLock> {
-    lock(&pr_lock_path(state_path, key))
+    blocking_lock(
+        &pr_lock_path(state_path, key),
+        "another operation on this PR is active",
+    )
 }
 
 /// Refuse recovery promptly when another operation owns this PR.
