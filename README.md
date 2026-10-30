@@ -44,6 +44,8 @@ inspect the new values and authorize again.
 
 The graphical interface is a Svelte and Material Web page showing locally recorded PR requests.
 It shows each request's recorded head, input revision, authorization, and latest round.
+Expand a request to see observed author discussion counts,
+the current validated model and agent, and the latest round's recorded inputs and model.
 The list comes from the local state file; it does not query live GitHub data.
 Review workflow operations remain available through the CLI while the GUI grows.
 
@@ -59,6 +61,8 @@ curl -N http://localhost:8080/api/requests/events
 The command serves the compiled HTML, JavaScript, and CSS from the executable
 and listens only on IPv4 loopback at port 8080.
 `GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
+Each request includes optional discussion counts and model validation,
+plus a summary of its latest round when one exists.
 `GET /api/requests/events` is a server-sent event stream.
 It sends a `requests` event with the same JSON snapshot on connection
 and whenever displayed local state changes, within about one second of a CLI update.

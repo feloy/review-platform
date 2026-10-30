@@ -15,7 +15,7 @@ use axum::{
 };
 use futures_util::{Stream, stream};
 use include_dir::{Dir, include_dir};
-use review_platform::{Authorization, review::RoundStatus};
+use review_platform::{Authorization, CommentSource, review::RoundStatus};
 use serde::Serialize;
 use std::{
     convert::Infallible,
@@ -52,7 +52,22 @@ struct RequestSummary {
     head_sha: String,
     revision: u64,
     authorization: Authorization,
+    discussion: Option<DiscussionSummary>,
+    validated_model: Option<ValidatedModelSummary>,
     latest_round: Option<RoundSummary>,
+}
+
+#[derive(Serialize)]
+struct DiscussionSummary {
+    issue_comments: usize,
+    review_comments: usize,
+    review_bodies: usize,
+}
+
+#[derive(Serialize)]
+struct ValidatedModelSummary {
+    model: String,
+    agent: String,
 }
 
 #[derive(Serialize)]
@@ -60,6 +75,10 @@ struct RoundSummary {
     id: String,
     status: RoundStatus,
     cleanup_pending: bool,
+    head_sha: String,
+    revision: u64,
+    model: String,
+    agent: String,
 }
 
 #[derive(Serialize)]
@@ -220,10 +239,25 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
             head_sha: request.head_sha().to_string(),
             revision: request.revision().get(),
             authorization: request.authorization(),
+            discussion: request.discussion().map(|discussion| DiscussionSummary {
+                issue_comments: discussion.count(CommentSource::IssueComment),
+                review_comments: discussion.count(CommentSource::ReviewComment),
+                review_bodies: discussion.count(CommentSource::Review),
+            }),
+            validated_model: request
+                .model_validation()
+                .map(|validation| ValidatedModelSummary {
+                    model: validation.model().to_string(),
+                    agent: validation.agent().to_string(),
+                }),
             latest_round: state.latest_round(request.key()).map(|round| RoundSummary {
                 id: round.id().to_string(),
                 status: round.status(),
                 cleanup_pending: round.cleanup_pending(),
+                head_sha: round.head_sha().to_string(),
+                revision: round.revision().get(),
+                model: round.model().to_string(),
+                agent: round.agent().to_string(),
             }),
         })
         .collect();
@@ -269,4 +303,59 @@ fn serve_file(path: &str) -> Response {
         );
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use review_platform::{
+        CommentFingerprint, CommentHash, HeadSha, ObservedDiscussion, PrKey, State,
+    };
+    use std::num::NonZeroU64;
+
+    #[test]
+    fn request_snapshot_exposes_discussion_counts_without_fingerprints() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let mut state = State::default();
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let head = HeadSha::new("a".repeat(40)).unwrap();
+        state.record_request(key.clone(), head.clone()).unwrap();
+        let discussion = ObservedDiscussion::new(
+            NonZeroU64::new(7).unwrap(),
+            vec![
+                CommentFingerprint::new(
+                    CommentSource::IssueComment,
+                    NonZeroU64::new(10).unwrap(),
+                    CommentHash::from_digest([1; 32]),
+                ),
+                CommentFingerprint::new(
+                    CommentSource::ReviewComment,
+                    NonZeroU64::new(11).unwrap(),
+                    CommentHash::from_digest([2; 32]),
+                ),
+                CommentFingerprint::new(
+                    CommentSource::Review,
+                    NonZeroU64::new(12).unwrap(),
+                    CommentHash::from_digest([3; 32]),
+                ),
+            ],
+        )
+        .unwrap();
+        state.refresh(&key, &head, &discussion).unwrap();
+        storage::save(&state_file, &state).unwrap();
+
+        let snapshot = serde_json::to_value(request_list(&state_file).unwrap()).unwrap();
+        let request = &snapshot["requests"][0];
+        assert_eq!(
+            request["discussion"],
+            serde_json::json!({
+                "issue_comments": 1,
+                "review_comments": 1,
+                "review_bodies": 1,
+            })
+        );
+        assert!(request["validated_model"].is_null());
+        assert!(request["latest_round"].is_null());
+    }
 }

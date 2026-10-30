@@ -224,6 +224,69 @@ h2 {
   color: #245b30;
 }
 
+.details-toggle {
+  padding: 0 20px 12px;
+}
+
+.request-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 24px;
+  padding: 24px 28px;
+  border-top: 1px solid #e1e2ec;
+  background: #f8f9fd;
+}
+
+.request-details[hidden] {
+  display: none;
+}
+
+.detail-group {
+  min-width: 0;
+}
+
+h3 {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.detail-list {
+  margin: 0;
+}
+
+.detail-list > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(0, 1.2fr);
+  gap: 12px;
+  padding: 5px 0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.detail-list dt,
+.detail-empty {
+  color: #5b5963;
+}
+
+.detail-list dd {
+  min-width: 0;
+  margin: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.detail-list code {
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.detail-empty {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 @media (max-width: 900px) {
   .request-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -244,12 +307,21 @@ h2 {
 
   .queue-heading,
   .request-row,
+  .request-details,
   .state-message {
     padding: 20px;
+  }
+
+  .details-toggle {
+    padding: 0 12px 12px;
   }
 
   .request-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 18px;
+  }
+
+  .request-details {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
