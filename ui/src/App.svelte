@@ -133,8 +133,17 @@
                 {#if request.latest_round}
                   <p class="round-status">{roundLabels[request.latest_round.status] ?? 'Unknown'}</p>
                   <p class="secondary">{request.latest_round.id}</p>
-                  {#if request.latest_round.cleanup_pending}
-                    <p class="warning">Cleanup pending</p>
+                  {#if request.latest_round.cleanup_status === 'needs_attention'}
+                    <p class="warning">
+                      {request.latest_round.status === 'starting' || request.latest_round.status === 'running'
+                        ? 'Review stopped; cleanup may be required'
+                        : 'Cleanup pending'}
+                    </p>
+                  {:else if request.latest_round.cleanup_status === 'unknown'}
+                    <p class="secondary">Cleanup status unavailable</p>
+                  {:else if request.latest_round.cleanup_status === 'in_progress' &&
+                    request.latest_round.status !== 'starting' && request.latest_round.status !== 'running'}
+                    <p class="secondary">Finishing cleanup…</p>
                   {/if}
                 {:else}
                   <p class="secondary">No rounds yet</p>

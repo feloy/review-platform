@@ -47,6 +47,8 @@ It shows each request's recorded head, input revision, authorization, and latest
 Expand a request to see observed author discussion counts,
 the current validated model and agent, and the latest round's recorded inputs and model.
 The list comes from the local state file; it does not query live GitHub data.
+The GUI checks the round's runner lock before warning that cleanup needs attention.
+If the runner lock cannot be inspected, it reports that cleanup status is unavailable.
 Review workflow operations remain available through the CLI while the GUI grows.
 
 ```sh
@@ -65,7 +67,8 @@ Each request includes optional discussion counts and model validation,
 plus a summary of its latest round when one exists.
 `GET /api/requests/events` is a server-sent event stream.
 It sends a `requests` event with the same JSON snapshot on connection
-and whenever displayed local state changes, within about one second of a CLI update.
+and whenever displayed local state or runner activity changes,
+within about one second of the change.
 It sends `state_error` if the local state cannot be read,
 then resumes snapshots when the read succeeds.
 The browser reconnects automatically if the stream is interrupted;
