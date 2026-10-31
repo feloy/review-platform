@@ -85,6 +85,7 @@ To change the UI, use Node 24 and rebuild the assets before compiling Rust:
 ```sh
 cd ui
 npm ci
+npm test
 npm run build
 cd ..
 cargo install --path . --locked --force
