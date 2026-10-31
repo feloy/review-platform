@@ -46,7 +46,10 @@ The graphical interface is a Svelte and Material Web page showing locally record
 It shows each request's recorded head, input revision, authorization, and latest round.
 Expand a request to see observed author discussion counts,
 the current validated model and agent, and the latest round's recorded inputs and model.
-The list comes from the local state file; it does not query live GitHub data.
+The list comes from the local state file.
+After signing in, use **Refresh from GitHub** on a request to fetch its current head
+and author discussion, using the same rules as the `refresh` command.
+Changed inputs may clear one-round authorization and model validation.
 The GUI checks the round's runner lock before warning that cleanup needs attention.
 If the runner lock cannot be inspected, it reports that cleanup status is unavailable.
 Review workflow operations remain available through the CLI while the GUI grows.
@@ -54,6 +57,7 @@ Review workflow operations remain available through the CLI while the GUI grows.
 ```sh
 review-platform gui
 # Open http://localhost:8080/ in a browser.
+# Enter the one-time sign-in code shown in the terminal to enable actions.
 # Inspect the current local request list.
 curl http://localhost:8080/api/requests
 # Watch request updates from the server.
@@ -62,6 +66,14 @@ curl -N http://localhost:8080/api/requests/events
 
 The command serves the compiled HTML, JavaScript, and CSS from the executable
 and listens only on IPv4 loopback at port 8080.
+The command requires an interactive terminal to display its one-time code.
+It trusts the OS user who launches it as the lead:
+anyone with access to that terminal and code can start the browser session.
+Keep the terminal and browser session private.
+The code can be used once, and the session is tied to the browser tab and server launch;
+reloads in that tab retain it.
+If the session is lost, restart the GUI for a new code.
+The GUI uses the GitHub credentials available when it starts.
 `GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
 Each request includes optional discussion counts and model validation,
 plus a summary of its latest round when one exists.
@@ -74,9 +86,10 @@ then resumes snapshots when the read succeeds.
 The browser reconnects automatically if the stream is interrupted;
 reloading the page also starts a new connection.
 `/api` reports the API name and version, and `/api/hello` remains available.
-The current API serves read-only endpoints.
-State-changing operations will need lead authentication and protection
-against requests from other sites before they are added.
+The read-only endpoints do not require sign-in.
+`POST /api/session` exchanges the one-time code for a launch-scoped session token.
+`POST /api/requests/refresh` requires that token and a same-origin request;
+the server rejects cross-origin and missing-origin POST requests.
 
 Keep the compiled UI in `ui/dist` under version control
 so Rust installation does not need to run the frontend build.
@@ -208,7 +221,7 @@ except `.` and `..`.
 Repository names and head SHAs are normalized to lowercase,
 including when loaded from the JSON state file.
 
-- `gui` serves the embedded request list and read-only API
+- `gui` serves the embedded request list and local API
   over HTTP on `localhost:8080` until interrupted.
 - `request REPOSITORY PR HEAD_SHA` manually records a review request and its current PR head.
   A new request starts in `awaiting lead authorization`.

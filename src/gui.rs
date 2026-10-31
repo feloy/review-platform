@@ -1,6 +1,6 @@
 //! Loopback HTTP server for the embedded operator UI and local request snapshots.
 
-use crate::{review_commands, storage};
+use crate::{request_commands, review_commands, storage};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -11,21 +11,26 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::{Stream, stream};
 use include_dir::{Dir, include_dir};
 use review_platform::{
-    Authorization, CommentSource,
+    Authorization, CommentSource, PrKey, RefreshOutcome, StateError,
+    github::GithubError,
     review::{RoundRecord, RoundStatus},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     convert::Infallible,
+    fmt::Write as _,
+    io::IsTerminal,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
+use subtle::ConstantTimeEq;
 use tokio::time::{MissedTickBehavior, interval};
 
 const ADDRESS: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
@@ -96,7 +101,39 @@ enum CleanupStatus {
 
 #[derive(Serialize)]
 struct ApiError {
-    error: &'static str,
+    error: String,
+}
+
+type Refresh = fn(&Path, &PrKey) -> Result<RefreshOutcome, request_commands::RefreshError>;
+
+struct AppState {
+    state_file: PathBuf,
+    session: Mutex<Session>,
+    refresh: Refresh,
+}
+
+struct Session {
+    bootstrap: Option<String>,
+    token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionRequest {
+    code: String,
+}
+
+#[derive(Serialize)]
+struct SessionResponse {
+    token: String,
+}
+
+#[derive(Serialize)]
+struct RefreshResponse {
+    changed: bool,
+    head_changed: bool,
+    discussion_changed: bool,
+    authorization_cleared: bool,
 }
 
 #[derive(PartialEq, Eq)]
@@ -106,7 +143,12 @@ enum LastEvent {
 }
 
 pub fn run(state_override: Option<PathBuf>) -> Result<()> {
+    if !std::io::stdout().is_terminal() {
+        anyhow::bail!("GUI requires a terminal to display its one-time sign-in code");
+    }
     let state_file = storage::resolve_path(state_override)?;
+    let bootstrap = random_secret()?;
+    let token = random_secret()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -116,25 +158,51 @@ pub fn run(state_override: Option<PathBuf>) -> Result<()> {
             .await
             .context("binding GUI to 127.0.0.1:8080")?;
         println!("Review Platform GUI: http://localhost:8080/");
-        axum::serve(listener, router(state_file))
-            .await
-            .context("serving GUI on 127.0.0.1:8080")
+        println!("One-time sign-in code: {bootstrap}");
+        let session = Session {
+            bootstrap: Some(bootstrap),
+            token,
+        };
+        axum::serve(
+            listener,
+            router(state_file, session, request_commands::refresh),
+        )
+        .await
+        .context("serving GUI on 127.0.0.1:8080")
     })
 }
 
-fn router(state_file: PathBuf) -> Router {
+fn random_secret() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("generating GUI secret: {error}"))?;
+    let mut result = String::with_capacity(64);
+    for byte in bytes {
+        write!(result, "{byte:02x}").context("formatting GUI secret")?;
+    }
+    Ok(result)
+}
+
+fn router(state_file: PathBuf, session: Session, refresh: Refresh) -> Router {
+    let state = Arc::new(AppState {
+        state_file,
+        session: Mutex::new(session),
+        refresh,
+    });
     Router::new()
         .route("/", get(index))
         .route("/api", get(api_info))
         .route("/api/hello", get(hello))
         .route("/api/requests", get(requests))
         .route("/api/requests/events", get(request_events))
+        .route("/api/session", get(check_session).post(start_session))
+        .route("/api/requests/refresh", post(refresh_request))
         .route("/assets/{*path}", get(asset))
-        .with_state(state_file)
-        .layer(from_fn(localhost_read_only))
+        .with_state(state)
+        .layer(from_fn(localhost_guard))
 }
 
-async fn localhost_read_only(request: Request<axum::body::Body>, next: Next) -> Response {
+async fn localhost_guard(request: Request<axum::body::Body>, next: Next) -> Response {
     let valid_host = request
         .headers()
         .get(header::HOST)
@@ -144,8 +212,22 @@ async fn localhost_read_only(request: Request<axum::body::Body>, next: Next) -> 
         });
     let mut response = if !valid_host {
         StatusCode::MISDIRECTED_REQUEST.into_response()
+    } else if *request.method() == Method::POST {
+        let host = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let origin = request
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok());
+        if origin.is_some_and(|value| value == format!("http://{}", host.to_ascii_lowercase())) {
+            next.run(request).await
+        } else {
+            StatusCode::FORBIDDEN.into_response()
+        }
     } else if !matches!(*request.method(), Method::GET | Method::HEAD) {
-        // Mutating API routes need lead authentication and cross-origin protection.
         StatusCode::METHOD_NOT_ALLOWED.into_response()
     } else {
         next.run(request).await
@@ -157,6 +239,158 @@ async fn localhost_read_only(request: Request<axum::body::Body>, next: Next) -> 
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+fn secret_matches(expected: &str, actual: &str) -> bool {
+    expected.as_bytes().ct_eq(actual.as_bytes()).into()
+}
+
+async fn start_session(
+    HttpState(state): HttpState<Arc<AppState>>,
+    Json(request): Json<SessionRequest>,
+) -> Result<Json<SessionResponse>, StatusCode> {
+    let mut session = state
+        .session
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !session
+        .bootstrap
+        .as_ref()
+        .is_some_and(|code| secret_matches(code, &request.code))
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    session.bootstrap = None;
+    Ok(Json(SessionResponse {
+        token: session.token.clone(),
+    }))
+}
+
+fn has_session(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| {
+            state.session.lock().is_ok_and(|session| {
+                session.bootstrap.is_none() && secret_matches(&session.token, token)
+            })
+        })
+}
+
+async fn check_session(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> StatusCode {
+    if has_session(&state, &headers) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::UNAUTHORIZED
+    }
+}
+
+async fn refresh_request(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(key): Json<PrKey>,
+) -> Result<Json<RefreshResponse>, (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    let state_file = state.state_file.clone();
+    let refresh = state.refresh;
+    let outcome = tokio::task::spawn_blocking(move || refresh(&state_file, &key))
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The refresh task failed.",
+            )
+        })?
+        .map_err(refresh_error)?;
+    let response = match outcome {
+        RefreshOutcome::Unchanged => RefreshResponse {
+            changed: false,
+            head_changed: false,
+            discussion_changed: false,
+            authorization_cleared: false,
+        },
+        RefreshOutcome::Updated {
+            head_changed,
+            discussion_changed,
+            authorization_cleared,
+        } => RefreshResponse {
+            changed: true,
+            head_changed,
+            discussion_changed,
+            authorization_cleared,
+        },
+    };
+    Ok(Json(response))
+}
+
+fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: message.into(),
+        }),
+    )
+}
+
+fn refresh_error(error: request_commands::RefreshError) -> (StatusCode, Json<ApiError>) {
+    use request_commands::RefreshError;
+    match error {
+        RefreshError::State(StateError::RequestNotFound(_)) => {
+            api_error(StatusCode::NOT_FOUND, "Review request no longer exists.")
+        }
+        RefreshError::State(StateError::RevisionMismatch { .. }) => api_error(
+            StatusCode::CONFLICT,
+            "Review inputs changed during refresh. Try again.",
+        ),
+        RefreshError::State(_) | RefreshError::Storage(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not update local review state.",
+        ),
+        RefreshError::Github(
+            GithubError::InvalidCredentials
+            | GithubError::InvalidTokenHeader
+            | GithubError::TokenNotUtf8,
+        ) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "Check REVIEW_PLATFORM_GITHUB_TOKEN_RO and restart the GUI.",
+        ),
+        RefreshError::Github(
+            GithubError::AuthenticationRequired { .. } | GithubError::PermissionDenied { .. },
+        ) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "Check GitHub read access and REVIEW_PLATFORM_GITHUB_TOKEN_RO.",
+        ),
+        RefreshError::Github(GithubError::RateLimited) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "GitHub rate limit reached. Try again later.",
+        ),
+        RefreshError::Github(GithubError::NotFound { .. }) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "The pull request was not found or is not accessible on GitHub.",
+        ),
+        RefreshError::Github(
+            GithubError::ObservationChanged
+            | GithubError::AuthorChanged { .. }
+            | GithubError::HeadChanged { .. }
+            | GithubError::PaginationChanged { .. },
+        ) => api_error(
+            StatusCode::CONFLICT,
+            "GitHub inputs changed during refresh. Try again.",
+        ),
+        RefreshError::Github(_) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "Could not refresh from GitHub. Check access and try again.",
+        ),
+    }
 }
 
 async fn api_info() -> impl IntoResponse {
@@ -173,9 +407,9 @@ async fn hello() -> impl IntoResponse {
 }
 
 async fn requests(
-    HttpState(state_file): HttpState<PathBuf>,
+    HttpState(state): HttpState<Arc<AppState>>,
 ) -> Result<Json<RequestList>, (StatusCode, Json<ApiError>)> {
-    read_request_list(state_file)
+    read_request_list(state.state_file.clone())
         .await
         .map(Json)
         .map_err(|error| {
@@ -183,19 +417,19 @@ async fn requests(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "Could not read local review state.",
+                    error: "Could not read local review state.".into(),
                 }),
             )
         })
 }
 
 async fn request_events(
-    HttpState(state_file): HttpState<PathBuf>,
+    HttpState(state): HttpState<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut ticker = interval(STATE_CHECK_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let updates = stream::unfold(
-        (state_file, ticker, None::<LastEvent>),
+        (state.state_file.clone(), ticker, None::<LastEvent>),
         |(state_file, mut ticker, mut previous)| async move {
             loop {
                 ticker.tick().await;
@@ -381,6 +615,253 @@ mod tests {
             .unwrap()
     }
 
+    fn test_router(path: PathBuf) -> Router {
+        router(
+            path,
+            Session {
+                bootstrap: Some("test-code".into()),
+                token: "test-token".into(),
+            },
+            request_commands::refresh,
+        )
+    }
+
+    fn fake_refresh(
+        path: &Path,
+        key: &PrKey,
+    ) -> Result<RefreshOutcome, request_commands::RefreshError> {
+        if key.number() == 16 {
+            return Err(GithubError::RateLimited.into());
+        }
+        let mut state = storage::load(path).unwrap();
+        let head = HeadSha::new("b".repeat(40)).unwrap();
+        let discussion = ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap();
+        let outcome = state.refresh(key, &head, &discussion)?;
+        storage::save(path, &state).unwrap();
+        Ok(outcome)
+    }
+
+    fn json_post(
+        uri: &str,
+        origin: Option<&str>,
+        bearer: Option<&str>,
+        json: &str,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::HOST, "localhost:8080")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(origin) = origin {
+            builder = builder.header(header::ORIGIN, origin);
+        }
+        if let Some(token) = bearer {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder.body(Body::from(json.to_owned())).unwrap()
+    }
+
+    #[test]
+    fn actions_require_one_time_session_and_same_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let head = HeadSha::new("a".repeat(40)).unwrap();
+        let discussion = ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap();
+        let mut state = State::default();
+        state.record_request(key.clone(), head.clone()).unwrap();
+        state.refresh(&key, &head, &discussion).unwrap();
+        state
+            .authorize(
+                &key,
+                &head,
+                InputRevision::new(2).unwrap(),
+                AuthorizationScope::OneRound,
+            )
+            .unwrap();
+        storage::save(&state_file, &state).unwrap();
+        let original = std::fs::read(&state_file).unwrap();
+        let app = router(
+            state_file.clone(),
+            Session {
+                bootstrap: Some("test-code".into()),
+                token: "test-token".into(),
+            },
+            fake_refresh,
+        );
+        test_runtime().block_on(async {
+            let session_path = "/api/session";
+            let refresh_path = "/api/requests/refresh";
+            let refresh_body = r#"{"repository":"owner/repo","number":15}"#;
+            for origin in [
+                None,
+                Some("null"),
+                Some("http://evil.example"),
+                Some("http://localhost:8081"),
+                Some("http://127.0.0.1:8080"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        session_path,
+                        origin,
+                        None,
+                        r#"{"code":"test-code"}"#,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "origin: {origin:?}"
+                );
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        refresh_path,
+                        origin,
+                        Some("test-token"),
+                        refresh_body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "origin: {origin:?}"
+                );
+            }
+            for token in [None, Some("test-token"), Some("wrong")] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        refresh_path,
+                        Some("http://localhost:8080"),
+                        token,
+                        refresh_body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    session_path,
+                    Some("http://localhost:8080"),
+                    None,
+                    r#"{"code":"wrong"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(std::fs::read(&state_file).unwrap(), original);
+
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    session_path,
+                    Some("http://localhost:8080"),
+                    None,
+                    r#"{"code":"test-code"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["token"],
+                "test-token"
+            );
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    session_path,
+                    Some("http://localhost:8080"),
+                    None,
+                    r#"{"code":"test-code"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            for token in [None, Some("wrong")] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        refresh_path,
+                        Some("http://localhost:8080"),
+                        token,
+                        refresh_body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            for origin in [
+                None,
+                Some("null"),
+                Some("http://evil.example"),
+                Some("http://localhost:8081"),
+                Some("http://127.0.0.1:8080"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        refresh_path,
+                        origin,
+                        Some("test-token"),
+                        refresh_body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    refresh_path,
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    r#"{"repository":"../bad","number":0}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    refresh_path,
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    r#"{"repository":"owner/repo","number":16}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(std::fs::read(&state_file).unwrap(), original);
+
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    refresh_path,
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    refresh_body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result["head_changed"], true);
+            assert_eq!(result["authorization_cleared"], true);
+            let saved = storage::load(&state_file).unwrap();
+            let request = saved.get(&key).unwrap();
+            assert_eq!(request.authorization(), Authorization::AwaitingLead);
+            assert_eq!(request.head_sha().to_string(), "b".repeat(40));
+        });
+    }
+
     fn http_request(method: Method, uri: &str, host: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(host) = host {
@@ -405,7 +886,7 @@ mod tests {
     #[test]
     fn router_enforces_loopback_host_and_read_only_methods() {
         let directory = tempfile::tempdir().unwrap();
-        let app = router(directory.path().join("state.json"));
+        let app = test_router(directory.path().join("state.json"));
         test_runtime().block_on(async {
             for host in ["localhost:8080", "LOCALHOST:8080", "127.0.0.1:8080"] {
                 for method in [Method::GET, Method::HEAD] {
@@ -427,7 +908,7 @@ mod tests {
                 assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
                 assert_response_headers(&response);
             }
-            for method in [Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS] {
+            for method in [Method::PUT, Method::DELETE, Method::OPTIONS] {
                 let response = app
                     .clone()
                     .oneshot(http_request(method, "/api", Some("localhost:8080")))
@@ -442,7 +923,7 @@ mod tests {
     #[test]
     fn router_serves_index_with_csp_and_rejects_unsafe_asset_paths() {
         let directory = tempfile::tempdir().unwrap();
-        let app = router(directory.path().join("state.json"));
+        let app = test_router(directory.path().join("state.json"));
         test_runtime().block_on(async {
             let response = app
                 .clone()
@@ -488,7 +969,7 @@ mod tests {
     fn request_endpoint_returns_empty_and_sorted_local_snapshots() {
         let directory = tempfile::tempdir().unwrap();
         let state_file = directory.path().join("state.json");
-        let app = router(state_file.clone());
+        let app = test_router(state_file.clone());
         test_runtime().block_on(async {
             let response = app
                 .clone()
@@ -571,7 +1052,7 @@ mod tests {
     fn request_events_send_changes_errors_and_recovery() {
         let directory = tempfile::tempdir().unwrap();
         let state_file = directory.path().join("state.json");
-        let app = router(state_file.clone());
+        let app = test_router(state_file.clone());
         test_runtime().block_on(async {
             let response = app
                 .oneshot(http_request(
