@@ -142,14 +142,14 @@ async fn localhost_read_only(request: Request<axum::body::Body>, next: Next) -> 
         .is_some_and(|host| {
             host.eq_ignore_ascii_case("localhost:8080") || host == "127.0.0.1:8080"
         });
-    if !valid_host {
-        return StatusCode::MISDIRECTED_REQUEST.into_response();
-    }
-    // Mutating API routes need lead authentication and cross-origin protection.
-    if !matches!(*request.method(), Method::GET | Method::HEAD) {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
-    }
-    let mut response = next.run(request).await;
+    let mut response = if !valid_host {
+        StatusCode::MISDIRECTED_REQUEST.into_response()
+    } else if !matches!(*request.method(), Method::GET | Method::HEAD) {
+        // Mutating API routes need lead authentication and cross-origin protection.
+        StatusCode::METHOD_NOT_ALLOWED.into_response()
+    } else {
+        next.run(request).await
+    };
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
@@ -364,11 +364,294 @@ fn serve_file(path: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use futures_util::StreamExt;
     use review_platform::{
-        CommentFingerprint, CommentHash, HeadSha, ObservedDiscussion, PrKey, State,
+        AuthorizationScope, CommentFingerprint, CommentHash, HeadSha, InputRevision,
+        ObservedDiscussion, PrKey, State,
     };
     use std::num::NonZeroU64;
     use std::time::{Duration, Instant};
+    use tower::ServiceExt;
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn http_request(method: Method, uri: &str, host: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(host) = host {
+            builder = builder.header(header::HOST, host);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn assert_response_headers(response: &Response) {
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+    }
+
+    #[test]
+    fn router_enforces_loopback_host_and_read_only_methods() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = router(directory.path().join("state.json"));
+        test_runtime().block_on(async {
+            for host in ["localhost:8080", "LOCALHOST:8080", "127.0.0.1:8080"] {
+                for method in [Method::GET, Method::HEAD] {
+                    let response = app
+                        .clone()
+                        .oneshot(http_request(method, "/api", Some(host)))
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::OK, "host: {host}");
+                    assert_response_headers(&response);
+                }
+            }
+            for host in [None, Some("evil.example:8080"), Some("localhost:8081")] {
+                let response = app
+                    .clone()
+                    .oneshot(http_request(Method::GET, "/api", host))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+                assert_response_headers(&response);
+            }
+            for method in [Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS] {
+                let response = app
+                    .clone()
+                    .oneshot(http_request(method, "/api", Some("localhost:8080")))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+                assert_response_headers(&response);
+            }
+        });
+    }
+
+    #[test]
+    fn router_serves_index_with_csp_and_rejects_unsafe_asset_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = router(directory.path().join("state.json"));
+        test_runtime().block_on(async {
+            let response = app
+                .clone()
+                .oneshot(http_request(Method::GET, "/", Some("localhost:8080")))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_response_headers(&response);
+            let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap();
+            for directive in [
+                "default-src 'self'",
+                "connect-src 'self'",
+                "object-src 'none'",
+                "frame-ancestors 'none'",
+            ] {
+                assert!(
+                    csp.contains(directive),
+                    "missing CSP directive: {directive}"
+                );
+            }
+
+            for path in [
+                "/assets/../index.html",
+                "/assets/%2e%2e/index.html",
+                "/assets//index.js",
+                "/assets/dir//index.js",
+                "/assets/unknown.xyz",
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(http_request(Method::GET, path, Some("localhost:8080")))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "path: {path}");
+                assert_response_headers(&response);
+            }
+        });
+    }
+
+    #[test]
+    fn request_endpoint_returns_empty_and_sorted_local_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let app = router(state_file.clone());
+        test_runtime().block_on(async {
+            let response = app
+                .clone()
+                .oneshot(http_request(
+                    Method::GET,
+                    "/api/requests",
+                    Some("localhost:8080"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_response_headers(&response);
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"requests": []})
+            );
+
+            let mut state = State::default();
+            let head = HeadSha::new("a".repeat(40)).unwrap();
+            for (repository, number) in [("z/repo", 1), ("a/repo", 9), ("a/repo", 2)] {
+                state
+                    .record_request(PrKey::new(repository, number).unwrap(), head.clone())
+                    .unwrap();
+            }
+            let discussion = ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap();
+            for (number, scope) in [
+                (2, AuthorizationScope::PrCycle),
+                (9, AuthorizationScope::OneRound),
+            ] {
+                let key = PrKey::new("a/repo", number).unwrap();
+                state.refresh(&key, &head, &discussion).unwrap();
+                state
+                    .authorize(&key, &head, InputRevision::new(2).unwrap(), scope)
+                    .unwrap();
+            }
+            storage::save(&state_file, &state).unwrap();
+
+            let response = app
+                .oneshot(http_request(
+                    Method::GET,
+                    "/api/requests",
+                    Some("localhost:8080"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let requests = body["requests"].as_array().unwrap();
+            assert_eq!(
+                (
+                    requests[0]["repository"].as_str(),
+                    requests[0]["number"].as_u64()
+                ),
+                (Some("a/repo"), Some(2))
+            );
+            assert_eq!(
+                (
+                    requests[1]["repository"].as_str(),
+                    requests[1]["number"].as_u64()
+                ),
+                (Some("a/repo"), Some(9))
+            );
+            assert_eq!(
+                (
+                    requests[2]["repository"].as_str(),
+                    requests[2]["number"].as_u64()
+                ),
+                (Some("z/repo"), Some(1))
+            );
+            assert_eq!(requests[0]["authorization"], "pr_cycle");
+            assert_eq!(requests[1]["authorization"], "one_round");
+            assert_eq!(requests[2]["authorization"], "awaiting_lead");
+            assert!(requests[0]["latest_round"].is_null());
+        });
+    }
+
+    #[test]
+    fn request_events_send_changes_errors_and_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let app = router(state_file.clone());
+        test_runtime().block_on(async {
+            let response = app
+                .oneshot(http_request(
+                    Method::GET,
+                    "/api/requests/events",
+                    Some("localhost:8080"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_response_headers(&response);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/event-stream"
+            );
+            let mut stream = response.into_body().into_data_stream();
+
+            let first = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                std::str::from_utf8(&first).unwrap(),
+                "event: requests\ndata: {\"requests\":[]}\n\n"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1200), stream.next())
+                    .await
+                    .is_err()
+            );
+
+            let mut state = State::default();
+            state
+                .record_request(
+                    PrKey::new("owner/repo", 15).unwrap(),
+                    HeadSha::new("a".repeat(40)).unwrap(),
+                )
+                .unwrap();
+            storage::save(&state_file, &state).unwrap();
+            let changed = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let changed_text = std::str::from_utf8(&changed).unwrap();
+            let json = changed_text
+                .strip_prefix("event: requests\ndata: ")
+                .unwrap()
+                .strip_suffix("\n\n")
+                .unwrap();
+            let snapshot: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert_eq!(snapshot["requests"][0]["repository"], "owner/repo");
+            assert_eq!(snapshot["requests"][0]["number"], 15);
+
+            std::fs::write(&state_file, b"invalid state").unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                std::str::from_utf8(&error).unwrap(),
+                "event: state_error\ndata: Could not read local review state.\n\n"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1200), stream.next())
+                    .await
+                    .is_err()
+            );
+
+            storage::save(&state_file, &state).unwrap();
+            let recovered = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovered, changed);
+        });
+    }
 
     #[test]
     fn request_snapshot_exposes_discussion_counts_without_fingerprints() {
@@ -473,6 +756,22 @@ mod tests {
         };
         write_state(&state);
         assert_eq!(snapshot(), "unknown");
+        let summary = serde_json::to_value(request_list(&state_file).unwrap()).unwrap()["requests"]
+            [0]["latest_round"]
+            .clone();
+        assert_eq!(
+            summary,
+            serde_json::json!({
+                "id": "r-test",
+                "status": "running",
+                "cleanup_pending": true,
+                "cleanup_status": "unknown",
+                "head_sha": "a".repeat(40),
+                "revision": 2,
+                "model": "model-alpha",
+                "agent": "claude"
+            })
+        );
         assert!(!runner.parent().unwrap().exists());
 
         let guard = storage::try_lock(&runner).unwrap();
