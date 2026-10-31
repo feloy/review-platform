@@ -626,7 +626,7 @@ fn new_round_dir(state_path: &Path) -> Result<PathBuf> {
     Ok(directory.keep())
 }
 
-fn round_path(state_path: &Path, id: &RoundId) -> PathBuf {
+pub(crate) fn round_path(state_path: &Path, id: &RoundId) -> PathBuf {
     private_parent(state_path).join("rounds").join(id.as_str())
 }
 

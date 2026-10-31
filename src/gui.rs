@@ -1,6 +1,6 @@
 //! Loopback HTTP server for the embedded operator UI and local request snapshots.
 
-use crate::storage;
+use crate::{review_commands, storage};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -15,7 +15,10 @@ use axum::{
 };
 use futures_util::{Stream, stream};
 use include_dir::{Dir, include_dir};
-use review_platform::{Authorization, CommentSource, review::RoundStatus};
+use review_platform::{
+    Authorization, CommentSource,
+    review::{RoundRecord, RoundStatus},
+};
 use serde::Serialize;
 use std::{
     convert::Infallible,
@@ -75,10 +78,20 @@ struct RoundSummary {
     id: String,
     status: RoundStatus,
     cleanup_pending: bool,
+    cleanup_status: CleanupStatus,
     head_sha: String,
     revision: u64,
     model: String,
     agent: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CleanupStatus {
+    Complete,
+    InProgress,
+    NeedsAttention,
+    Unknown,
 }
 
 #[derive(Serialize)]
@@ -233,35 +246,78 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
     recorded.sort_by_key(|request| (request.key().repository(), request.key().number()));
     let requests = recorded
         .into_iter()
-        .map(|request| RequestSummary {
-            repository: request.key().repository().to_owned(),
-            number: request.key().number(),
-            head_sha: request.head_sha().to_string(),
-            revision: request.revision().get(),
-            authorization: request.authorization(),
-            discussion: request.discussion().map(|discussion| DiscussionSummary {
-                issue_comments: discussion.count(CommentSource::IssueComment),
-                review_comments: discussion.count(CommentSource::ReviewComment),
-                review_bodies: discussion.count(CommentSource::Review),
-            }),
-            validated_model: request
-                .model_validation()
-                .map(|validation| ValidatedModelSummary {
-                    model: validation.model().to_string(),
-                    agent: validation.agent().to_string(),
+        .map(|request| -> Result<RequestSummary> {
+            Ok(RequestSummary {
+                repository: request.key().repository().to_owned(),
+                number: request.key().number(),
+                head_sha: request.head_sha().to_string(),
+                revision: request.revision().get(),
+                authorization: request.authorization(),
+                discussion: request.discussion().map(|discussion| DiscussionSummary {
+                    issue_comments: discussion.count(CommentSource::IssueComment),
+                    review_comments: discussion.count(CommentSource::ReviewComment),
+                    review_bodies: discussion.count(CommentSource::Review),
                 }),
-            latest_round: state.latest_round(request.key()).map(|round| RoundSummary {
-                id: round.id().to_string(),
-                status: round.status(),
-                cleanup_pending: round.cleanup_pending(),
-                head_sha: round.head_sha().to_string(),
-                revision: round.revision().get(),
-                model: round.model().to_string(),
-                agent: round.agent().to_string(),
-            }),
+                validated_model: request.model_validation().map(|validation| {
+                    ValidatedModelSummary {
+                        model: validation.model().to_string(),
+                        agent: validation.agent().to_string(),
+                    }
+                }),
+                latest_round: state
+                    .latest_round(request.key())
+                    .map(|round| -> Result<RoundSummary> {
+                        Ok(RoundSummary {
+                            id: round.id().to_string(),
+                            status: round.status(),
+                            cleanup_pending: round.cleanup_pending(),
+                            cleanup_status: cleanup_status(state_file, round)?,
+                            head_sha: round.head_sha().to_string(),
+                            revision: round.revision().get(),
+                            model: round.model().to_string(),
+                            agent: round.agent().to_string(),
+                        })
+                    })
+                    .transpose()?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     Ok(RequestList { requests })
+}
+
+fn needs_cleanup_check(round: &RoundRecord) -> bool {
+    match round.status() {
+        RoundStatus::Starting | RoundStatus::Running => true,
+        RoundStatus::AwaitingDecision
+        | RoundStatus::Publishing
+        | RoundStatus::PublicationUnknown
+        | RoundStatus::Published
+        | RoundStatus::Rejected
+        | RoundStatus::Failed
+        | RoundStatus::Interrupted => round.cleanup_pending(),
+    }
+}
+
+fn cleanup_status(state_file: &Path, round: &RoundRecord) -> Result<CleanupStatus> {
+    if !needs_cleanup_check(round) {
+        return Ok(CleanupStatus::Complete);
+    }
+
+    let runner_lock = review_commands::round_path(state_file, round.id()).join("runner");
+    match storage::probe_lock(&runner_lock) {
+        Ok(storage::LockProbe::Held) => Ok(CleanupStatus::InProgress),
+        Ok(storage::LockProbe::Available(_guard)) => {
+            // The runner might have saved its final state after our initial read.
+            // Hold the lock while rereading so a new runner cannot race this check.
+            let state = storage::load(state_file)?;
+            Ok(match state.round(round.id()) {
+                Some(current) if needs_cleanup_check(current) => CleanupStatus::NeedsAttention,
+                Some(_) => CleanupStatus::Complete,
+                None => CleanupStatus::Unknown,
+            })
+        }
+        Err(_) => Ok(CleanupStatus::Unknown),
+    }
 }
 
 async fn index() -> Response {
@@ -312,6 +368,7 @@ mod tests {
         CommentFingerprint, CommentHash, HeadSha, ObservedDiscussion, PrKey, State,
     };
     use std::num::NonZeroU64;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn request_snapshot_exposes_discussion_counts_without_fingerprints() {
@@ -357,5 +414,111 @@ mod tests {
         );
         assert!(request["validated_model"].is_null());
         assert!(request["latest_round"].is_null());
+    }
+
+    #[test]
+    fn cleanup_status_tracks_runner_lock_and_unfinished_rounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let runner = directory.path().join("rounds/r-test/runner");
+        let mut state = serde_json::json!({
+            "schema_version": 6,
+            "requests": [{
+                "key": {"repository": "owner/repo", "number": 15},
+                "head_sha": "a".repeat(40),
+                "authorization": "awaiting_lead",
+                "revision": 2,
+                "discussion": {"author_id": 7, "comments": []},
+                "model_validation": null
+            }],
+            "rounds": [{
+                "id": "r-test",
+                "key": {"repository": "owner/repo", "number": 15},
+                "status": "running",
+                "sandbox": "rp-722d74657374",
+                "head_sha": "a".repeat(40),
+                "revision": 2,
+                "discussion": {"author_id": 7, "comments": []},
+                "model": "model-alpha",
+                "agent": "claude",
+                "gateway": "test-gateway",
+                "workspace": "default",
+                "driver": "vm",
+                "model_provider": "test-model-provider",
+                "github_provider": "test-github-readonly",
+                "prompt_sha256": "a".repeat(64),
+                "format_sha256": "b".repeat(64),
+                "archive_sha256": "c".repeat(64),
+                "archive_config_sha256": "d".repeat(64),
+                "execution_sha256": "e".repeat(64),
+                "runner_sha256": "f".repeat(64),
+                "created_at": 1,
+                "dispatched_at": 2,
+                "finished_at": null,
+                "freshness": null,
+                "failure": null,
+                "incomplete_log": false,
+                "cleanup_pending": true
+            }]
+        });
+        let write_state = |value: &serde_json::Value| {
+            std::fs::write(&state_file, serde_json::to_vec(value).unwrap()).unwrap();
+        };
+        let snapshot = || {
+            serde_json::to_value(request_list(&state_file).unwrap()).unwrap()["requests"][0]
+                ["latest_round"]["cleanup_status"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        write_state(&state);
+        assert_eq!(snapshot(), "unknown");
+        assert!(!runner.parent().unwrap().exists());
+
+        let guard = storage::try_lock(&runner).unwrap();
+        assert_eq!(snapshot(), "in_progress");
+        state["rounds"][0]["status"] = "starting".into();
+        state["rounds"][0]["dispatched_at"] = serde_json::Value::Null;
+        write_state(&state);
+        assert_eq!(snapshot(), "in_progress");
+
+        state["rounds"][0]["status"] = "awaiting_decision".into();
+        state["rounds"][0]["dispatched_at"] = 2.into();
+        state["rounds"][0]["finished_at"] = 3.into();
+        state["rounds"][0]["freshness"] = "fresh".into();
+        write_state(&state);
+        assert_eq!(snapshot(), "in_progress");
+        drop(guard);
+
+        // A concurrently spawned child can briefly inherit the lock before
+        // exec closes its descriptor, so release need not be instantaneous.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = snapshot();
+            if status != "in_progress" || Instant::now() >= deadline {
+                assert_eq!(status, "needs_attention");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        state["rounds"][0]["status"] = "starting".into();
+        state["rounds"][0]["dispatched_at"] = serde_json::Value::Null;
+        state["rounds"][0]["finished_at"] = serde_json::Value::Null;
+        state["rounds"][0]["freshness"] = serde_json::Value::Null;
+        write_state(&state);
+        assert_eq!(snapshot(), "needs_attention");
+        let probe = storage::probe_lock(&runner).unwrap();
+        assert!(matches!(probe, storage::LockProbe::Available(_)));
+        assert_eq!(snapshot(), "needs_attention");
+        drop(probe);
+
+        state["rounds"][0]["status"] = "awaiting_decision".into();
+        state["rounds"][0]["dispatched_at"] = 2.into();
+        state["rounds"][0]["finished_at"] = 3.into();
+        state["rounds"][0]["freshness"] = "fresh".into();
+        state["rounds"][0]["cleanup_pending"] = false.into();
+        write_state(&state);
+        assert_eq!(snapshot(), "complete");
     }
 }

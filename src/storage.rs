@@ -14,6 +14,12 @@ pub struct StateLock {
     _file: File,
 }
 
+/// Whether a nonblocking probe found an operation holding its lock.
+pub enum LockProbe {
+    Held,
+    Available(StateLock),
+}
+
 #[cfg(windows)]
 fn lock_is_busy(error: &std::io::Error) -> bool {
     // Windows reports exclusive-open contention as sharing or lock violations.
@@ -90,6 +96,40 @@ fn pr_lock_path(state_path: &Path, key: &PrKey) -> PathBuf {
 /// Nonblocking process lock used to keep recovery from stopping a live runner.
 pub fn try_lock(path: &Path) -> Result<StateLock> {
     try_lock_with_message(path, "review runner is still active")
+}
+
+/// Inspect an existing operation lock without creating its file or directory.
+pub fn probe_lock(path: &Path) -> std::io::Result<LockProbe> {
+    let mut lock_name = path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    #[cfg(windows)]
+    {
+        // The default sharing mode allows concurrent GUI probes; a runner's
+        // exclusive open still prevents access until it releases the lock.
+        let mut options = OpenOptions::new();
+        options.read(true);
+        match options.open(lock_path) {
+            Ok(file) => Ok(LockProbe::Available(StateLock { _file: file })),
+            Err(error) if lock_is_busy(&error) => Ok(LockProbe::Held),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(unix)]
+    {
+        let file = File::open(lock_path)?;
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
+            Ok(()) => Ok(LockProbe::Available(StateLock { _file: file })),
+            Err(error) => {
+                let error = std::io::Error::from(error);
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    Ok(LockProbe::Held)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
 }
 
 fn try_lock_with_message(path: &Path, busy_message: &'static str) -> Result<StateLock> {
