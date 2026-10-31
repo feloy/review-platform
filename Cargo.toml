@@ -20,6 +20,9 @@ thiserror = "2"
 tokio = { version = "1.54.1", features = ["net", "rt", "time"] }
 ureq = { version = "3.5.0", features = ["platform-verifier"] }
 
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 rustix = { version = "1.1.5", features = ["fs", "process"] }
