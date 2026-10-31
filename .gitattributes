@@ -1,0 +1,2 @@
+# Vite bundles are generated from the reviewable UI source.
+ui/dist/assets/*.js -diff

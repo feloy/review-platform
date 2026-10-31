@@ -453,7 +453,8 @@ pub fn recover_review(
             .cloned()
             .with_context(|| format!("no interrupted round needs recovery for {key}"))?
     };
-    let _runner_lock = storage::try_lock(&round_path(&state_path, record.id()).join("runner"))?;
+    let _runner_lock =
+        storage::try_recovery_lock(&round_path(&state_path, record.id()).join("runner"))?;
     {
         let _lock = storage::lock(&state_path)?;
         let state = storage::load(&state_path)?;
@@ -626,7 +627,7 @@ fn new_round_dir(state_path: &Path) -> Result<PathBuf> {
     Ok(directory.keep())
 }
 
-fn round_path(state_path: &Path, id: &RoundId) -> PathBuf {
+pub(crate) fn round_path(state_path: &Path, id: &RoundId) -> PathBuf {
     private_parent(state_path).join("rounds").join(id.as_str())
 }
 

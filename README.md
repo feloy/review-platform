@@ -15,7 +15,7 @@ Another round still needs a valid lead model choice.
 
 ## Run the Rust prototype
 
-The runnable prototype is a local operator CLI for recording PR review requests,
+The runnable prototype is a local operator command for recording PR review requests,
 refreshing their GitHub inputs, recording lead authorization,
 running one review at a time through an existing OpenShell gateway,
 inspecting private drafts, and publishing or rejecting them.
@@ -39,6 +39,70 @@ Replace uppercase placeholders with values shown by the preceding commands.
 Inspect the current head and revision before authorizing or validating a model.
 If `prepare-review` refreshes inputs after one-round authorization,
 inspect the new values and authorize again.
+
+### Run the graphical shell
+
+The graphical interface is a Svelte and Material Web page showing locally recorded PR requests.
+It shows each request's recorded head, input revision, authorization, and latest round.
+Expand a request to see observed author discussion counts,
+the current validated model and agent, and the latest round's recorded inputs and model.
+The list comes from the local state file.
+After signing in, use **Refresh from GitHub** on a request to fetch its current head
+and author discussion, using the same rules as the `refresh` command.
+Changed inputs may clear one-round authorization and model validation.
+The GUI checks the round's runner lock before warning that cleanup needs attention.
+If the runner lock cannot be inspected, it reports that cleanup status is unavailable.
+Review workflow operations remain available through the CLI while the GUI grows.
+
+```sh
+review-platform gui
+# Open http://localhost:8080/ in a browser.
+# Enter the one-time sign-in code shown in the terminal to enable actions.
+# Inspect the current local request list.
+curl http://localhost:8080/api/requests
+# Watch request updates from the server.
+curl -N http://localhost:8080/api/requests/events
+```
+
+The command serves the compiled HTML, JavaScript, and CSS from the executable
+and listens only on IPv4 loopback at port 8080.
+The command requires an interactive terminal to display its one-time code.
+It trusts the OS user who launches it as the lead:
+anyone with access to that terminal and code can start the browser session.
+Keep the terminal and browser session private.
+The code can be used once, and the session is tied to the browser tab and server launch;
+reloads in that tab retain it.
+If the session is lost, restart the GUI for a new code.
+The GUI uses the GitHub credentials available when it starts.
+`GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
+Each request includes optional discussion counts and model validation,
+plus a summary of its latest round when one exists.
+`GET /api/requests/events` is a server-sent event stream.
+It sends a `requests` event with the same JSON snapshot on connection
+and whenever displayed local state or runner activity changes,
+within about one second of the change.
+It sends `state_error` if the local state cannot be read,
+then resumes snapshots when the read succeeds.
+The browser reconnects automatically if the stream is interrupted;
+reloading the page also starts a new connection.
+`/api` reports the API name and version, and `/api/hello` remains available.
+The read-only endpoints do not require sign-in.
+`POST /api/session` exchanges the one-time code for a launch-scoped session token.
+`POST /api/requests/refresh` requires that token and a same-origin request;
+the server rejects cross-origin and missing-origin POST requests.
+
+Keep the compiled UI in `ui/dist` under version control
+so Rust installation does not need to run the frontend build.
+To change the UI, use Node 24 and rebuild the assets before compiling Rust:
+
+```sh
+cd ui
+npm ci
+npm test
+npm run build
+cd ..
+cargo install --path . --locked --force
+```
 
 ### Start a review for a new PR
 
@@ -157,6 +221,8 @@ except `.` and `..`.
 Repository names and head SHAs are normalized to lowercase,
 including when loaded from the JSON state file.
 
+- `gui` serves the embedded request list and local API
+  over HTTP on `localhost:8080` until interrupted.
 - `request REPOSITORY PR HEAD_SHA` manually records a review request and its current PR head.
   A new request starts in `awaiting lead authorization`.
   Repeating the same head changes nothing.
@@ -315,7 +381,8 @@ including when loaded from the JSON state file.
   so an unconfirmed review cannot be mistaken for a new author comment.
 - `recover-review REPOSITORY PR` stops and deletes the latest interrupted
   or cleanup-pending sandbox without starting an agent.
-  It refuses recovery while that round's runner is still active.
+  It briefly retries the runner lock to allow a GUI probe to finish,
+  then refuses recovery if the runner is still active.
   It also refuses promptly while another operation holds that PR's lock.
   It does not restore consumed one-round authorization.
 - `help` prints the command summary; `help COMMAND` prints help for one command.

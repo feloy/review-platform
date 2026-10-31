@@ -1,6 +1,8 @@
 //! Operator CLI for PR authorization, review rounds, and draft decisions.
 
+mod gui;
 mod publication_commands;
+mod request_commands;
 mod review_commands;
 mod storage;
 
@@ -38,6 +40,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve the local graphical interface and API over HTTP.
+    Gui,
     /// Manually record a PR review request at its current head SHA.
     Request {
         repository: String,
@@ -193,6 +197,7 @@ fn run(cli: Cli) -> Result<()> {
         command,
     } = cli;
     match command {
+        Command::Gui => gui::run(state_file)?,
         Command::Request {
             repository,
             pr,
@@ -222,36 +227,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Refresh { repository, pr } => {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
-            let _pr_lock = storage::pr_lock(&state_file, &key)?;
-            let state = storage::load(&state_file)?;
-            let prior_revision = state
-                .get(&key)
-                .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
-                .revision();
-            let client = github::GithubClient::new()?;
-            let observation =
-                client.observe_pull_excluding(&key, &state.confirmed_review_ids(&key))?;
-            let _lock = storage::lock(&state_file)?;
-            let mut state = storage::load(&state_file)?;
-            let current_revision = state
-                .get(&key)
-                .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
-                .revision();
-            if current_revision != prior_revision {
-                return Err(StateError::RevisionMismatch {
-                    inspected: prior_revision,
-                    recorded: current_revision,
-                }
-                .into());
-            }
-            let outcome = state.refresh(
-                observation.key(),
-                observation.head_sha(),
-                observation.discussion(),
-            )?;
-            if outcome != RefreshOutcome::Unchanged {
-                storage::save(&state_file, &state)?;
-            }
+            let outcome = request_commands::refresh(&state_file, &key)?;
             match outcome {
                 RefreshOutcome::Unchanged => println!("{key}: inputs unchanged."),
                 RefreshOutcome::Updated {
