@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 
 /// Advisory process lock kept on a stable sibling file while state is read and saved.
@@ -17,7 +18,7 @@ pub struct StateLock {
 /// Whether a nonblocking probe found an operation holding its lock.
 pub enum LockProbe {
     Held,
-    Available(StateLock),
+    Available,
 }
 
 #[cfg(windows)]
@@ -98,6 +99,21 @@ pub fn try_lock(path: &Path) -> Result<StateLock> {
     try_lock_with_message(path, "review runner is still active")
 }
 
+/// Allow a short-lived GUI probe to finish before refusing recovery.
+pub fn try_recovery_lock(path: &Path) -> Result<StateLock> {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        if let Some(lock) = try_lock_once(path)? {
+            return Ok(lock);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("review runner is still active");
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
 /// Inspect an existing operation lock without creating its file or directory.
 pub fn probe_lock(path: &Path) -> std::io::Result<LockProbe> {
     let mut lock_name = path.as_os_str().to_os_string();
@@ -110,7 +126,7 @@ pub fn probe_lock(path: &Path) -> std::io::Result<LockProbe> {
         let mut options = OpenOptions::new();
         options.read(true);
         match options.open(lock_path) {
-            Ok(file) => Ok(LockProbe::Available(StateLock { _file: file })),
+            Ok(_file) => Ok(LockProbe::Available),
             Err(error) if lock_is_busy(&error) => Ok(LockProbe::Held),
             Err(error) => Err(error),
         }
@@ -119,7 +135,7 @@ pub fn probe_lock(path: &Path) -> std::io::Result<LockProbe> {
     {
         let file = File::open(lock_path)?;
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
-            Ok(()) => Ok(LockProbe::Available(StateLock { _file: file })),
+            Ok(()) => Ok(LockProbe::Available),
             Err(error) => {
                 let error = std::io::Error::from(error);
                 if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -133,6 +149,10 @@ pub fn probe_lock(path: &Path) -> std::io::Result<LockProbe> {
 }
 
 fn try_lock_with_message(path: &Path, busy_message: &'static str) -> Result<StateLock> {
+    try_lock_once(path)?.ok_or_else(|| anyhow::anyhow!(busy_message))
+}
+
+fn try_lock_once(path: &Path) -> Result<Option<StateLock>> {
     let parent = parent_dir(path);
     fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
     let mut lock_name = path.as_os_str().to_os_string();
@@ -144,30 +164,25 @@ fn try_lock_with_message(path: &Path, busy_message: &'static str) -> Result<Stat
     {
         use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(0);
-        let file = options.open(&lock_path).map_err(|error| {
-            if lock_is_busy(&error) {
-                anyhow::anyhow!(busy_message)
-            } else {
-                anyhow::Error::new(error).context(format!("locking {}", lock_path.display()))
-            }
-        })?;
-        Ok(StateLock { _file: file })
+        match options.open(&lock_path) {
+            Ok(file) => Ok(Some(StateLock { _file: file })),
+            Err(error) if lock_is_busy(&error) => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("locking {}", lock_path.display())),
+        }
     }
     #[cfg(unix)]
     {
         let file = options
             .open(&lock_path)
             .with_context(|| format!("opening lock {}", lock_path.display()))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
-            |error| {
-                if std::io::Error::from(error).kind() == std::io::ErrorKind::WouldBlock {
-                    anyhow::anyhow!(busy_message)
-                } else {
-                    anyhow::Error::new(error).context(format!("locking {}", lock_path.display()))
-                }
-            },
-        )?;
-        Ok(StateLock { _file: file })
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(StateLock { _file: file })),
+            Err(error) if std::io::Error::from(error).kind() == std::io::ErrorKind::WouldBlock => {
+                Ok(None)
+            }
+            Err(error) => Err(anyhow::Error::new(error))
+                .with_context(|| format!("locking {}", lock_path.display())),
+        }
     }
 }
 
@@ -284,6 +299,41 @@ mod tests {
         assert_eq!(error.to_string(), "review runner is still active");
         drop(held);
         assert!(try_lock(&path).is_ok());
+    }
+
+    #[test]
+    fn recovery_waits_for_a_short_lived_gui_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let checked = dir.path().join("checked");
+        fs::write(dir.path().join("checked.lock"), b"").unwrap();
+        assert!(matches!(
+            probe_lock(&checked).unwrap(),
+            LockProbe::Available
+        ));
+        assert!(try_recovery_lock(&checked).is_ok());
+
+        let path = dir.path().join("runner");
+        fs::write(dir.path().join("runner.lock"), b"").unwrap();
+        // Hold the same kind of short-lived handle that a GUI probe acquires.
+        let probe = File::open(dir.path().join("runner.lock")).unwrap();
+        #[cfg(unix)]
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::LockShared).unwrap();
+        let (started, started_rx) = mpsc::channel();
+        let (result, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            result.send(try_recovery_lock(&path)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result_rx.recv_timeout(Duration::from_millis(25)).is_err());
+        drop(probe);
+        assert!(
+            result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_ok()
+        );
+        worker.join().unwrap();
     }
 
     #[test]

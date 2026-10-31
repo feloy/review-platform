@@ -306,9 +306,9 @@ fn cleanup_status(state_file: &Path, round: &RoundRecord) -> Result<CleanupStatu
     let runner_lock = review_commands::round_path(state_file, round.id()).join("runner");
     match storage::probe_lock(&runner_lock) {
         Ok(storage::LockProbe::Held) => Ok(CleanupStatus::InProgress),
-        Ok(storage::LockProbe::Available(_guard)) => {
+        Ok(storage::LockProbe::Available) => {
             // The runner might have saved its final state after our initial read.
-            // Hold the lock while rereading so a new runner cannot race this check.
+            // The probe has released its lock before this reread.
             let state = storage::load(state_file)?;
             Ok(match state.round(round.id()) {
                 Some(current) if needs_cleanup_check(current) => CleanupStatus::NeedsAttention,
@@ -509,9 +509,8 @@ mod tests {
         write_state(&state);
         assert_eq!(snapshot(), "needs_attention");
         let probe = storage::probe_lock(&runner).unwrap();
-        assert!(matches!(probe, storage::LockProbe::Available(_)));
+        assert!(matches!(probe, storage::LockProbe::Available));
         assert_eq!(snapshot(), "needs_attention");
-        drop(probe);
 
         state["rounds"][0]["status"] = "awaiting_decision".into();
         state["rounds"][0]["dispatched_at"] = 2.into();
