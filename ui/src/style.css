@@ -102,6 +102,48 @@ h1 {
   line-height: 1.5;
 }
 
+.sign-in {
+  margin-bottom: 20px;
+  padding: 20px 28px;
+  border: 1px solid #e1e2ec;
+  border-radius: 18px;
+  background: #fff;
+}
+
+.sign-in p {
+  margin: 10px 0;
+  color: #5b5963;
+}
+
+.sign-in form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.sign-in input {
+  width: min(100%, 360px);
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid #74777f;
+  border-radius: 4px;
+  font: inherit;
+}
+
+.action-note {
+  margin: 0;
+  padding: 0 28px 12px;
+  color: #5b5963;
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.action-error,
+.sign-in .action-error {
+  color: #a1251b;
+}
+
 .queue {
   overflow: hidden;
   border: 1px solid #e1e2ec;
