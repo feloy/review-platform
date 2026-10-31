@@ -453,7 +453,8 @@ pub fn recover_review(
             .cloned()
             .with_context(|| format!("no interrupted round needs recovery for {key}"))?
     };
-    let _runner_lock = storage::try_lock(&round_path(&state_path, record.id()).join("runner"))?;
+    let _runner_lock =
+        storage::try_recovery_lock(&round_path(&state_path, record.id()).join("runner"))?;
     {
         let _lock = storage::lock(&state_path)?;
         let state = storage::load(&state_path)?;

@@ -368,7 +368,8 @@ including when loaded from the JSON state file.
   so an unconfirmed review cannot be mistaken for a new author comment.
 - `recover-review REPOSITORY PR` stops and deletes the latest interrupted
   or cleanup-pending sandbox without starting an agent.
-  It refuses recovery while that round's runner is still active.
+  It briefly retries the runner lock to allow a GUI probe to finish,
+  then refuses recovery if the runner is still active.
   It also refuses promptly while another operation holds that PR's lock.
   It does not restore consumed one-round authorization.
 - `help` prints the command summary; `help COMMAND` prints help for one command.
