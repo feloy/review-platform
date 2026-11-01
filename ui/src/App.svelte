@@ -97,7 +97,7 @@
       }
       const result = await response.json();
       requestActions[requestId] = { pending: false, message: successMessage(result), error: false };
-      return true;
+      return result;
     } catch {
       requestActions[requestId] = { pending: false, message: 'Could not connect to the local API. Try again.', error: true };
       return false;
@@ -127,6 +127,25 @@
     return performRequestAction(requestId, 'revoke',
       { repository: request.repository, number: request.number },
       () => 'Authorization revoked.', 'Could not revoke authorization.');
+  }
+
+  function prepareReview(request, requestId) {
+    return performRequestAction(requestId, 'prepare',
+      { repository: request.repository, number: request.number },
+      () => 'Review preparation updated.', 'Could not prepare the review.');
+  }
+
+  function validateModel(request, requestId, preparation, model) {
+    return performRequestAction(requestId, 'validate-model', {
+      key: { repository: request.repository, number: request.number },
+      model,
+      head_sha: preparation.head_sha,
+      revision: preparation.revision,
+      rules: {
+        authorization: preparation.authorization,
+        configuration_sha256: preparation.configuration_sha256,
+      },
+    }, () => 'Review model validated.', 'Could not validate the review model.');
   }
 
   onMount(() => {
@@ -226,7 +245,9 @@
           <RequestItem {request} signedIn={Boolean(sessionToken)} action={requestActions[requestId]}
             onRefresh={() => refreshFromGithub(request, requestId)}
             onAuthorize={(inspected, scope) => authorize(inspected, requestId, scope)}
-            onRevoke={() => revoke(request, requestId)} />
+            onRevoke={() => revoke(request, requestId)}
+            onPrepare={() => prepareReview(request, requestId)}
+            onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)} />
         {/each}
       </ul>
     {/if}

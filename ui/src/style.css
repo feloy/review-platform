@@ -273,7 +273,8 @@ h2 {
   padding: 0 20px 12px;
 }
 
-.authorization-panel {
+.authorization-panel,
+.preparation-panel {
   margin: 0 28px 20px;
   padding: 20px;
   border: 1px solid #d4dbea;
@@ -281,7 +282,8 @@ h2 {
   background: #f8f9fd;
 }
 
-.authorization-panel p {
+.authorization-panel p,
+.preparation-panel p {
   margin: 12px 0;
   font-size: 0.88rem;
   line-height: 1.5;
@@ -295,6 +297,22 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.model-choice {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 0.88rem;
+}
+
+.model-choice select {
+  width: min(100%, 420px);
+  min-height: 40px;
+  padding: 8px;
+  border: 1px solid #74777f;
+  border-radius: 4px;
+  font: inherit;
 }
 
 .request-details {

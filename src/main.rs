@@ -1,20 +1,18 @@
 //! Operator CLI for PR authorization, review rounds, and draft decisions.
 
 mod gui;
+mod preparation_commands;
 mod publication_commands;
 mod request_commands;
 mod review_commands;
 mod storage;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use review_platform::{
     Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, PrKey, RecordOutcome,
-    RefreshOutcome, StateError,
-    config::{ModelId, ReviewConfig},
-    github, round,
+    RefreshOutcome, StateError, config::ModelId, github, round,
 };
-use std::fs;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -197,7 +195,7 @@ fn run(cli: Cli) -> Result<()> {
         command,
     } = cli;
     match command {
-        Command::Gui => gui::run(state_file)?,
+        Command::Gui => gui::run(state_file, config_file)?,
         Command::Request {
             repository,
             pr,
@@ -527,58 +525,10 @@ fn run_prepare(
     };
     let key = PrKey::new(repository, pr)?;
     let state_file = storage::resolve_path(state_override)?;
-    let _pr_lock = storage::pr_lock(&state_file, &key)?;
     let config_file = storage::resolve_config_path(config_override)?;
-    let config_bytes = fs::read(&config_file)
-        .with_context(|| format!("reading review configuration {}", config_file.display()))?;
-    let config = ReviewConfig::from_json(&config_bytes)
-        .with_context(|| format!("validating review configuration {}", config_file.display()))?;
-    let initial = storage::load(&state_file)?;
-    let prior_revision = initial
-        .get(&key)
-        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
-        .revision();
-    let client = github::GithubClient::new()?;
-    let observation = client.observe_pull_excluding(&key, &initial.confirmed_review_ids(&key))?;
-    let _lock = storage::lock(&state_file)?;
-    let mut state = storage::load(&state_file)?;
-    let current_revision = state
-        .get(&key)
-        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
-        .revision();
-    if current_revision != prior_revision {
-        return Err(StateError::RevisionMismatch {
-            inspected: prior_revision,
-            recorded: current_revision,
-        }
-        .into());
-    }
-    let refreshed = round::refresh_observation(&mut state, &config, observation)?;
-    if refreshed.outcome() != RefreshOutcome::Unchanged {
-        storage::save(&state_file, &state)?;
-    }
-    drop(_lock);
-    let report = round::prepare(&client, &mut state, refreshed, selection.as_ref())?;
-    if report.validation_changed() {
-        let verified = review_platform::archive::verify_archive(report.resolved().archive())?;
-        let _lock = storage::lock(&state_file)?;
-        let mut current = storage::load(&state_file)?;
-        let selected = selection
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("model selection disappeared"))?;
-        current.validate_model(
-            report.preparation(),
-            selected.head(),
-            selected.revision(),
-            report.resolved(),
-            &verified,
-        )?;
-        storage::save(&state_file, &current)?;
-        state = current;
-    }
-    let request = state
-        .get(&key)
-        .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+    let report =
+        preparation_commands::prepare(&state_file, &config_file, &key, selection.as_ref(), None)?;
+    let request = report.request();
     let preparation = report.preparation();
     let resolved = report.resolved();
     println!("{key}");
@@ -596,17 +546,11 @@ fn run_prepare(
     if let Some(requested) = &selection {
         println!("  requested model: {}", requested.model());
     }
-    println!("  resolved agent: {}", resolved.agent().id());
-    println!(
-        "  runner kind: {}",
-        resolved.agent().runner().kind().as_str()
-    );
-    println!(
-        "  model provider: {}",
-        resolved.agent().runner().model_provider()
-    );
-    println!("  prompt SHA-256: {}", resolved.agent().prompt_hash());
-    println!("  runner SHA-256: {}", resolved.agent().runner().hash());
+    println!("  resolved agent: {}", resolved.agent());
+    println!("  runner kind: {}", resolved.runner_kind().as_str());
+    println!("  model provider: {}", resolved.model_provider());
+    println!("  prompt SHA-256: {}", resolved.prompt_sha256());
+    println!("  runner SHA-256: {}", resolved.runner_sha256());
     println!("  VM archive: {}", resolved.archive().path().display());
     println!("  archive SHA-256: {}", resolved.archive().checksum());
     println!(

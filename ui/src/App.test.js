@@ -64,6 +64,23 @@ function round(overrides = {}) {
   };
 }
 
+function preparation(overrides = {}) {
+  return {
+    head_sha: 'a'.repeat(40), revision: 2, authorization: 'one_round',
+    configuration_sha256: 'c'.repeat(64), checks: 'green',
+    readiness: 'model_validation_required', readiness_message: 'lead model validation is required',
+    proposed_model: 'model-alpha', proposal_matches_coauthor: false, validated_model: null,
+    resolved_model: 'model-alpha', models: [
+      { model: 'model-alpha', agent: 'claude' }, { model: 'model-beta', agent: 'claude-alt' },
+    ], ...overrides,
+  };
+}
+
+function preparedRequest(overrides = {}) {
+  return request({ revision: 2, authorization: 'one_round',
+    discussion: { issue_comments: 0, review_comments: 0, review_bodies: 0 }, ...overrides });
+}
+
 async function showSnapshot(source, requests) {
   await act(() => source.snapshot(requests));
 }
@@ -296,6 +313,178 @@ describe('review requests page', () => {
     expect(sessionStorage.getItem('review-platform-session')).toBeNull();
     expect(screen.queryByText('Manage authorization')).toBeNull();
     expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+  });
+
+  it('prepares a review and validates a different model for the inspected inputs and rules', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishPreparation, finishValidation;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishPreparation = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishValidation = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [preparedRequest()]);
+    await screen.findByText('Prepare review');
+    const prepare = await clickMaterialButton(user, container, 'Prepare review');
+    expect(prepare.disabled).toBe(true);
+    expect(screen.getByText('Preparing…')).toBeTruthy();
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/prepare');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+    await act(() => finishPreparation({ ok: true, json: async () => preparation() }));
+    const panel = await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
+    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
+    expect(within(panel).getByText('Green')).toBeTruthy();
+    expect(within(panel).getByText('lead model validation is required')).toBeTruthy();
+    const model = within(panel).getByLabelText('Review model for owner/repo #15');
+    expect(model.value).toBe('model-alpha');
+    await user.selectOptions(model, 'model-beta');
+    expect(within(panel).getByText('claude-alt')).toBeTruthy();
+    const validate = await clickMaterialButton(user, container, 'Validate model');
+    expect(validate.disabled).toBe(true);
+    expect(model.disabled).toBe(true);
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/validate-model');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({
+      key: { repository: 'owner/repo', number: 15 }, model: 'model-beta',
+      head_sha: 'a'.repeat(40), revision: 2,
+      rules: { authorization: 'one_round', configuration_sha256: 'c'.repeat(64) },
+    });
+    await act(() => finishValidation({ ok: true, json: async () => preparation({
+      readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-beta', resolved_model: 'model-beta',
+    }) }));
+    expect(await screen.findByText('Review model validated.')).toBeTruthy();
+    expect(within(panel).getByText('ready to run')).toBeTruthy();
+    expect(within(panel).getByText(/This model is validated for the prepared head and revision/)).toBeTruthy();
+    const validated = await clickMaterialButton(user, container, 'Model validated');
+    expect(validated.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('No validated model for current inputs')).toBeTruthy();
+    await showSnapshot(source, [preparedRequest({ validated_model: { model: 'model-beta', agent: 'claude-alt' } })]);
+    expect(screen.queryByText('No validated model for current inputs')).toBeNull();
+  });
+
+  it.each([
+    ['checks_pending', 'pending', 'checks for the current head are pending'],
+    ['checks_failing', 'failing', 'checks for the current head are failing'],
+    ['checks_unknown', 'unknown', 'checks for the current head have an unknown result'],
+    ['no_checks', 'no_results', 'no checks were reported for the current head'],
+    ['awaiting_authorization', 'green', 'lead authorization is required'],
+    ['pull_closed', 'green', 'the PR is closed'],
+  ])('shows %s as a blocker and disables model validation', async (readiness, checks, readiness_message) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({ readiness, checks, readiness_message }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    expect(await screen.findByText(readiness_message)).toBeTruthy();
+    expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(true);
+    const button = await clickMaterialButton(user, container, 'Validate model');
+    expect(button.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { head_sha: 'b'.repeat(40), revision: 3 }, { revision: 3 }, { authorization: 'pr_cycle' },
+  ])('keeps preparation fixed and prevents validation after %o', async (change) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation() })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation(change) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [preparedRequest()]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findByText('Review preparation updated.');
+    await showSnapshot(source, [preparedRequest(change)]);
+    const panel = screen.getByRole('region', { name: 'Review preparation for owner/repo #15' });
+    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toContain('This preparation is outdated');
+    const validate = await clickMaterialButton(user, container, 'Validate model');
+    expect(validate.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findByText('Review preparation updated.');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(false);
+  });
+
+  it('requires new preparation after a model validation conflict', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation() })
+      .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'Configuration changed. Prepare again.' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findByText('Review preparation updated.');
+    await clickMaterialButton(user, container, 'Validate model');
+    expect(await screen.findByText('Configuration changed. Prepare again.')).toBeTruthy();
+    expect(screen.getByText(/This preparation is outdated/)).toBeTruthy();
+    const validate = await clickMaterialButton(user, container, 'Validate model');
+    expect(validate.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses the validated model as the default and explains a co-author hint match', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({
+        readiness: 'ready', readiness_message: 'ready to run', resolved_model: 'model-beta',
+        validated_model: 'model-beta', proposal_matches_coauthor: true,
+      }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    expect(await screen.findByText(/The proposed model matches a PR co-author hint/)).toBeTruthy();
+    const model = screen.getByLabelText('Review model for owner/repo #15');
+    expect(model.value).toBe('model-beta');
+    const validated = await clickMaterialButton(user, container, 'Model validated');
+    expect(validated.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await user.selectOptions(model, 'model-alpha');
+    expect(screen.getByText('Validate model').disabled).toBe(false);
+    expect(screen.queryByText(/This model is validated for the prepared head and revision/)).toBeNull();
+    await user.selectOptions(model, 'model-beta');
+    expect(screen.getByText('Model validated').disabled).toBe(true);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ revision: 3 })]);
+    expect(screen.getByText('Validate model').disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain('This preparation is outdated');
+  });
+
+  it('reports preparation errors and clears an expired session', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, status: 422, json: async () => ({ error: 'Check review configuration.' }) })
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ ok: false, status: 401 }));
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    expect(await screen.findByText('Check review configuration.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Review preparation for owner/repo #15' })).toBeNull();
+    await clickMaterialButton(user, container, 'Prepare review');
+    expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
+    await clickMaterialButton(user, container, 'Prepare review');
+    expect(await screen.findByText(/Your session ended/)).toBeTruthy();
+    expect(screen.queryByText('Prepare review')).toBeNull();
+    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
   });
 
   it('keeps request details open and updates them when a new snapshot arrives', async () => {
