@@ -80,8 +80,20 @@ Keep the GUI process running while the review finishes.
 Live updates show startup, the running round, private draft readiness, failures, and cleanup.
 Startup failures also appear when no round has been recorded yet.
 Duplicate GUI runs for the same PR are rejected while a job is active.
-Use the CLI to inspect, publish, or reject the resulting private draft,
-or to recover a sandbox that needs cleanup.
+Use **View draft** to inspect the latest completed draft after signing in.
+It shows the exact GitHub publication body and its hash, private lead advice,
+the reviewed head and revision, model, agent, verdict, and decision status.
+Draft contents are fetched only when requested and rendered as plain text.
+The server verifies the saved draft against the original agent output and its recorded seal;
+review logs stay private and are not returned to the browser.
+Freshness is checked against GitHub when the draft opens;
+an unavailable check reports unknown freshness and still allows inspection.
+The open view keeps its original contents across live updates
+and warns when local inputs or the latest round change.
+Reopen it to inspect current state and recheck freshness.
+Inspection does not change local state, authorization, or the draft decision.
+Completed drafts can be inspected while sandbox cleanup is pending.
+Use the CLI to publish or reject a draft, or to recover a sandbox that needs cleanup.
 The GUI does not retry failed reviews automatically or offer a per-review cancel action.
 On Unix, stopping the GUI with SIGINT or SIGTERM requests cancellation
 and waits for runners to finish their cleanup attempts.
@@ -127,7 +139,8 @@ then resumes snapshots when the read succeeds.
 The browser reconnects automatically if the stream is interrupted;
 reloading the page also starts a new connection.
 `/api` reports the API name and version, and `/api/hello` remains available.
-The read-only endpoints do not require sign-in.
+Request snapshots and static assets do not require sign-in.
+Private draft contents require the lead session token.
 `POST /api/session` exchanges the one-time code for a launch-scoped session token.
 `POST /api/requests/refresh`, `POST /api/requests/authorize`,
 `POST /api/requests/revoke`, `POST /api/requests/prepare`,
@@ -162,6 +175,18 @@ this acknowledges scheduling, not successful startup or agent dispatch.
 An already-active GUI job returns HTTP 409.
 Watch request snapshots or SSE for startup errors and round progress.
 One-round authorization is consumed only when dispatch is recorded.
+`GET /api/drafts/ROUND_ID?repository=owner%2Frepo&number=42`
+requires the session token in its `Authorization: Bearer TOKEN` header.
+It accepts a validated round ID and PR key and returns only a completed draft belonging to that PR.
+The response contains `key`, `round_id`, `head_sha`, `revision`, `decision`, `model`, `agent`,
+`verdict`, `freshness`, `publication_body`, `publication_body_sha256`, and `lead_advice`.
+The body includes the exact round footer that publication would post.
+Freshness uses the CLI's live GitHub checks and confirmed-publication exclusions;
+it is separate from the round's recorded freshness in public snapshots.
+Inspection does not persist a missing publication seal.
+Missing sessions return HTTP 401, missing rounds or a different PR return HTTP 404,
+unfinished rounds return HTTP 409, and failed draft verification returns HTTP 422.
+Responses disable caching and omit review logs, prompts, provider details, paths, and raw errors.
 
 Keep the compiled UI in `ui/dist` under version control
 so Rust installation does not need to run the frontend build.

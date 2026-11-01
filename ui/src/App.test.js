@@ -81,6 +81,15 @@ function preparedRequest(overrides = {}) {
     discussion: { issue_comments: 0, review_comments: 0, review_bodies: 0 }, ...overrides });
 }
 
+function draft(overrides = {}) {
+  return {
+    key: { repository: 'owner/repo', number: 15 }, round_id: 'r-example', head_sha: 'a'.repeat(40), revision: 1,
+    decision: 'awaiting_decision', model: 'model-alpha', agent: 'claude', verdict: 'ACCEPT_WITH_NITS', freshness: 'fresh',
+    publication_body: "# Finding\n<script>alert('draft')</script>\n\n_Agent review via Review Platform (round r-example)._",
+    publication_body_sha256: 'd'.repeat(64), lead_advice: '<img src=x onerror=alert(1)> Private advice', ...overrides,
+  };
+}
+
 async function showSnapshot(source, requests) {
   await act(() => source.snapshot(requests));
 }
@@ -602,6 +611,145 @@ describe('review requests page', () => {
     expect(screen.getByText(/Agent timed out/)).toBeTruthy();
     unmount();
     expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it('loads a private draft only on request and renders its exact contents as text', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishDraft;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishDraft = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
+    await screen.findByText('View draft');
+    expect(screen.queryByText(draft().lead_advice)).toBeNull();
+    const view = await clickMaterialButton(user, container, 'View draft');
+    expect(view.disabled).toBe(true);
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/drafts/r-example?repository=owner%2Frepo&number=15');
+    expect(fetchMock.mock.calls[1][1]).toEqual({ method: 'GET', cache: 'no-store', headers: { Authorization: 'Bearer saved-token' } });
+    await clickMaterialButton(user, container, 'Loading draft…');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(() => finishDraft({ ok: true, json: async () => draft() }));
+    const panel = await screen.findByRole('region', { name: 'Private draft for owner/repo #15' });
+    expect(within(panel).getByRole('region', { name: 'Review comments' }).textContent).toBe(draft().publication_body);
+    expect(within(panel).getByRole('region', { name: 'Private lead advice' }).textContent).toBe(draft().lead_advice);
+    expect(within(panel).getByText('Accept with nits')).toBeTruthy();
+    expect(within(panel).getByText('Fresh at inspection')).toBeTruthy();
+    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
+    expect(within(panel).getByText('d'.repeat(64))).toBeTruthy();
+    expect(panel.querySelector('script, img, a')).toBeNull();
+    expect(within(panel).getByText(/This advice stays private/)).toBeTruthy();
+    await clickMaterialButton(user, container, 'Close draft');
+    expect(screen.queryByRole('region', { name: 'Private draft for owner/repo #15' })).toBeNull();
+    expect(screen.queryByText(draft().lead_advice)).toBeNull();
+  });
+
+  it.each([
+    ['stale', 'The PR inputs changed or the PR closed. This draft is stale.'],
+    ['unknown', 'Current PR freshness could not be verified. Recheck GitHub before deciding on this draft.'],
+  ])('allows inspecting a draft with %s freshness and explains its limits', async (freshness, message) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness, lead_advice: '' }) }));
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    const panel = await screen.findByRole('region', { name: 'Private draft for owner/repo #15' });
+    expect(within(panel).getByText(message)).toBeTruthy();
+    expect(within(panel).getByText('No private lead advice.')).toBeTruthy();
+    expect(within(panel).getByText(/Reopen it to check again/)).toBeTruthy();
+  });
+
+  it('keeps the requested round fixed during loading and live updates until explicitly reopened', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishDraft;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishDraft = resolve; }))
+      .mockResolvedValueOnce({ ok: true, json: async () => draft({ round_id: 'r-new', head_sha: 'b'.repeat(40), revision: 2, publication_body: 'New draft' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    const updated = request({ head_sha: 'b'.repeat(40), revision: 2,
+      latest_round: round({ id: 'r-new', head_sha: 'b'.repeat(40), revision: 2, status: 'awaiting_decision' }) });
+    await showSnapshot(source, [updated]);
+    await act(() => finishDraft({ ok: true, json: async () => draft() }));
+    const panel = await screen.findByRole('region', { name: 'Private draft for owner/repo #15' });
+    expect(within(panel).getByText('r-example')).toBeTruthy();
+    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
+    expect(within(panel).getByRole('region', { name: 'Review comments' }).textContent).toBe(draft().publication_body);
+    expect(within(panel).getByText(/This view keeps the draft you opened/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await clickMaterialButton(user, container, 'View draft');
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Review comments' }).textContent).toBe('New draft'));
+    expect(fetchMock.mock.calls[2][0]).toContain('/api/drafts/r-new?');
+    expect(screen.queryByText(/This view keeps the draft you opened/)).toBeNull();
+  });
+
+  it('removes old draft contents before reporting integrity or connection failures', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft() })
+      .mockResolvedValueOnce({ ok: false, status: 422, json: async () => ({ error: 'Could not verify the private draft.' }) })
+      .mockRejectedValueOnce(new Error('offline')));
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    await clickMaterialButton(user, container, 'View draft');
+    expect(await screen.findByText('Could not verify the private draft.')).toBeTruthy();
+    expect(screen.queryByText(draft().lead_advice)).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Private draft for owner/repo #15' })).toBeNull();
+    await clickMaterialButton(user, container, 'View draft');
+    expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
+  });
+
+  it('clears private contents and draft controls when the lead session expires', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft() })
+      .mockResolvedValueOnce({ ok: false, status: 401 }));
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    await clickMaterialButton(user, container, 'Refresh from GitHub');
+    await screen.findByText(/Your session ended/);
+    expect(screen.queryByRole('region', { name: 'Private draft for owner/repo #15' })).toBeNull();
+    expect(screen.queryByText(draft().lead_advice)).toBeNull();
+    expect(screen.queryByText('View draft')).toBeNull();
+    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+  });
+
+  it('offers draft inspection only to signed-in leads and only for completed drafts', async () => {
+    const { unmount } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
+    expect(screen.queryByText('View draft')).toBeNull();
+    unmount();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    render(App);
+    const source = FakeEventSource.instances[1];
+    for (const status of ['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']) {
+      await showSnapshot(source, [request({ latest_round: round({ status }) })]);
+      expect(await screen.findByText('View draft')).toBeTruthy();
+    }
+    for (const status of ['starting', 'running', 'failed', 'interrupted']) {
+      await showSnapshot(source, [request({ latest_round: round({ status }) })]);
+      expect(screen.queryByText('View draft')).toBeNull();
+    }
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('keeps request details open and updates them when a new snapshot arrives', async () => {

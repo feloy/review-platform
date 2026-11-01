@@ -76,13 +76,18 @@
   }
 
   async function performRequestAction(requestId, operation, body, successMessage, failureMessage) {
+    return performAction(requestId, operation, `/api/requests/${operation}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }, successMessage, failureMessage);
+  }
+
+  async function performAction(requestId, operation, url, options, successMessage, failureMessage) {
     if (requestActions[requestId]?.pending) return false;
     requestActions[requestId] = { pending: true, operation, message: '', error: false };
     try {
-      const response = await fetch(`/api/requests/${operation}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
-        body: JSON.stringify(body),
+      const response = await fetch(url, {
+        ...options,
+        headers: { ...options.headers, Authorization: `Bearer ${sessionToken}` },
       });
       if (response.status === 401) {
         storeSession('');
@@ -159,6 +164,13 @@
         configuration_sha256: preparation.configuration_sha256,
       },
     }, () => 'Review accepted. Starting checks on the server.', 'Could not start the review.');
+  }
+
+  function viewDraft(request, requestId, roundId) {
+    const query = new URLSearchParams({ repository: request.repository, number: String(request.number) });
+    return performAction(requestId, 'view-draft', `/api/drafts/${encodeURIComponent(roundId)}?${query}`, {
+      method: 'GET', cache: 'no-store',
+    }, () => '', 'Could not inspect the private draft.');
   }
 
   onMount(() => {
@@ -261,7 +273,8 @@
             onRevoke={() => revoke(request, requestId)}
             onPrepare={() => prepareReview(request, requestId)}
             onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)}
-            onRun={(preparation, model) => runReview(request, requestId, preparation, model)} />
+            onRun={(preparation, model) => runReview(request, requestId, preparation, model)}
+            onViewDraft={(roundId) => viewDraft(request, requestId, roundId)} />
         {/each}
       </ul>
     {/if}

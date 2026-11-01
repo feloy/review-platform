@@ -1,5 +1,7 @@
 //! Loopback HTTP server for the embedded operator UI and local request snapshots.
 
+mod drafts;
+
 use crate::{
     gui_runs::{RunSummary, Runs, StartError},
     preparation_commands::{self, InspectedRules, PrepareError},
@@ -132,6 +134,7 @@ struct AppState {
     refresh: Refresh,
     prepare: Prepare,
     runs: Arc<Runs>,
+    inspect_draft: drafts::Inspect,
 }
 
 struct Session {
@@ -335,14 +338,18 @@ fn router_with_runs(
     prepare: Prepare,
     runs: Arc<Runs>,
 ) -> Router {
-    let state = Arc::new(AppState {
+    router_with_state(Arc::new(AppState {
         state_file,
         config_file,
         session: Mutex::new(session),
         refresh,
         prepare,
         runs,
-    });
+        inspect_draft: crate::draft_commands::inspect,
+    }))
+}
+
+fn router_with_state(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api", get(api_info))
@@ -356,6 +363,7 @@ fn router_with_runs(
         .route("/api/requests/prepare", post(prepare_request))
         .route("/api/requests/validate-model", post(validate_model_request))
         .route("/api/requests/run", post(run_request))
+        .route("/api/drafts/{round}", get(drafts::inspect))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
         .layer(from_fn(localhost_guard))
