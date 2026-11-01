@@ -68,6 +68,15 @@ async function showSnapshot(source, requests) {
   await act(() => source.snapshot(requests));
 }
 
+async function clickMaterialButton(user, container, label) {
+  const control = [...container.querySelectorAll('md-text-button, md-filled-button')]
+    .find((button) => button.textContent.trim() === label);
+  expect(control).toBeTruthy();
+  await waitFor(() => expect(control.shadowRoot.querySelector('button')).toBeTruthy());
+  await user.click(control.shadowRoot.querySelector('button'));
+  return control;
+}
+
 beforeEach(() => {
   FakeEventSource.instances = [];
   sessionStorage.clear();
@@ -93,6 +102,8 @@ describe('review requests page', () => {
     expect(screen.getByText(/No review requests recorded yet/)).toBeTruthy();
     expect(screen.getByText(/0 requests/)).toBeTruthy();
     expect(screen.queryByText('Refresh from GitHub')).toBeNull();
+    expect(screen.queryByText('Manage authorization')).toBeNull();
+    expect(screen.queryByText('Revoke authorization')).toBeNull();
 
     unmount();
     expect(source.close).toHaveBeenCalledOnce();
@@ -170,6 +181,121 @@ describe('review requests page', () => {
     render(App);
     expect(await screen.findByLabelText('One-time code')).toBeTruthy();
     expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+  });
+
+  it.each([
+    ['one_round', 'Authorize one round', 'Authorized for one round.', 'One round'],
+    ['pr_cycle', 'Authorize PR cycle', 'Authorized for the PR cycle.', 'PR cycle'],
+  ])('authorizes %s for the displayed inputs and waits for the saved snapshot', async (scope, label, message, badge) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishAuthorization;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishAuthorization = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const observed = request({ revision: 2, discussion: { issue_comments: 0, review_comments: 0, review_bodies: 0 } });
+    await showSnapshot(source, [observed]);
+    await screen.findByText('Manage authorization');
+    await clickMaterialButton(user, container, 'Manage authorization');
+    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
+    expect(within(panel).getByText('Input revision').nextElementSibling.textContent).toBe('2');
+    expect(within(panel).getByRole('link', { name: 'PR on GitHub' }).href).toBe('https://github.com/owner/repo/pull/15');
+
+    const button = await clickMaterialButton(user, container, label);
+    expect(button.disabled).toBe(true);
+    expect(screen.getByText('Saving authorization…')).toBeTruthy();
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/authorize');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      key: { repository: 'owner/repo', number: 15 }, head_sha: 'a'.repeat(40), revision: 2, scope,
+    });
+    await clickMaterialButton(user, container, 'Refresh from GitHub');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(() => finishAuthorization({ ok: true, json: async () => ({ changed: true }) }));
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    expect(screen.getByText('Awaiting lead')).toBeTruthy();
+    await showSnapshot(source, [{ ...observed, authorization: scope }]);
+    expect(screen.getByText(badge)).toBeTruthy();
+  });
+
+  it.each([
+    { head_sha: 'b'.repeat(40), revision: 3 },
+    { revision: 3 },
+  ])('keeps the inspected inputs fixed when a snapshot changes to %o', async (change) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ changed: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const observed = request({ revision: 2, discussion: { issue_comments: 0, review_comments: 0, review_bodies: 0 } });
+    await showSnapshot(source, [observed]);
+    await screen.findByText('Manage authorization');
+    await clickMaterialButton(user, container, 'Manage authorization');
+    const updated = { ...observed, ...change };
+    await showSnapshot(source, [updated]);
+    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
+    expect(within(panel).getByText('Input revision').nextElementSibling.textContent).toBe('2');
+    expect(screen.getByRole('alert').textContent).toContain('Inputs changed');
+    const disabled = await clickMaterialButton(user, container, 'Authorize PR cycle');
+    expect(disabled.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await clickMaterialButton(user, container, 'Close');
+    await clickMaterialButton(user, container, 'Manage authorization');
+    await clickMaterialButton(user, container, 'Authorize PR cycle');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
+      head_sha: updated.head_sha, revision: updated.revision,
+    });
+  });
+
+  it('requires a discussion baseline for authorization but permits revocation without it', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ changed: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ authorization: 'pr_cycle' })]);
+    await screen.findByText('Manage authorization');
+    const manage = await clickMaterialButton(user, container, 'Manage authorization');
+    expect(manage.disabled).toBe(true);
+    expect(screen.getByText('Refresh from GitHub before authorizing this request.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    await clickMaterialButton(user, container, 'Revoke authorization');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/revoke');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+    expect(await screen.findByText('Authorization revoked.')).toBeTruthy();
+    expect(screen.getByText('PR cycle')).toBeTruthy();
+  });
+
+  it('reports authorization conflicts and connection errors and clears an expired session', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'Review inputs changed. Inspect the current head and revision before authorizing again.' }) })
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ ok: false, status: 401 });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ discussion: { issue_comments: 1, review_comments: 0, review_bodies: 0 } })]);
+    await screen.findByText('Manage authorization');
+    await clickMaterialButton(user, container, 'Manage authorization');
+    await clickMaterialButton(user, container, 'Authorize one round');
+    expect(await screen.findByText(/Review inputs changed/)).toBeTruthy();
+    expect(screen.getByText('Awaiting lead')).toBeTruthy();
+    await clickMaterialButton(user, container, 'Authorize one round');
+    expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
+    await clickMaterialButton(user, container, 'Authorize one round');
+    expect(await screen.findByText(/Your session ended/)).toBeTruthy();
+    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(screen.queryByText('Manage authorization')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
   });
 
   it('keeps request details open and updates them when a new snapshot arrives', async () => {

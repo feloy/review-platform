@@ -18,7 +18,7 @@
   let signInCode = $state('');
   let signingIn = $state(false);
   let signInError = $state('');
-  let refreshState = $state({});
+  let requestActions = $state({});
 
   const sessionKey = 'review-platform-session';
 
@@ -75,33 +75,58 @@
     }
   }
 
-  async function refreshFromGithub(request, requestId) {
-    refreshState[requestId] = { pending: true, message: '', error: false };
+  async function performRequestAction(requestId, operation, body, successMessage, failureMessage) {
+    if (requestActions[requestId]?.pending) return false;
+    requestActions[requestId] = { pending: true, operation, message: '', error: false };
     try {
-      const response = await fetch('/api/requests/refresh', {
+      const response = await fetch(`/api/requests/${operation}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` },
-        body: JSON.stringify({ repository: request.repository, number: request.number }),
+        body: JSON.stringify(body),
       });
       if (response.status === 401) {
         storeSession('');
         signInError = 'Your session ended. If the code was already used, restart the GUI for a new one.';
-        refreshState[requestId] = { pending: false, message: '', error: true };
-        return;
+        requestActions[requestId] = { pending: false, message: '', error: true };
+        return false;
       }
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
-        refreshState[requestId] = { pending: false, message: result.error ?? 'Could not refresh from GitHub.', error: true };
-        return;
+        requestActions[requestId] = { pending: false, message: result.error ?? failureMessage, error: true };
+        return false;
       }
       const result = await response.json();
-      const message = result.authorization_cleared
-        ? 'Inputs changed. One-round authorization was cleared.'
-        : result.changed ? 'GitHub inputs updated.' : 'GitHub inputs unchanged.';
-      refreshState[requestId] = { pending: false, message, error: false };
+      requestActions[requestId] = { pending: false, message: successMessage(result), error: false };
+      return true;
     } catch {
-      refreshState[requestId] = { pending: false, message: 'Could not connect to the local API. Try again.', error: true };
+      requestActions[requestId] = { pending: false, message: 'Could not connect to the local API. Try again.', error: true };
+      return false;
     }
+  }
+
+  function refreshFromGithub(request, requestId) {
+    return performRequestAction(requestId, 'refresh',
+      { repository: request.repository, number: request.number },
+      (result) => result.authorization_cleared
+        ? 'Inputs changed. One-round authorization was cleared.'
+        : result.changed ? 'GitHub inputs updated.' : 'GitHub inputs unchanged.',
+      'Could not refresh from GitHub.');
+  }
+
+  function authorize(request, requestId, scope) {
+    return performRequestAction(requestId, 'authorize', {
+      key: { repository: request.repository, number: request.number },
+      head_sha: request.head_sha,
+      revision: request.revision,
+      scope,
+    }, () => scope === 'one_round' ? 'Authorized for one round.' : 'Authorized for the PR cycle.',
+    'Could not authorize the review.');
+  }
+
+  function revoke(request, requestId) {
+    return performRequestAction(requestId, 'revoke',
+      { repository: request.repository, number: request.number },
+      () => 'Authorization revoked.', 'Could not revoke authorization.');
   }
 
   onMount(() => {
@@ -198,8 +223,10 @@
       <ul class="request-list">
         {#each requests as request (request.repository + '#' + request.number)}
           {@const requestId = request.repository + '#' + request.number}
-          <RequestItem {request} signedIn={Boolean(sessionToken)} action={refreshState[requestId]}
-            onRefresh={() => refreshFromGithub(request, requestId)} />
+          <RequestItem {request} signedIn={Boolean(sessionToken)} action={requestActions[requestId]}
+            onRefresh={() => refreshFromGithub(request, requestId)}
+            onAuthorize={(inspected, scope) => authorize(inspected, requestId, scope)}
+            onRevoke={() => revoke(request, requestId)} />
         {/each}
       </ul>
     {/if}

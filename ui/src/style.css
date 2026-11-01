@@ -267,7 +267,34 @@ h2 {
 }
 
 .details-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   padding: 0 20px 12px;
+}
+
+.authorization-panel {
+  margin: 0 28px 20px;
+  padding: 20px;
+  border: 1px solid #d4dbea;
+  border-radius: 12px;
+  background: #f8f9fd;
+}
+
+.authorization-panel p {
+  margin: 12px 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.authorization-panel a {
+  color: var(--md-sys-color-primary);
+}
+
+.authorization-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .request-details {

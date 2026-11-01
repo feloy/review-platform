@@ -261,21 +261,19 @@ fn run(cli: Cli) -> Result<()> {
             let inspected_head = HeadSha::new(head)?;
             let inspected_revision = InputRevision::new(revision)?;
             let scope = AuthorizationScope::from(scope);
-            let _lock = storage::lock(&state_file)?;
-            let mut state = storage::load(&state_file)?;
-            if state.authorize(&key, &inspected_head, inspected_revision, scope)? {
-                storage::save(&state_file, &state)?;
-            }
+            request_commands::authorize(
+                &state_file,
+                &key,
+                &inspected_head,
+                inspected_revision,
+                scope,
+            )?;
             println!("{key}: {}.", Authorization::from(scope));
         }
         Command::Revoke { repository, pr } => {
             let state_file = storage::resolve_path(state_file)?;
             let key = PrKey::new(repository, pr)?;
-            let _lock = storage::lock(&state_file)?;
-            let mut state = storage::load(&state_file)?;
-            if state.revoke(&key)? {
-                storage::save(&state_file, &state)?;
-            }
+            request_commands::revoke(&state_file, &key)?;
             println!("{key}: {}.", Authorization::AwaitingLead);
         }
         Command::Status { repository, pr } => {
