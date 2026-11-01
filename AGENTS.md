@@ -57,6 +57,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Keep GUI review jobs independent of browser connections and reject duplicate
   launches during preflight.
   Show startup failures without exposing raw adapter output.
+  Report job failure causes locally with PR and round context.
+  Omit private JSON values and panic payloads from those diagnostics.
 - Require the lead session for private draft contents and keep them out of public
   request snapshots.
   Render agent-authored draft content as plain text.

@@ -2,6 +2,7 @@
 
 mod draft_commands;
 mod gui;
+mod gui_diagnostics;
 mod gui_runs;
 mod preparation_commands;
 mod publication_commands;

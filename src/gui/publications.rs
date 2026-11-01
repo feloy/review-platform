@@ -1,6 +1,9 @@
 //! Server-owned publication jobs and safe progress summaries for the operator GUI.
 
-use crate::publication_commands::{self, PublicationReport, PublishError};
+use crate::{
+    gui_diagnostics,
+    publication_commands::{self, PublicationReport, PublishError},
+};
 use review_platform::{
     PrKey,
     publication::{PublicationHash, PublicationStateError},
@@ -98,30 +101,37 @@ impl Publications {
         }
         let publish = self.publish;
         let worker_key = key.clone();
+        let worker_id = id.clone();
         let task = tokio::task::spawn_blocking(move || {
-            publish(&state_file, &config_file, &worker_key, &id, &hash)
+            publish(&state_file, &config_file, &worker_key, &worker_id, &hash)
         });
         let owner = self.clone();
         // The supervisor outlives the HTTP response and every browser connection.
         tokio::spawn(async move {
             let (status, error, freshness) = match task.await {
                 Ok(Ok(report)) => (PublicationStatus::Published, None, report.freshness()),
-                Ok(Err(error)) => (
-                    if matches!(error, PublishError::OutcomeUnknown(_)) {
-                        PublicationStatus::Unknown
-                    } else {
-                        PublicationStatus::Failed
-                    },
-                    Some(public_message(&error)),
-                    None,
-                ),
-                Err(_) => (
-                    PublicationStatus::Unknown,
-                    Some(
-                        "Publication stopped unexpectedly. Inspect the recorded round and recover any pending publication before deciding again.",
-                    ),
-                    None,
-                ),
+                Ok(Err(error)) => {
+                    gui_diagnostics::report("publication", &key, Some(&id), &error);
+                    (
+                        if matches!(error, PublishError::OutcomeUnknown(_)) {
+                            PublicationStatus::Unknown
+                        } else {
+                            PublicationStatus::Failed
+                        },
+                        Some(public_message(&error)),
+                        None,
+                    )
+                }
+                Err(error) => {
+                    gui_diagnostics::report("publication", &key, Some(&id), &error);
+                    (
+                        PublicationStatus::Unknown,
+                        Some(
+                            "Publication stopped unexpectedly. Inspect the recorded round and recover any pending publication before deciding again.",
+                        ),
+                        None,
+                    )
+                }
             };
             if let Ok(mut jobs) = owner.jobs.lock() {
                 if let Some(job) = jobs.get_mut(&key) {
