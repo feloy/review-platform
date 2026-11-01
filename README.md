@@ -4,10 +4,12 @@ Review Platform coordinates AI reviews of pull requests in public GitHub reposit
 A lead developer runs its daemon for one or more repositories,
 on their own machine or in the cloud.
 Any PR author can request a review, but the lead must authorize it.
+
 The lead can authorize one review round,
 requiring renewed authorization after each new commit or author reply,
 or keep authorization active for the PR so later rounds can start automatically.
 The lead can change that choice at any time.
+
 Each generated review stays private until the lead publishes it unchanged;
 the lead can also reject it.
 Rejecting a draft keeps the current authorization.
@@ -32,6 +34,7 @@ review-platform --help
 Cargo installs the executable in its binary directory, which must be on `PATH`.
 The examples below use the default per-user state and configuration files.
 Pass `--state-file PATH` or `--config-file PATH` before a subcommand to use other files.
+
 Replace `owner/repo` and `42` with your PR.
 Replace uppercase placeholders with values shown by the preceding commands.
 `HEAD_SHA` comes from `github-pr`, `REVISION` from `status` or `prepare-review`,
@@ -47,30 +50,36 @@ It shows each request's recorded head, input revision, authorization, and latest
 Expand a request to see observed author discussion counts,
 the current validated model and agent, and the latest round's recorded inputs and model.
 The list comes from the local state file.
+
 After signing in, use **Refresh from GitHub** on a request to fetch its current head
 and author discussion, using the same rules as the `refresh` command.
 Changed inputs may clear one-round authorization and model validation.
+
 Use **Manage authorization** to authorize one round or the PR cycle
 after inspecting the PR on GitHub and the displayed head and input revision.
 Refresh first if author discussion has not yet been observed.
 The authorization panel keeps the inputs it opened with;
 if live updates change them, reopen it and inspect the current inputs.
 The server also rejects authorization if the recorded head or revision has changed.
+
 Use **Revoke authorization** to withdraw permission for further rounds,
 including after inputs change or before discussion is refreshed.
 Changing authorization can clear model validation.
 Authorization alone does not start a review.
+
 Use **Prepare review** to refresh the request and inspect CI readiness for its exact head,
 the proposed model, and the configured model choices with their resolved agents.
 Select a model and use **Validate model** to confirm it for the prepared head and revision.
 The confirmed selection shows **Model validated**;
 selecting a different model enables **Validate model** again.
+
 Validation fetches fresh GitHub inputs and checks and verifies the selected VM archive.
 It requires active authorization, an open PR, and green reported checks.
 Changed inputs, authorization, or configuration require a new preparation and inspection.
 Preparation can clear one-round authorization if GitHub inputs have changed;
 authorize the refreshed inputs and prepare again in that case.
 Preparation and validation never start a review or consume authorization.
+
 Use **Run review** once the selected model is validated and preparation is current.
 Startup rechecks PR inputs, exact-head CI, authorization, configuration, and gateway readiness,
 then uses the same runner and sandbox lifecycle as `run-review`.
@@ -80,12 +89,14 @@ Keep the GUI process running while the review finishes.
 Live updates show startup, the running round, private draft readiness, failures, and cleanup.
 Startup failures also appear when no round has been recorded yet.
 Duplicate GUI runs for the same PR are rejected while a job is active.
+
 Use **View draft** to inspect the latest completed draft after signing in.
 It shows the exact GitHub publication body and its hash, private lead advice,
 the reviewed head and revision, model, agent, verdict, and decision status.
 Draft contents are fetched only when requested and rendered as plain text.
 The server verifies the saved draft against the original agent output and its recorded seal;
 review logs stay private and are not returned to the browser.
+
 Freshness is checked against GitHub when the draft opens;
 an unavailable check reports unknown freshness and still allows inspection.
 The open view keeps its original contents across live updates
@@ -93,6 +104,7 @@ and warns when local inputs or the latest round change.
 Reopen it to inspect current state and recheck freshness.
 Inspection does not change local state, authorization, or the draft decision.
 Completed drafts can be inspected while sandbox cleanup is pending.
+
 Use **Reject draft** after cleanup completes to record a local rejection.
 Inspect the round and publication body hash in the confirmation, then choose **Confirm rejection**.
 Rejection posts nothing and preserves the private draft and current authorization.
@@ -100,6 +112,7 @@ It clears model validation matching that round and preserves a different later c
 Stale drafts and drafts with unknown freshness can still be rejected.
 Live input changes do not retarget the confirmation;
 if the latest round, decision, or cleanup changes, reopen the draft before rejecting it.
+
 Use **Publish draft** after cleanup when the opened draft has verified fresh inputs.
 Inspect the fixed round and publication body hash, then choose **Confirm publication**.
 The server re-verifies the exact saved body, configured publisher identity,
@@ -108,14 +121,17 @@ on the reviewed commit.
 Private lead advice stays private.
 Changed local inputs invalidate an open publication confirmation;
 stale or unknown freshness requires reopening the draft and inspecting fresh inputs.
+
 Publication runs in the server, survives browser disconnects, and rejects duplicate GUI starts during preflight.
 Live updates show progress, safe preflight failures, and the saved GitHub receipt.
 The GUI uses its effective configuration file and the server's read and write GitHub credentials.
 Set `publisher_login` and `REVIEW_PLATFORM_GITHUB_TOKEN_RW` before launching the GUI.
+
 Stopping the server waits for its blocking publication work; it does not cancel a dispatched post.
 If publication is interrupted or its outcome is uncertain, inspect GitHub and use `recover-publication` through the CLI.
 The GUI never automatically retries a publication request.
 After a definitive failure, reopen and inspect the draft before making another explicit decision.
+
 Use the CLI to recover a sandbox that needs cleanup.
 The GUI does not retry failed reviews automatically or offer a per-review cancel action.
 On Unix, stopping the GUI with SIGINT or SIGTERM requests cancellation
@@ -137,6 +153,7 @@ curl -N http://localhost:8080/api/requests/events
 
 The command serves the compiled HTML, JavaScript, and CSS from the executable
 and listens only on IPv4 loopback at port 8080.
+
 The command requires an interactive terminal to display its one-time code.
 It trusts the OS user who launches it as the lead:
 anyone with access to that terminal and code can start the browser session.
@@ -145,26 +162,32 @@ The code can be used once, and the session is tied to the browser tab and server
 reloads in that tab retain it.
 If the session is lost, restart the GUI for a new code.
 The GUI uses the GitHub credentials available when it starts.
+
 `GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
 Each request includes optional discussion counts and model validation,
 plus a summary of its latest round when one exists, including its failure kind and draft freshness.
+
 The optional `run` reports the latest GUI job for this server launch:
 `status` (`starting`, `running`, `finished`, or `failed`), `round_id`, and `failure`.
 `running` means a round has been recorded; its persisted round status shows execution progress.
 Job failure categories omit raw adapter errors, prompts, and provider details.
+
 Review and publication job failures also write local diagnostics to the GUI server's terminal (stderr),
 including the PR, round when known, and underlying error causes.
 Inspect that terminal for configuration, credentials, network, or state persistence failures.
 JSON diagnostics report the error category and location while omitting input values;
 worker task failures report panic or cancellation without repeating panic payloads.
+
 The optional `publication` reports the latest GUI publication job for this server launch:
 `round_id`, `status` (`active`, `published`, `failed`, or `unknown`), safe `error`,
 and optional post-publication `freshness`.
 `active` includes preflight; it does not mean GitHub has received a post.
+
 The latest round's optional `receipt` contains the confirmed review ID and URL,
 publisher login and numeric ID, reviewed commit ID, and publication time.
 Saved receipts and pending publication states remain visible after a server restart.
 Persisted round and cleanup information remains available after restarting the GUI.
+
 `GET /api/requests/events` is a server-sent event stream.
 It sends a `requests` event with the same JSON snapshot on connection
 and whenever displayed local state or runner activity changes,
@@ -173,9 +196,11 @@ It sends `state_error` if the local state cannot be read,
 then resumes snapshots when the read succeeds.
 The browser reconnects automatically if the stream is interrupted;
 reloading the page also starts a new connection.
+
 `/api` reports the API name and version, and `/api/hello` remains available.
 Request snapshots and static assets do not require sign-in.
 Private draft contents require the lead session token.
+
 `POST /api/session` exchanges the one-time code for a launch-scoped session token.
 `POST /api/requests/refresh`, `POST /api/requests/authorize`,
 `POST /api/requests/revoke`, `POST /api/requests/prepare`,
@@ -183,6 +208,7 @@ Private draft contents require the lead session token.
 `POST /api/drafts/ROUND_ID/reject`, and `POST /api/drafts/ROUND_ID/publish`
 require that token and a same-origin request;
 the server rejects cross-origin and missing-origin POST requests.
+
 Authorization accepts `key` with `repository` and `number`,
 the inspected `head_sha` and `revision`, and `scope` (`one_round` or `pr_cycle`).
 Revocation accepts only `repository` and `number`; it needs no inspected head or revision.
@@ -190,19 +216,23 @@ Both return `changed` to report whether local state changed.
 Authorization conflicts return HTTP 409 and missing requests return HTTP 404.
 These decisions compare local state, using the same rules and locks as the CLI.
 Refresh from GitHub before inspecting the inputs for a decision.
+
 Preparation accepts `repository` and `number` and uses the effective `--config-file`.
 It returns the prepared `head_sha`, `revision`, `authorization`,
 `configuration_sha256`, exact-head `checks`, `readiness` and `readiness_message`,
 `proposed_model`, `proposal_matches_coauthor`, `validated_model`, `resolved_model`,
 and `models` with each configured model and its resolved agent.
+
 Validation accepts `key` with `repository` and `number`, the selected `model`,
 the inspected `head_sha` and `revision`,
 and `rules` with the prepared `authorization` and `configuration_sha256`.
 It returns a new preparation snapshot after saving the model choice.
+
 Blocked preparation returns a snapshot; blocked or stale validation returns HTTP 409.
 Configuration and archive verification failures return HTTP 422.
 GitHub failures can leave freshly observed inputs saved without a new model choice.
 The snapshots omit prompts, provider details, and archive paths.
+
 Run accepts the same inspected payload as validation, including the selected model and rules.
 It rechecks the persisted model choice and inspected inputs, authorization, and configuration
 before startup and again before dispatch.
@@ -211,33 +241,39 @@ this acknowledges scheduling, not successful startup or agent dispatch.
 An already-active GUI job returns HTTP 409.
 Watch request snapshots or SSE for startup errors and round progress.
 One-round authorization is consumed only when dispatch is recorded.
+
 `GET /api/drafts/ROUND_ID?repository=owner%2Frepo&number=42`
 requires the session token in its `Authorization: Bearer TOKEN` header.
 It accepts a validated round ID and PR key and returns only a completed draft belonging to that PR.
 The response contains `key`, `round_id`, `head_sha`, `revision`, `decision`, `model`, `agent`,
 `verdict`, `freshness`, `publication_body`, `publication_body_sha256`, `lead_advice`, and optional `receipt`.
 The body includes the exact round footer that publication would post.
+
 Freshness uses the CLI's live GitHub checks and confirmed-publication exclusions;
 it is separate from the round's recorded freshness in public snapshots.
 Inspection does not persist a missing publication seal.
 Missing sessions return HTTP 401, missing rounds or a different PR return HTTP 404,
 unfinished rounds return HTTP 409, and failed draft verification returns HTTP 422.
 Responses disable caching and omit review logs, prompts, provider details, paths, and raw errors.
+
 `POST /api/drafts/ROUND_ID/reject` accepts `key` with `repository` and `number`,
 and `body_hash` with the inspected `publication_body_sha256`.
 It uses the CLI's rejection operation under the same PR and state locks,
 verifies the original artifact and publication seal, and requires completed cleanup.
 It does not fetch GitHub inputs or require current head or revision values.
+
 It returns `changed: true` for a new rejection and `changed: false` for a repeated matching decision.
 A different hash, pending cleanup, or a conflicting decision returns HTTP 409;
 failed draft verification returns HTTP 422.
 Watch request snapshots or SSE for the recorded decision.
+
 `POST /api/drafts/ROUND_ID/publish` accepts the same `key` and inspected `body_hash`.
 It returns HTTP 202 with `accepted: true` when the server owns the publication job,
 or HTTP 409 when a GUI publication for the PR is already active.
 Acceptance acknowledges scheduling; watch request snapshots or SSE for the outcome.
 Preflight failures do not post a review and appear as safe job errors.
 Rejection is blocked while a GUI publication for that PR is active.
+
 The shared CLI operation verifies artifacts, the body hash and GitHub size limit,
 completed cleanup, publisher identity, and live freshness before recording dispatch.
 A matching completed publication returns its saved receipt without another post.
@@ -366,6 +402,7 @@ Run each command as `review-platform COMMAND` after installing the CLI.
 `REPOSITORY` means `owner/repo`, `PR` is a positive pull request number,
 `HEAD_SHA` is a 40- or 64-character hexadecimal commit ID,
 and `REVISION` is the positive local input revision shown by `status`.
+
 Owners use 1-39 ASCII letters, digits, or hyphens.
 They cannot start or end with a hyphen.
 Repository names use 1-100 ASCII letters, digits, hyphens, underscores, or dots,
@@ -389,6 +426,7 @@ including when loaded from the JSON state file.
   and submitted review bodies from the PR author.
   It ignores other users, pending reviews, and empty review bodies.
   It records comment IDs and hashes of exact text, not comment bodies.
+
   A changed head, author identity, or author discussion advances the input revision.
   The first refresh establishes the discussion baseline and advances the revision,
   even if no comments exist.
@@ -403,6 +441,7 @@ including when loaded from the JSON state file.
   otherwise the command asks the lead to refresh and inspect the request first.
   If either locally recorded value has changed,
   the command reports the mismatch and leaves authorization unchanged.
+
   Use `--scope pr-cycle` instead to keep authorization active when the head changes.
   Both checks also apply when choosing or switching to `pr-cycle`.
   Running `authorize` again can switch between the two scopes.
@@ -420,6 +459,7 @@ including when loaded from the JSON state file.
   and either `ready to run` or an unmet requirement.
   A closed PR, missing authorization, pending or failing checks,
   unknown checks, or no reported checks cannot be ready.
+
   To confirm or change the model, repeat the command with
   `--model MODEL --head HEAD_SHA --revision REVISION` using the values the lead inspected.
   The choice must name a review model configured for the repository.
@@ -427,9 +467,11 @@ including when loaded from the JSON state file.
   Validation is saved only when the live gates pass and the inspected head and revision still match.
   Input, authorization, or trusted rule changes invalidate the choice.
   Changes to the selected model's agent, prompt, archive path, or checksum also invalidate it.
+
   When the other gates allow model validation,
   preparation verifies that the archive is a regular file with the configured SHA-256.
   A missing file or checksum mismatch returns an error and saves no new model choice.
+
   Preparing and validating do not start a round or consume one-round authorization.
   Without `--model`, a blocked preparation reports its requirement without starting work.
   With `--model`, blocked readiness returns an error and records no new model choice.
@@ -446,12 +488,14 @@ including when loaded from the JSON state file.
   Add `--checks` to display GitHub check runs and commit statuses for that exact head.
   It lists each result and summarizes the reported checks as green, pending, failing,
   unknown, or no checks reported.
+
   Green requires at least one result, every check run completed with success, neutral, or skipped,
   and every commit status successful.
   An unknown GitHub value or incomplete result never appears green.
   For paginated check runs, the command rereads all pages to compare run IDs.
   If the IDs or reported count differ, it asks you to retry.
   The command reports an error rather than giving a partial summary if GitHub reports more than 1000 results.
+
   Add `--diff` to display the full PR code diff against its base for a first review.
   Add `--since HEAD_SHA` to display changes after a previously reviewed commit
   instead of showing the full PR diff again.
@@ -461,11 +505,13 @@ including when loaded from the JSON state file.
   `--checks` can be used with either diff option.
   The checks section always refers to the current PR head.
   `--diff` and `--since` only change the code diff section.
+
   If a requested diff or checks fetch fails, the command prints no partial report.
   Diff output is limited to 8 MiB.
   CRLF line endings are displayed as LF, while other terminal control characters are escaped.
   If GitHub refuses to generate a diff, possibly because of its file or line limits,
   inspect the PR on GitHub.
+
   The CLI checks the live PR head again before displaying the diff,
   and also checks the base SHA for a full PR diff.
   It reports a change during retrieval.
@@ -489,6 +535,7 @@ including when loaded from the JSON state file.
   and creates a sandbox with read-only checkout and instructions.
   Immediately before dispatch it rechecks GitHub inputs, CI, authorization,
   configuration, and policy.
+
   One-round authorization is consumed only when dispatch is recorded.
   Progress output names phases and never prints the review dialogue or draft.
   A completed output is validated and saved even if sandbox stop fails;
@@ -498,6 +545,7 @@ including when loaded from the JSON state file.
   and live freshness.
   The body contains the unchanged agent comments followed by a visible agent-review footer.
   The CLI verifies and hashes the original agent output while leaving that file unchanged.
+
   It prints the complete `publish-draft` command only while the round awaits a decision
   and the body fits GitHub's 65,536-character review limit.
   Oversized bodies stay sealed for inspection and rejection.
@@ -526,6 +574,7 @@ including when loaded from the JSON state file.
   A reserved attempt with no recorded dispatch returns to awaiting decision locally.
   One new match records a receipt; multiple require `--review-id ID` to select one.
   No match leaves the outcome unknown.
+
   After checking GitHub manually, the lead can use
   `--confirm-not-posted ATTEMPT_ID` to record that nothing was posted
   and return the draft to awaiting decision.
@@ -554,11 +603,13 @@ Without overrides, the CLI uses the per-user locations for each platform:
 On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
+
 The state file and configuration file have separate schema versions.
 The current state schema is version 6.
 Version 5 state is upgraded in memory and saved as version 6 on the next mutation;
 older and future versions are rejected.
 Existing private draft artifacts are left unchanged.
+
 For project-local files, pass both `--state-file .review-platform/state.json`
 and `--config-file .review-platform/config.json`.
 Git ignores the `.review-platform/` directory.
@@ -572,6 +623,7 @@ The configuration file has schema version 5;
 the state file uses schema version 6.
 Earlier configuration schemas are rejected during development;
 update the private file before running review commands.
+
 `models` defines selectable models and their co-author signatures;
 `agents` defines agent capabilities, prompts, and runner settings.
 Each repository orders its review models and agent runners,
@@ -642,26 +694,31 @@ Replace the example model IDs, co-author signatures, prompt, archive path, and c
 with the trusted values for your setup.
 Model IDs should identify the exact models that the agent can run.
 Agent IDs are lowercase ASCII identifiers.
+
 The CLI matches both the name and email of trailing `Co-authored-by` commit trailers,
 case insensitively, so models sharing a co-author email can be distinguished.
 It never treats the commit subject as a trailer.
 It proposes the first repository-listed model absent from those trailers.
 If every configured model matches a trailer, it proposes the first and explains the match.
+
 For that model, it chooses the first repository-listed runner whose agent declares support.
 Configuration is rejected if any listed review model has no compatible runner.
 Commit trailers are author-controlled hints; only the lead's explicit model choice is trusted.
 The prompt is inline UTF-8 text of at most 64 KiB and is not printed by `prepare-review`.
+
 Archive paths must be absolute, end in `.tar`, and name regular files rather than symlinks.
 Each archive needs a regular, separate OCI metadata file at `<archive>.config.json`.
 Both SHA-256 checksums must match their files.
 Calculate them with `shasum -a 256 FILE` on macOS or `sha256sum FILE` on Linux,
 once for the tar and once for its `.config.json` file.
+
 The configuration contains no credentials and should be kept private with the state file.
 Replace the example gateway, provider, policy, and archive values
 with the operator-managed values for the same local VM gateway.
 The example checksums are placeholders and will fail verification.
 The policy checksum is SHA-256 of the policy file;
 the two VM image checksums cover the rootfs tar and its OCI metadata separately.
+
 Review Platform extracts `config.Env` from the verified metadata
 and declares those non-secret values with OpenShell `--env` arguments.
 The combined sandbox environment is limited to 64 KiB.
@@ -669,6 +726,7 @@ The Claude image must define an absolute `CLAUDE_CODE_EXECUTABLE` path there.
 Operator-specific non-secret values such as `ANTHROPIC_BASE_URL`
 may be set in that agent's `runner.environment`.
 Duplicate environment names are rejected.
+
 The `hold_command` keeps a newly created sandbox alive without starting Claude;
 the runner then rechecks every gate before executing Claude separately.
 The sandbox mounts only the checkout and trusted instructions read-only,
@@ -676,9 +734,11 @@ plus the round's output directory writable.
 Their fixed sandbox paths are `/sandbox/src`, `/sandbox/instructions`,
 and `/sandbox/output`, respectively.
 The runner always disables TTY and restarts and prevents automatic provider creation.
+
 The shared `timeout_seconds`, `cpu`, `memory`, and `log_limit_bytes`
 default to 1800 seconds, two CPUs, 4 GiB, and 8 MiB.
 Each agent's `max_turns` defaults to 100.
+
 The runner rejects `podman` as unsupported and unknown driver names as invalid
 before creating a sandbox or consuming authorization.
 Only runner kind `claude` has an execution adapter in this milestone;
@@ -696,6 +756,7 @@ and a GitHub provider restricted to read-only REST access.
 Review Platform checks authenticated access and named provider availability,
 and rejects a write-capable GitHub policy when the gateway exposes one.
 The operator remains responsible for provider policy and credential rotation.
+
 The VM gateway must run on the host that holds the staged archive and mount paths.
 The current runner is intended for macOS and Linux VM setups;
 remote gateway deployment is not implemented.
@@ -705,22 +766,26 @@ under `rounds/ROUND_ID/`.
 It retains the `output/review-output.json` agent artifact,
 stores the assembled private `draft.json`,
 and keeps an incomplete log file if an agent run fails after emitting dialogue.
+
 The runner seeds the output file with an invalid marker and grants Claude's `Edit` tool permission for it.
 It starts Claude in `/sandbox`.
 Relative `Read` permissions cover the checkout and instructions.
 `Edit(./output/review-output.json)` matches the output file.
 An unchanged marker cannot become a draft.
+
 The trusted prompt lists the standalone Git and GitHub Bash commands the runner grants.
 It tells Claude to treat other shell commands as denied.
 If a compound call is denied, it tells Claude to retry as a standalone granted command.
 Claude Code may still allow some reads and simple shell commands outside the explicit `--allowedTools` entries.
 The wildcard Git and GitHub Bash grants do not restrict every read or write option.
 This is a known limitation tracked in [issue #13](https://github.com/feloy/review-platform/issues/13).
+
 The agent artifact must be regular UTF-8 JSON of at most 1 MiB
 with exactly `status`, `comments`, and `lead_advice`.
 The runner adds `review_log` from the captured Claude dialogue.
 Only `comments` becomes the GitHub review body, followed by the visible footer;
 `lead_advice` and `review_log` remain private.
+
 The rendered log limit defaults to 8 MiB;
 exceeding it fails the round instead of truncating it.
 Routine CLI output shows progress phases without the dialogue or draft.
@@ -735,8 +800,10 @@ After a stop failure, the runner still tries to delete the sandbox.
 A successful delete completes cleanup and leaves the draft available for inspection.
 Recovery refuses to stop a sandbox while its review runner is active.
 Recovery stops and deletes the recorded sandbox without replaying Claude.
+
 One-round authorization is never restored after an uncertain dispatch.
 A failed PR-cycle round may be retried explicitly after all live gates pass again.
+
 Use the body hash displayed by `show-draft` to publish or reject a saved draft
 before running another round.
 A retry with the rejected round's exact model choice needs fresh validation.
@@ -764,6 +831,7 @@ For private repositories or a higher GitHub API rate limit,
 set `REVIEW_PLATFORM_GITHUB_TOKEN_RO` to a token with pull request, contents,
 checks, and commit statuses read access.
 The CLI uses this token only for GitHub reads.
+
 To publish, set `REVIEW_PLATFORM_GITHUB_TOKEN_RW` to a separate token
 with pull-request write permission and set `publisher_login` in the private configuration
 to the GitHub account expected to own that token.
@@ -771,6 +839,7 @@ The CLI verifies the account through `GET /user` before publication.
 Write credentials remain in the operator process and never enter review sandboxes,
 prompts, state files, or routine logs.
 Rejection needs neither token nor GitHub access.
+
 HTTPS uses the platform's trusted certificates, including organization roots installed for a TLS-intercepting proxy.
 On Linux, `SSL_CERT_FILE` or `SSL_CERT_DIR` can select a PEM certificate bundle or directory instead of the system CA bundle.
 
@@ -781,6 +850,7 @@ Saved drafts block further rounds for the same PR, including when they are stale
 until the lead publishes or rejects them locally.
 The CLI records the head of each round;
 use that value with `github-pr --since` when inspecting later changes.
+
 Its state is local and protected by a short exclusive lock for mutations.
 Commands involving one PR also hold a per-PR lock across publication,
 recovery, rejection, the `refresh` command, and round startup.
@@ -789,9 +859,11 @@ the runner lock stays held through agent execution and sandbox cleanup.
 The round's later pre-dispatch recheck of GitHub inputs uses the short state lock
 when it saves an observation.
 A concurrent `refresh` that changes inputs makes the round stop before dispatch.
+
 The `authorize` command's `--head` and `--revision` checks compare local state only.
 `prepare-review` refreshes live GitHub inputs before checking those values.
 Concurrent CLI mutations reload the state under the lock before saving.
+
 Each refresh reads every discussion collection twice and rechecks the PR head and author.
 It limits each collection to 1,000 items and 8 MiB of response data per pass.
 A failed `refresh` leaves local state unchanged.
@@ -799,26 +871,31 @@ A failed `refresh` leaves local state unchanged.
 a later GitHub error can leave the updated inputs in the state file.
 The result is an observation, not a guarantee that GitHub stays unchanged afterward.
 Changes made and reverted between observations may be missed.
+
 When a confirmed publication uses the PR author's GitHub account,
 GitHub observations exclude only that recorded review ID from author-comment triggers,
 including preparation's final recheck.
 The visible footer alone never identifies a Review Platform publication.
 Closed and draft PRs can be refreshed; refreshing grants no permission to run a review.
+
 Round startup fetches fresh inputs and checks before creating a sandbox
 and again immediately before dispatch.
 Publication rechecks the live head, open state, and author discussion before posting.
 GitHub can change after that check.
 The posted review remains tied to the original commit;
 the CLI rechecks afterward and reports any change without deleting or reposting it.
+
 Network failures after dispatch can leave publication outcome unknown.
 Recovery never automatically retries the POST.
 Manual confirmation that nothing was posted allows another decision,
 but a delayed first request can still create a duplicate review.
+
 Use `github-pr --diff` or `github-pr --since HEAD_SHA` to inspect the code and live head
 before recording or authorizing a request.
 GitHub may still change after that inspection.
 The `--checks` output is a snapshot of reported results.
 `prepare-review` and `run-review` use that same exact-head result for readiness.
+
 GitHub's PR commits endpoint returns at most 250 commits.
 Preparation accepts that many only when the list reaches the inspected head;
 otherwise it reports the endpoint limit instead of using incomplete co-author hints.
@@ -854,6 +931,7 @@ The daemon resolves an agent that supports that model and runs it in OpenShell w
 and the verified VM archive configured for that repository and agent.
 The agent reads PR files, discussion, and earlier reviews through read-only GitHub access.
 It does not run tools on the code; CI performs validation.
+
 The agent then writes a draft review.
 The lead inspects the draft and chooses to publish it unchanged or reject it.
 If the lead chooses to publish, the daemon posts the unchanged text to the PR.
@@ -872,6 +950,7 @@ a human maintainer makes the formal approval and merge decision.
   It manages agents' review instructions (prompts), proposes a model different from the PR's co-author model when possible,
   resolves the first compatible configured agent, and supplies that agent's instructions and verified archive for each round.
   It connects to the configured OpenShell gateway and manages only the sandboxes it creates for review rounds.
+
   It waits for green checks, starts review rounds after lead validation, tracks progress, holds draft reviews,
   and posts only drafts the lead has chosen to publish.
   After a rejection, it waits for valid model validation and active authorization
@@ -894,6 +973,7 @@ Each requested PR has one authorization state.
 Authorization controls whether a new review round may start;
 it does not describe whether CI is pending, an agent is running, or a draft awaits the lead's decision.
 Every round also requires green CI checks for the current PR head and lead validation of the model.
+
 The state file stores the three values as `awaiting_lead`, `one_round`, and `pr_cycle`.
 Entering either authorized state requires the head SHA and input revision the lead inspected
 to match the locally recorded values.
@@ -975,6 +1055,7 @@ The gateway operator configures a compatible model provider and a GitHub provide
 whose policy enforces read-only REST access for the reviewing agent.
 For each round, Review Platform checks authenticated gateway access and the expected
 named providers, then creates, monitors, and removes its own sandbox.
+
 The trusted configuration names the driver and supplies the verified VM image,
 provider names, non-secret environment, policy, and resource limits.
 Review Platform fixes the mount targets, TTY and restart behavior,
@@ -982,6 +1063,7 @@ and Claude command rules in code.
 The runner accepts only a configured `vm` driver for now and checks that the gateway supports it.
 It reports `podman` as unsupported or an unknown driver as invalid
 before any sandbox is created.
+
 Round-specific checkout and output paths are filled in when the sandbox is created.
 The runner validates these values against the read-only input and isolated output rules.
 It attaches only those providers and disables automatic provider creation.
