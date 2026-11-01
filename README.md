@@ -93,7 +93,14 @@ and warns when local inputs or the latest round change.
 Reopen it to inspect current state and recheck freshness.
 Inspection does not change local state, authorization, or the draft decision.
 Completed drafts can be inspected while sandbox cleanup is pending.
-Use the CLI to publish or reject a draft, or to recover a sandbox that needs cleanup.
+Use **Reject draft** after cleanup completes to record a local rejection.
+Inspect the round and publication body hash in the confirmation, then choose **Confirm rejection**.
+Rejection posts nothing and preserves the private draft and current authorization.
+It clears model validation matching that round and preserves a different later choice.
+Stale drafts and drafts with unknown freshness can still be rejected.
+Live input changes do not retarget the confirmation;
+if the latest round, decision, or cleanup changes, reopen the draft before rejecting it.
+Use the CLI to publish a draft or recover a sandbox that needs cleanup.
 The GUI does not retry failed reviews automatically or offer a per-review cancel action.
 On Unix, stopping the GUI with SIGINT or SIGTERM requests cancellation
 and waits for runners to finish their cleanup attempts.
@@ -144,7 +151,8 @@ Private draft contents require the lead session token.
 `POST /api/session` exchanges the one-time code for a launch-scoped session token.
 `POST /api/requests/refresh`, `POST /api/requests/authorize`,
 `POST /api/requests/revoke`, `POST /api/requests/prepare`,
-`POST /api/requests/validate-model`, and `POST /api/requests/run`
+`POST /api/requests/validate-model`, `POST /api/requests/run`,
+and `POST /api/drafts/ROUND_ID/reject`
 require that token and a same-origin request;
 the server rejects cross-origin and missing-origin POST requests.
 Authorization accepts `key` with `repository` and `number`,
@@ -187,6 +195,15 @@ Inspection does not persist a missing publication seal.
 Missing sessions return HTTP 401, missing rounds or a different PR return HTTP 404,
 unfinished rounds return HTTP 409, and failed draft verification returns HTTP 422.
 Responses disable caching and omit review logs, prompts, provider details, paths, and raw errors.
+`POST /api/drafts/ROUND_ID/reject` accepts `key` with `repository` and `number`,
+and `body_hash` with the inspected `publication_body_sha256`.
+It uses the CLI's rejection operation under the same PR and state locks,
+verifies the original artifact and publication seal, and requires completed cleanup.
+It does not fetch GitHub inputs or require current head or revision values.
+It returns `changed: true` for a new rejection and `changed: false` for a repeated matching decision.
+A different hash, pending cleanup, or a conflicting decision returns HTTP 409;
+failed draft verification returns HTTP 422.
+Watch request snapshots or SSE for the recorded decision.
 
 Keep the compiled UI in `ui/dist` under version control
 so Rust installation does not need to run the frontend build.

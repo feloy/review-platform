@@ -364,6 +364,7 @@ fn router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/requests/validate-model", post(validate_model_request))
         .route("/api/requests/run", post(run_request))
         .route("/api/drafts/{round}", get(drafts::inspect))
+        .route("/api/drafts/{round}/reject", post(drafts::reject))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
         .layer(from_fn(localhost_guard))
