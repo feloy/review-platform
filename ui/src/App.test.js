@@ -733,7 +733,7 @@ describe('review requests page', () => {
     await act(() => finishReject({ ok: true, json: async () => ({ changed: true }) }));
     expect(await screen.findByText(/Draft rejected locally/)).toBeTruthy();
     if (freshness === 'stale') expect(screen.getAllByText('Draft ready').length).toBeGreaterThan(0);
-    expect(screen.queryByText(/Round status or cleanup changed/)).toBeNull();
+    expect(screen.queryByText(/The pending decision is no longer current/)).toBeNull();
     expect(screen.queryByText('Reject draft')).toBeNull();
     expect(screen.getByText(draft().lead_advice)).toBeTruthy();
     await showSnapshot(source, [request({ authorization: 'pr_cycle', head_sha: 'b'.repeat(40), revision: 2,
@@ -741,6 +741,129 @@ describe('review requests page', () => {
     expect(screen.getAllByText('Rejected').length).toBeGreaterThan(0);
     expect(screen.getByText('PR cycle')).toBeTruthy();
     expect(screen.queryByText('Draft ready')).toBeNull();
+  });
+
+  it('confirms the inspected publication hash, starts once, and shows the receipt from SSE', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishPublication;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft() })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishPublication = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const readyRound = round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' });
+    await showSnapshot(source, [request({ latest_round: readyRound })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    await clickMaterialButton(user, container, 'Publish draft');
+    const confirmation = screen.getByRole('region', { name: 'Confirm draft publication' });
+    expect(within(confirmation).getByText('r-example')).toBeTruthy();
+    expect(within(confirmation).getByText('d'.repeat(64))).toBeTruthy();
+    expect(within(confirmation).getByText(/Private lead advice stays private/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await clickMaterialButton(user, container, 'Cancel publication');
+    expect(screen.queryByRole('region', { name: 'Confirm draft publication' })).toBeNull();
+    await clickMaterialButton(user, container, 'Publish draft');
+    const confirm = await clickMaterialButton(user, container, 'Confirm publication');
+    expect(confirm.disabled).toBe(true);
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/drafts/r-example/publish');
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ key: draft().key, body_hash: draft().publication_body_sha256 });
+    await clickMaterialButton(user, container, 'Starting publication…');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await act(() => finishPublication({ ok: true, status: 202, json: async () => ({ accepted: true }) }));
+    await screen.findByText(/Publication accepted/);
+    expect(screen.getAllByText('Draft ready').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Publish draft')).toBeNull();
+    expect(screen.getByText(draft().lead_advice)).toBeTruthy();
+    await showSnapshot(source, [request({ latest_round: { ...readyRound, status: 'publishing' },
+      publication: { round_id: 'r-example', status: 'active' } })]);
+    expect(screen.getByText(/Publishing draft…/)).toBeTruthy();
+    expect(screen.queryByText(/Publication needs recovery/)).toBeNull();
+    await showSnapshot(source, [request({ latest_round: { ...readyRound, status: 'published', receipt: {
+      review_id: 71, url: 'https://github.com/owner/repo/pull/15#pullrequestreview-71', publisher_login: 'publisher', commit_id: 'a'.repeat(40),
+    } }, publication: { round_id: 'r-example', status: 'published', freshness: 'stale' } })]);
+    const link = screen.getByRole('link', { name: 'GitHub review 71' });
+    expect(link.getAttribute('href')).toBe('https://github.com/owner/repo/pull/15#pullrequestreview-71');
+    expect(screen.getByText(/PR inputs changed after publication/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['stale', 'unknown'])('blocks publication for %s freshness while leaving rejection available', async (freshness) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    expect((await clickMaterialButton(user, container, 'Publish draft')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { head_sha: 'b'.repeat(40) }, { revision: 2 },
+    { latest_round: round({ id: 'r-new', status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) },
+  ])('invalidates publication confirmation across live input changes: %j', async (change) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft() });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const initial = request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) });
+    await showSnapshot(source, [initial]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    await clickMaterialButton(user, container, 'Publish draft');
+    await showSnapshot(source, [{ ...initial, ...change }]);
+    expect((await clickMaterialButton(user, container, 'Confirm publication')).disabled).toBe(true);
+    expect(screen.getByRole('region', { name: 'Confirm draft publication' }).textContent).toContain('r-example');
+    await showSnapshot(source, [initial]);
+    expect((await clickMaterialButton(user, container, 'Confirm publication')).disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['publishing', 'publication_unknown'])('shows recovery guidance for persisted %s without posting or allowing another decision', async (status) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft({ decision: status }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status, cleanup_pending: false, cleanup_status: 'complete' }) })]);
+    await screen.findByText('View draft');
+    expect(screen.getByText(/Publication needs recovery/)).toBeTruthy();
+    expect(screen.getByText(/review-platform recover-publication owner\/repo 15 --round r-example/)).toBeTruthy();
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    expect(screen.queryByText('Publish draft')).toBeNull();
+    expect(screen.queryByText('Reject draft')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['active', 'failed', 'unknown', 'published'])('displays publication job %s from live updates', async (status) => {
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [request({ latest_round: round({ status: status === 'unknown' ? 'publication_unknown' : 'awaiting_decision' }),
+      publication: { round_id: 'r-example', status, error: status === 'failed' || status === 'unknown' ? 'Safe publication failure.' : null,
+        freshness: status === 'published' ? 'unknown' : null } })]);
+    if (status === 'active') expect(screen.getByText(/Publishing draft…/)).toBeTruthy();
+    else if (status === 'published') expect(screen.getByText(/saved receipt confirms publication/)).toBeTruthy();
+    else expect(screen.getByText('Safe publication failure.')).toBeTruthy();
+    expect(container.querySelector('script')).toBeNull();
+    await showSnapshot(source, [request({ latest_round: round({ id: 'r-new' }),
+      publication: { round_id: 'r-example', status, error: 'Safe publication failure.' } })]);
+    expect(screen.queryByText('Safe publication failure.')).toBeNull();
   });
 
   it.each([
@@ -757,6 +880,7 @@ describe('review requests page', () => {
     await screen.findByText('View draft');
     await clickMaterialButton(user, container, 'View draft');
     await screen.findByText(draft().lead_advice);
+    expect((await clickMaterialButton(user, container, 'Publish draft')).disabled).toBe(true);
     expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(true);
     expect(screen.queryByRole('region', { name: 'Confirm draft rejection' })).toBeNull();
     await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
@@ -782,7 +906,7 @@ describe('review requests page', () => {
     await screen.findByText(draft().lead_advice);
     await clickMaterialButton(user, container, 'Reject draft');
     await showSnapshot(source, [request({ latest_round: { ...readyRound, ...change } })]);
-    expect(screen.getByText(/Round status or cleanup changed/)).toBeTruthy();
+    expect(screen.getByText(/The pending decision is no longer current/)).toBeTruthy();
     expect((await clickMaterialButton(user, container, 'Confirm rejection')).disabled).toBe(true);
     // Returning to the prior state must not silently restore the old confirmation.
     await showSnapshot(source, [request({ latest_round: readyRound })]);

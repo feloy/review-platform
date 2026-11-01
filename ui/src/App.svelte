@@ -182,6 +182,13 @@
       : 'This draft was already rejected. Current authorization is unchanged.', 'Could not reject the private draft.');
   }
 
+  function publishDraft(requestId, inspected) {
+    return performAction(requestId, 'publish-draft', `/api/drafts/${encodeURIComponent(inspected.round_id)}/publish`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: inspected.key, body_hash: inspected.body_hash }),
+    }, () => 'Publication accepted. Follow its status below; closing this tab does not interrupt it.', 'Could not start draft publication.');
+  }
+
   onMount(() => {
     checkSession();
     const events = new EventSource('/api/requests/events');
@@ -284,7 +291,8 @@
             onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)}
             onRun={(preparation, model) => runReview(request, requestId, preparation, model)}
             onViewDraft={(roundId) => viewDraft(request, requestId, roundId)}
-            onRejectDraft={(inspected) => rejectDraft(requestId, inspected)} />
+            onRejectDraft={(inspected) => rejectDraft(requestId, inspected)}
+            onPublishDraft={(inspected) => publishDraft(requestId, inspected)} />
         {/each}
       </ul>
     {/if}

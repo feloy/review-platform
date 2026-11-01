@@ -1,31 +1,37 @@
 <script>
-  let { request, draft, action, onReject, onClose } = $props();
+  let { request, draft, action, onReject, onPublish, onClose } = $props();
   let confirmation = $state(null);
   let confirmationInvalid = $state(false);
-  let rejected = $state(false);
+  let decisionSubmitted = $state(false);
   const awaitingDecision = $derived(draft.decision === 'awaiting_decision' &&
     request.latest_round?.id === draft.round_id && request.latest_round?.status === 'awaiting_decision');
   const cleanupComplete = $derived(request.latest_round?.cleanup_pending === false &&
     request.latest_round?.cleanup_status === 'complete');
+  const publishing = $derived(request.publication?.status === 'active');
+  const changed = $derived(draft.head_sha !== request.head_sha || draft.revision !== request.revision ||
+    draft.round_id !== request.latest_round?.id || draft.decision !== request.latest_round?.status);
+  const fresh = $derived(draft.freshness === 'fresh' && !changed);
   $effect(() => {
-    if (confirmation && (!awaitingDecision || !cleanupComplete)) confirmationInvalid = true;
+    if (confirmation && (!awaitingDecision || !cleanupComplete || publishing ||
+      (confirmation.kind === 'publish' && !fresh))) confirmationInvalid = true;
   });
 
-  function confirmRejection() {
-    if (!awaitingDecision || !cleanupComplete || action?.pending || rejected || confirmationInvalid) return;
-    confirmation = { key: { ...draft.key }, round_id: draft.round_id, body_hash: draft.publication_body_sha256 };
+  function confirmDecision(kind) {
+    if (!awaitingDecision || !cleanupComplete || publishing || action?.pending || decisionSubmitted || confirmationInvalid ||
+      (kind === 'publish' && !fresh)) return;
+    confirmation = { kind, key: { ...draft.key }, round_id: draft.round_id, body_hash: draft.publication_body_sha256 };
   }
 
-  async function reject() {
-    if (!confirmation || confirmationInvalid || !awaitingDecision || !cleanupComplete || action?.pending || rejected) return;
-    if (await onReject(confirmation)) {
-      rejected = true;
+  async function decide() {
+    if (!confirmation || confirmationInvalid || !awaitingDecision || !cleanupComplete || publishing || action?.pending || decisionSubmitted ||
+      (confirmation.kind === 'publish' && !fresh)) return;
+    const result = await (confirmation.kind === 'publish' ? onPublish(confirmation) : onReject(confirmation));
+    if (result) {
+      decisionSubmitted = true;
       confirmation = null;
       confirmationInvalid = false;
     }
   }
-  const changed = $derived(draft.head_sha !== request.head_sha || draft.revision !== request.revision ||
-    draft.round_id !== request.latest_round?.id || draft.decision !== request.latest_round?.status);
   const freshnessLabels = { fresh: 'Fresh at inspection', stale: 'Stale', unknown: 'Unknown' };
   const verdictLabels = { ACCEPT: 'Accept', ACCEPT_WITH_NITS: 'Accept with nits', REQUEST_CHANGES: 'Request changes' };
   const decisionLabels = {
@@ -69,33 +75,51 @@
   <p>This advice stays private when the review is published.</p>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="draft-text" role="region" aria-label="Private lead advice" tabindex="0"><pre>{draft.lead_advice || 'No private lead advice.'}</pre></div>
-  {#if awaitingDecision && !rejected && !confirmation}
+  {#if awaitingDecision && !decisionSubmitted && !confirmation}
     {#if !cleanupComplete}
-      <p class="action-note">Sandbox cleanup must finish before rejecting this draft.</p>
+      <p class="action-note">Sandbox cleanup must finish before deciding on this draft.</p>
     {/if}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <md-text-button disabled={action?.pending || !cleanupComplete || confirmationInvalid} onclick={confirmRejection}>Reject draft</md-text-button>
+    {#if !fresh}
+      <p class="action-note">Reopen the draft and verify fresh PR inputs before publishing. Rejection remains available after cleanup.</p>
+    {/if}
+    <div class="authorization-buttons">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-filled-button disabled={action?.pending || !cleanupComplete || confirmationInvalid || publishing || !fresh}
+        onclick={() => confirmDecision('publish')}>Publish draft</md-filled-button>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-text-button disabled={action?.pending || !cleanupComplete || confirmationInvalid || publishing}
+        onclick={() => confirmDecision('reject')}>Reject draft</md-text-button>
+    </div>
   {/if}
   {#if confirmationInvalid && !action?.pending}
-    <p class="action-error" role="alert">Round status or cleanup changed. Reopen the draft before rejecting it.</p>
+    <p class="action-error" role="alert">The pending decision is no longer current. Reopen the draft before deciding.</p>
   {/if}
   {#if confirmation}
-    <section class="authorization-panel" aria-label="Confirm draft rejection">
-      <h4>Reject this draft?</h4>
-      <p>Nothing will be posted. The private draft and current authorization are preserved.
-        Model validation matching this round is cleared; another round needs a valid model choice.</p>
+    {@const publish = confirmation.kind === 'publish'}
+    <section class="authorization-panel" aria-label={publish ? 'Confirm draft publication' : 'Confirm draft rejection'}>
+      <h4>{publish ? 'Publish this draft?' : 'Reject this draft?'}</h4>
+      {#if publish}
+        <p>The exact review comments shown above, including the round footer, will be posted to GitHub as a comment review on the reviewed commit.
+          Private lead advice stays private. The server rechecks PR freshness and publisher identity before posting.</p>
+      {:else}
+        <p>Nothing will be posted. The private draft and current authorization are preserved.
+          Model validation matching this round is cleared; another round needs a valid model choice.</p>
+      {/if}
       <dl class="detail-list">
-        <div><dt>Round to reject</dt><dd><code>{confirmation.round_id}</code></dd></div>
-        <div><dt>Body SHA-256 to reject</dt><dd><code>{confirmation.body_hash}</code></dd></div>
+        <div><dt>Round to {publish ? 'publish' : 'reject'}</dt><dd><code>{confirmation.round_id}</code></dd></div>
+        <div><dt>Body SHA-256 to {publish ? 'publish' : 'reject'}</dt><dd><code>{confirmation.body_hash}</code></dd></div>
       </dl>
       <div class="authorization-buttons">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-filled-button disabled={action?.pending || confirmationInvalid || !awaitingDecision || !cleanupComplete}
-          onclick={reject}>{action?.pending && action.operation === 'reject-draft' ? 'Rejecting…' : 'Confirm rejection'}</md-filled-button>
+        <md-filled-button disabled={action?.pending || confirmationInvalid || !awaitingDecision || !cleanupComplete || publishing || (publish && !fresh)}
+          onclick={decide}>{action?.pending ? (publish ? 'Starting publication…' : 'Rejecting…') : (publish ? 'Confirm publication' : 'Confirm rejection')}</md-filled-button>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-text-button disabled={action?.pending} onclick={() => confirmation = null}>Cancel rejection</md-text-button>
+        <md-text-button disabled={action?.pending} onclick={() => confirmation = null}>{publish ? 'Cancel publication' : 'Cancel rejection'}</md-text-button>
       </div>
     </section>
   {/if}
-  <p>Use the CLI to publish drafts.</p>
+  {#if draft.receipt}
+    <p>Published as <a href={draft.receipt.url} target="_blank" rel="noopener noreferrer">GitHub review {draft.receipt.review_id}</a>
+      by {draft.receipt.publisher_login}.</p>
+  {/if}
 </section>

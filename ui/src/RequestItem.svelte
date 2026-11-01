@@ -3,7 +3,7 @@
   import ReviewProgress from './ReviewProgress.svelte';
   import DraftPanel from './DraftPanel.svelte';
 
-  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft } = $props();
+  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
   let inspected = $state(null);
   let preparation = $state(null);
@@ -196,7 +196,7 @@
         onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
     {/if}
     {#if draft}
-      <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onClose={() => draft = null} />
+      <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => draft = null} />
     {/if}
   {/if}
   {#if action?.message}

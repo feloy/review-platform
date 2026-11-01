@@ -1,6 +1,7 @@
 //! Loopback HTTP server for the embedded operator UI and local request snapshots.
 
 mod drafts;
+mod publications;
 
 use crate::{
     gui_runs::{RunSummary, Runs, StartError},
@@ -75,6 +76,7 @@ struct RequestSummary {
     validated_model: Option<ValidatedModelSummary>,
     latest_round: Option<RoundSummary>,
     run: Option<RunSummary>,
+    publication: Option<publications::PublicationSummary>,
 }
 
 #[derive(Serialize)]
@@ -102,6 +104,7 @@ struct RoundSummary {
     agent: String,
     failure: Option<FailureKind>,
     freshness: Option<Freshness>,
+    receipt: Option<review_platform::publication::PublicationReceipt>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +138,7 @@ struct AppState {
     prepare: Prepare,
     runs: Arc<Runs>,
     inspect_draft: drafts::Inspect,
+    publications: Arc<publications::Publications>,
 }
 
 struct Session {
@@ -346,6 +350,7 @@ fn router_with_runs(
         prepare,
         runs,
         inspect_draft: crate::draft_commands::inspect,
+        publications: Arc::new(publications::Publications::default()),
     }))
 }
 
@@ -365,6 +370,7 @@ fn router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/requests/run", post(run_request))
         .route("/api/drafts/{round}", get(drafts::inspect))
         .route("/api/drafts/{round}/reject", post(drafts::reject))
+        .route("/api/drafts/{round}/publish", post(drafts::publish))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
         .layer(from_fn(localhost_guard))
@@ -827,18 +833,22 @@ async fn hello() -> impl IntoResponse {
 async fn requests(
     HttpState(state): HttpState<Arc<AppState>>,
 ) -> Result<Json<RequestList>, (StatusCode, Json<ApiError>)> {
-    read_request_list(state.state_file.clone(), state.runs.clone())
-        .await
-        .map(Json)
-        .map_err(|error| {
-            eprintln!("error loading GUI request list: {error:#}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: "Could not read local review state.".into(),
-                }),
-            )
-        })
+    read_request_list(
+        state.state_file.clone(),
+        state.runs.clone(),
+        state.publications.clone(),
+    )
+    .await
+    .map(Json)
+    .map_err(|error| {
+        eprintln!("error loading GUI request list: {error:#}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "Could not read local review state.".into(),
+            }),
+        )
+    })
 }
 
 async fn request_events(
@@ -854,11 +864,14 @@ async fn request_events(
                 if state.runs.is_shutting_down() {
                     return None;
                 }
-                let current = match read_request_list(state.state_file.clone(), state.runs.clone())
-                    .await
-                    .and_then(|list| {
-                        serde_json::to_string(&list).context("serializing request list")
-                    }) {
+                let current = match read_request_list(
+                    state.state_file.clone(),
+                    state.runs.clone(),
+                    state.publications.clone(),
+                )
+                .await
+                .and_then(|list| serde_json::to_string(&list).context("serializing request list"))
+                {
                     Ok(json) => LastEvent::Snapshot(json),
                     Err(error) => {
                         if previous.as_ref() != Some(&LastEvent::ReadError) {
@@ -886,11 +899,17 @@ async fn request_events(
     Sse::new(updates).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-async fn read_request_list(state_file: PathBuf, runs: Arc<Runs>) -> Result<RequestList> {
+async fn read_request_list(
+    state_file: PathBuf,
+    runs: Arc<Runs>,
+    publications: Arc<publications::Publications>,
+) -> Result<RequestList> {
     tokio::task::spawn_blocking(move || {
         let mut list = request_list(&state_file)?;
         for request in &mut list.requests {
             request.run = runs.summary(&PrKey::new(&request.repository, request.number)?)?;
+            request.publication =
+                publications.summary(&PrKey::new(&request.repository, request.number)?)?;
         }
         Ok(list)
     })
@@ -912,6 +931,7 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                 revision: request.revision().get(),
                 authorization: request.authorization(),
                 run: None,
+                publication: None,
                 discussion: request.discussion().map(|discussion| DiscussionSummary {
                     issue_comments: discussion.count(CommentSource::IssueComment),
                     review_comments: discussion.count(CommentSource::ReviewComment),
@@ -937,6 +957,7 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                             agent: round.agent().to_string(),
                             failure: round.failure(),
                             freshness: round.freshness(),
+                            receipt: round.receipt().cloned(),
                         })
                     })
                     .transpose()?,
@@ -2556,7 +2577,8 @@ mod tests {
                 "model": "model-alpha",
                 "agent": "claude",
                 "failure": null,
-                "freshness": null
+                "freshness": null,
+                "receipt": null
             })
         );
         assert!(!runner.parent().unwrap().exists());
