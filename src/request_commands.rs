@@ -1,8 +1,8 @@
-//! Shared local request refresh orchestration for the CLI and operator UI.
+//! Shared request refresh and lead authorization commands for the CLI and UI.
 
 use crate::storage;
 use review_platform::{
-    PrKey, RefreshOutcome, StateError,
+    AuthorizationScope, HeadSha, InputRevision, PrKey, RefreshOutcome, StateError,
     github::{GithubClient, GithubError},
 };
 use std::error::Error;
@@ -17,6 +17,48 @@ pub enum RefreshError {
     Github(#[from] GithubError),
     #[error("local state: {0}")]
     Storage(#[source] Box<dyn Error + Send + Sync>),
+}
+
+#[derive(Debug, Error)]
+pub enum AuthorizationError {
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error("local state: {0}")]
+    Storage(#[source] Box<dyn Error + Send + Sync>),
+}
+
+impl From<anyhow::Error> for AuthorizationError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+/// Authorize only the inputs inspected by the lead, under the shared state lock.
+pub fn authorize(
+    state_file: &Path,
+    key: &PrKey,
+    head: &HeadSha,
+    revision: InputRevision,
+    scope: AuthorizationScope,
+) -> Result<bool, AuthorizationError> {
+    let _lock = storage::lock(state_file)?;
+    let mut state = storage::load(state_file)?;
+    let changed = state.authorize(key, head, revision, scope)?;
+    if changed {
+        storage::save(state_file, &state)?;
+    }
+    Ok(changed)
+}
+
+/// Revoke authorization without requiring the lead to match the current inputs.
+pub fn revoke(state_file: &Path, key: &PrKey) -> Result<bool, AuthorizationError> {
+    let _lock = storage::lock(state_file)?;
+    let mut state = storage::load(state_file)?;
+    let changed = state.revoke(key)?;
+    if changed {
+        storage::save(state_file, &state)?;
+    }
+    Ok(changed)
 }
 
 fn storage_error(error: anyhow::Error) -> RefreshError {

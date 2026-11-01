@@ -1,6 +1,14 @@
 <script>
-  let { request, signedIn, action, onRefresh } = $props();
+  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke } = $props();
   let expanded = $state(false);
+  let inspected = $state(null);
+  const inputsChanged = $derived(inspected &&
+    (inspected.head_sha !== request.head_sha || inspected.revision !== request.revision));
+
+  async function authorize(scope) {
+    if (!inspected || inputsChanged || action?.pending) return;
+    if (await onAuthorize(inspected, scope)) inspected = null;
+  }
 
   const authorizationLabels = {
     awaiting_lead: 'Awaiting lead',
@@ -76,11 +84,60 @@
         disabled={action?.pending}
         aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
         onclick={() => onRefresh()}
-      >{action?.pending ? 'Refreshing…' : 'Refresh from GitHub'}</md-text-button>
+      >{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</md-text-button>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-text-button
+        disabled={action?.pending || !request.discussion}
+        aria-expanded={Boolean(inspected)}
+        aria-label={`Manage authorization for ${request.repository} #${request.number}`}
+        onclick={() => inspected = { ...request }}
+      >Manage authorization</md-text-button>
+      {#if request.authorization !== 'awaiting_lead' || request.validated_model}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-text-button disabled={action?.pending}
+          aria-label={`Revoke authorization for ${request.repository} #${request.number}`}
+          onclick={() => onRevoke()}>
+          {action?.pending && action.operation === 'revoke' ? 'Revoking…' : 'Revoke authorization'}
+        </md-text-button>
+      {/if}
     {/if}
   </div>
   {#if signedIn}
     <p class="action-note">Changed inputs can clear one-round authorization and model validation.</p>
+    {#if !request.discussion}
+      <p class="action-note">Refresh from GitHub before authorizing this request.</p>
+    {/if}
+    {#if inspected}
+      <section class="authorization-panel" aria-label={`Authorize ${request.repository} #${request.number}`}>
+        <h3>Authorize review</h3>
+        <p>Inspect the <a href={`https://github.com/${request.repository}/pull/${request.number}`}
+          target="_blank" rel="noopener noreferrer">PR on GitHub</a> before authorizing these inputs.</p>
+        <dl class="detail-list">
+          <div><dt>Head</dt><dd><code>{inspected.head_sha}</code></dd></div>
+          <div><dt>Input revision</dt><dd>{inspected.revision}</dd></div>
+        </dl>
+        <p>One round permits a single review of these inputs. PR cycle keeps authorization active for later commits and author replies.</p>
+        <p>A review also requires green checks and a validated model.</p>
+        {#if inputsChanged}
+          <p class="action-error" role="alert">Inputs changed. Close this panel and inspect the current head and revision before authorizing.</p>
+        {/if}
+        <div class="authorization-buttons">
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-filled-button disabled={action?.pending || inputsChanged} onclick={() => authorize('one_round')}>
+            Authorize one round
+          </md-filled-button>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-text-button disabled={action?.pending || inputsChanged} onclick={() => authorize('pr_cycle')}>
+            Authorize PR cycle
+          </md-text-button>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-text-button disabled={action?.pending} onclick={() => inspected = null}>Close</md-text-button>
+        </div>
+        {#if action?.pending && action.operation === 'authorize'}
+          <p role="status">Saving authorization…</p>
+        {/if}
+      </section>
+    {/if}
   {/if}
   {#if action?.message}
     <p class:action-error={action.error} class="action-note" role={action.error ? 'alert' : 'status'}>

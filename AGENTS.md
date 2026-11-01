@@ -61,6 +61,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   resolve its agent from configured capabilities and repository runner order.
 - Require each lead authorization to name the PR head the lead inspected.
   Reject it if the recorded head has changed; revocation needs no head match.
+  Keep inspected inputs fixed in GUI decision forms;
+  live updates must not silently retarget a pending lead decision.
 - A round requires green checks for the exact PR head being reviewed.
   Bind each draft to that head and the author comments seen; mark it stale on change.
 - Combine check runs and commit statuses for the exact PR head when assessing CI.

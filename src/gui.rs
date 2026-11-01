@@ -16,7 +16,8 @@ use axum::{
 use futures_util::{Stream, stream};
 use include_dir::{Dir, include_dir};
 use review_platform::{
-    Authorization, CommentSource, PrKey, RefreshOutcome, StateError,
+    Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, PrKey,
+    RefreshOutcome, StateError,
     github::GithubError,
     review::{RoundRecord, RoundStatus},
 };
@@ -136,6 +137,20 @@ struct RefreshResponse {
     authorization_cleared: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizeRequest {
+    key: PrKey,
+    head_sha: HeadSha,
+    revision: InputRevision,
+    scope: AuthorizationScope,
+}
+
+#[derive(Serialize)]
+struct AuthorizationResponse {
+    changed: bool,
+}
+
 #[derive(PartialEq, Eq)]
 enum LastEvent {
     Snapshot(String),
@@ -197,6 +212,8 @@ fn router(state_file: PathBuf, session: Session, refresh: Refresh) -> Router {
         .route("/api/requests/events", get(request_events))
         .route("/api/session", get(check_session).post(start_session))
         .route("/api/requests/refresh", post(refresh_request))
+        .route("/api/requests/authorize", post(authorize_request))
+        .route("/api/requests/revoke", post(revoke_request))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
         .layer(from_fn(localhost_guard))
@@ -330,6 +347,86 @@ async fn refresh_request(
         },
     };
     Ok(Json(response))
+}
+
+async fn authorize_request(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<AuthorizeRequest>,
+) -> Result<Json<AuthorizationResponse>, (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    let changed = tokio::task::spawn_blocking(move || {
+        request_commands::authorize(
+            &state.state_file,
+            &request.key,
+            &request.head_sha,
+            request.revision,
+            request.scope,
+        )
+    })
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The authorization task failed.",
+        )
+    })?
+    .map_err(authorization_error)?;
+    Ok(Json(AuthorizationResponse { changed }))
+}
+
+async fn revoke_request(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(key): Json<PrKey>,
+) -> Result<Json<AuthorizationResponse>, (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    let changed =
+        tokio::task::spawn_blocking(move || request_commands::revoke(&state.state_file, &key))
+            .await
+            .map_err(|_| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The revocation task failed.",
+                )
+            })?
+            .map_err(authorization_error)?;
+    Ok(Json(AuthorizationResponse { changed }))
+}
+
+fn authorization_error(
+    error: request_commands::AuthorizationError,
+) -> (StatusCode, Json<ApiError>) {
+    use request_commands::AuthorizationError;
+    match error {
+        AuthorizationError::State(StateError::RequestNotFound(_)) => {
+            api_error(StatusCode::NOT_FOUND, "Review request no longer exists.")
+        }
+        AuthorizationError::State(
+            StateError::HeadMismatch { .. } | StateError::RevisionMismatch { .. },
+        ) => api_error(
+            StatusCode::CONFLICT,
+            "Review inputs changed. Inspect the current head and revision before authorizing again.",
+        ),
+        AuthorizationError::State(StateError::DiscussionNotObserved(_)) => api_error(
+            StatusCode::CONFLICT,
+            "Refresh from GitHub and inspect the current inputs before authorizing.",
+        ),
+        AuthorizationError::State(_) | AuthorizationError::Storage(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not update local review state.",
+        ),
+    }
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -659,6 +756,339 @@ mod tests {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         builder.body(Body::from(json.to_owned())).unwrap()
+    }
+
+    fn authorization_body(head: &str, revision: u64, scope: &str) -> String {
+        serde_json::json!({
+            "key": { "repository": "owner/repo", "number": 15 },
+            "head_sha": head,
+            "revision": revision,
+            "scope": scope,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn authorization_routes_require_lead_session_and_same_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let head = HeadSha::new("a".repeat(40)).unwrap();
+        let discussion = ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap();
+        let mut state = State::default();
+        state.record_request(key.clone(), head.clone()).unwrap();
+        state.refresh(&key, &head, &discussion).unwrap();
+        state
+            .authorize(
+                &key,
+                &head,
+                InputRevision::new(2).unwrap(),
+                AuthorizationScope::OneRound,
+            )
+            .unwrap();
+        storage::save(&state_file, &state).unwrap();
+        let original = std::fs::read(&state_file).unwrap();
+        let authorize_body = authorization_body(head.as_str(), 2, "pr_cycle");
+        test_runtime().block_on(async {
+            for (path, body) in [
+                ("/api/requests/authorize", authorize_body.as_str()),
+                (
+                    "/api/requests/revoke",
+                    r#"{"repository":"owner/repo","number":15}"#,
+                ),
+            ] {
+                for bootstrap in [Some("test-code".to_owned()), None] {
+                    let app = router(
+                        state_file.clone(),
+                        Session {
+                            bootstrap: bootstrap.clone(),
+                            token: "test-token".into(),
+                        },
+                        fake_refresh,
+                    );
+                    for token in [None, Some("wrong"), Some("test-token")] {
+                        if bootstrap.is_none() && token == Some("test-token") {
+                            continue;
+                        }
+                        let response = app
+                            .clone()
+                            .oneshot(json_post(path, Some("http://localhost:8080"), token, body))
+                            .await
+                            .unwrap();
+                        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                    }
+                    for origin in [
+                        None,
+                        Some("null"),
+                        Some("http://evil.example"),
+                        Some("http://localhost:8081"),
+                        Some("http://127.0.0.1:8080"),
+                    ] {
+                        let response = app
+                            .clone()
+                            .oneshot(json_post(path, origin, Some("test-token"), body))
+                            .await
+                            .unwrap();
+                        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                    }
+                    let mut request = json_post(
+                        path,
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        body,
+                    );
+                    request
+                        .headers_mut()
+                        .insert(header::HOST, HeaderValue::from_static("evil.example"));
+                    let response = app.oneshot(request).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+                }
+            }
+        });
+        assert_eq!(std::fs::read(state_file).unwrap(), original);
+    }
+
+    #[test]
+    fn authorization_routes_validate_inputs_before_mutating_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        storage::save(&state_file, &State::default()).unwrap();
+        let original = std::fs::read(&state_file).unwrap();
+        let app = router(
+            state_file.clone(),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+        );
+        let valid: serde_json::Value =
+            serde_json::from_str(&authorization_body(&"a".repeat(40), 2, "one_round")).unwrap();
+        test_runtime().block_on(async {
+            for (field, value) in [
+                ("head_sha", serde_json::json!("not-a-sha")),
+                ("revision", serde_json::json!(0)),
+                ("scope", serde_json::json!("awaiting_lead")),
+                ("scope", serde_json::json!("one-round")),
+                (
+                    "key",
+                    serde_json::json!({"repository": "../bad", "number": 15}),
+                ),
+                (
+                    "key",
+                    serde_json::json!({"repository": "owner/repo", "number": 0}),
+                ),
+                ("extra", serde_json::json!(true)),
+            ] {
+                let mut body = valid.clone();
+                body[field] = value;
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/authorize",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "field: {field}"
+                );
+            }
+            for field in ["head_sha", "revision", "scope", "key"] {
+                let mut body = valid.clone();
+                body.as_object_mut().unwrap().remove(field);
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/authorize",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "missing: {field}"
+                );
+            }
+            for body in [
+                r#"{"repository":"owner/repo","number":0}"#,
+                r#"{"repository":"../bad","number":15}"#,
+                r#"{"repository":"owner/repo","number":15,"head_sha":"ignored"}"#,
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/revoke",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        });
+        assert_eq!(std::fs::read(state_file).unwrap(), original);
+    }
+
+    #[test]
+    fn authorization_checks_inspected_inputs_and_revocation_needs_no_head() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let head = HeadSha::new("a".repeat(40)).unwrap();
+        let discussion = ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap();
+        let mut state = State::default();
+        state.record_request(key.clone(), head.clone()).unwrap();
+        storage::save(&state_file, &state).unwrap();
+        let app = router(
+            state_file.clone(),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+        );
+        test_runtime().block_on(async {
+            let original = std::fs::read(&state_file).unwrap();
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    "/api/requests/authorize",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &authorization_body(head.as_str(), 1, "one_round"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Refresh from GitHub")
+            );
+            assert_eq!(std::fs::read(&state_file).unwrap(), original);
+
+            state.refresh(&key, &head, &discussion).unwrap();
+            storage::save(&state_file, &state).unwrap();
+            let original = std::fs::read(&state_file).unwrap();
+            for (inspected_head, revision) in [("b".repeat(40), 2), (head.to_string(), 1)] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/authorize",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &authorization_body(&inspected_head, revision, "pr_cycle"),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+                assert_eq!(std::fs::read(&state_file).unwrap(), original);
+            }
+            for (scope, expected, changed) in [
+                ("one_round", Authorization::OneRound, true),
+                ("one_round", Authorization::OneRound, false),
+                ("pr_cycle", Authorization::PrCycle, true),
+                ("one_round", Authorization::OneRound, true),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/authorize",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &authorization_body(head.as_str(), 2, scope),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["changed"],
+                    changed
+                );
+                assert_eq!(
+                    storage::load(&state_file)
+                        .unwrap()
+                        .get(&key)
+                        .unwrap()
+                        .authorization(),
+                    expected
+                );
+            }
+            // A head change clears the baseline but preserves PR-cycle authorization.
+            request_commands::authorize(
+                &state_file,
+                &key,
+                &head,
+                InputRevision::new(2).unwrap(),
+                AuthorizationScope::PrCycle,
+            )
+            .unwrap();
+            let mut state = storage::load(&state_file).unwrap();
+            state
+                .record_request(key.clone(), HeadSha::new("b".repeat(40)).unwrap())
+                .unwrap();
+            storage::save(&state_file, &state).unwrap();
+            for changed in [true, false] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/revoke",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        r#"{"repository":"owner/repo","number":15}"#,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["changed"],
+                    changed
+                );
+                let saved = storage::load(&state_file).unwrap();
+                let request = saved.get(&key).unwrap();
+                assert_eq!(request.authorization(), Authorization::AwaitingLead);
+                assert_eq!(request.head_sha().as_str(), "b".repeat(40));
+                assert!(request.discussion().is_none());
+                assert!(saved.rounds().is_empty());
+            }
+            for (path, body) in [
+                (
+                    "/api/requests/authorize",
+                    authorization_body(head.as_str(), 2, "one_round").replace("15", "16"),
+                ),
+                (
+                    "/api/requests/revoke",
+                    r#"{"repository":"owner/repo","number":16}"#.to_owned(),
+                ),
+            ] {
+                let original = std::fs::read(&state_file).unwrap();
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        path,
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                assert_eq!(std::fs::read(&state_file).unwrap(), original);
+            }
+        });
     }
 
     #[test]

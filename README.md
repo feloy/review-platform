@@ -50,6 +50,16 @@ The list comes from the local state file.
 After signing in, use **Refresh from GitHub** on a request to fetch its current head
 and author discussion, using the same rules as the `refresh` command.
 Changed inputs may clear one-round authorization and model validation.
+Use **Manage authorization** to authorize one round or the PR cycle
+after inspecting the PR on GitHub and the displayed head and input revision.
+Refresh first if author discussion has not yet been observed.
+The authorization panel keeps the inputs it opened with;
+if live updates change them, reopen it and inspect the current inputs.
+The server also rejects authorization if the recorded head or revision has changed.
+Use **Revoke authorization** to withdraw permission for further rounds,
+including after inputs change or before discussion is refreshed.
+Changing authorization can clear model validation.
+Authorization alone does not start a review.
 The GUI checks the round's runner lock before warning that cleanup needs attention.
 If the runner lock cannot be inspected, it reports that cleanup status is unavailable.
 Review workflow operations remain available through the CLI while the GUI grows.
@@ -88,8 +98,16 @@ reloading the page also starts a new connection.
 `/api` reports the API name and version, and `/api/hello` remains available.
 The read-only endpoints do not require sign-in.
 `POST /api/session` exchanges the one-time code for a launch-scoped session token.
-`POST /api/requests/refresh` requires that token and a same-origin request;
+`POST /api/requests/refresh`, `POST /api/requests/authorize`,
+and `POST /api/requests/revoke` require that token and a same-origin request;
 the server rejects cross-origin and missing-origin POST requests.
+Authorization accepts `key` with `repository` and `number`,
+the inspected `head_sha` and `revision`, and `scope` (`one_round` or `pr_cycle`).
+Revocation accepts only `repository` and `number`; it needs no inspected head or revision.
+Both return `changed` to report whether local state changed.
+Authorization conflicts return HTTP 409 and missing requests return HTTP 404.
+These decisions compare local state, using the same rules and locks as the CLI.
+Refresh from GitHub before inspecting the inputs for a decision.
 
 Keep the compiled UI in `ui/dist` under version control
 so Rust installation does not need to run the frontend build.
