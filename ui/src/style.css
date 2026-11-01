@@ -275,7 +275,8 @@ h2 {
 }
 
 .authorization-panel,
-.preparation-panel {
+.preparation-panel,
+.draft-panel {
   margin: 0 28px 20px;
   padding: 20px;
   border: 1px solid #d4dbea;
@@ -284,7 +285,8 @@ h2 {
 }
 
 .authorization-panel p,
-.preparation-panel p {
+.preparation-panel p,
+.draft-panel p {
   margin: 12px 0;
   font-size: 0.88rem;
   line-height: 1.5;
@@ -327,6 +329,39 @@ h2 {
 
 .request-details[hidden] {
   display: none;
+}
+
+.draft-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.draft-heading h3 {
+  margin: 0;
+}
+
+.draft-panel h4 {
+  margin: 24px 0 8px;
+  font-size: 0.95rem;
+}
+
+.draft-text {
+  max-height: 32rem;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid #e1e2ec;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.draft-text pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+  line-height: 1.6;
 }
 
 .detail-group {

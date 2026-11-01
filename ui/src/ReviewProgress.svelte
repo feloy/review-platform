@@ -1,5 +1,5 @@
 <script>
-  let { request } = $props();
+  let { request, signedIn } = $props();
   const round = $derived(request.latest_round);
   const run = $derived(request.run);
   const active = $derived(run?.status === 'starting' || run?.status === 'running');
@@ -32,7 +32,9 @@
   <p class="action-note action-error">{failureLabels[round.failure] ?? 'Review failed'}. Prepare again after resolving the failure and any pending cleanup.</p>
 {/if}
 {#if round?.status === 'awaiting_decision'}
-  <p class="action-note">Private draft ready. Inspect it through the CLI:
+  <p class="action-note">Private draft ready.
+    {#if signedIn}Use View draft to inspect it here, or use the CLI:
+    {:else}Sign in to view it here, or inspect it through the CLI:{/if}
     <code>review-platform show-draft {request.repository} {request.number} --round {round.id}</code>
   </p>
   {#if round.freshness === 'stale' || round.freshness === 'unknown'}

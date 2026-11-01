@@ -1,6 +1,6 @@
 //! Lead-only draft presentation, publication, rejection, and recovery commands.
 
-use crate::{escape_terminal_controls, storage};
+use crate::{draft_commands, escape_terminal_controls, storage};
 use anyhow::{Context, Result};
 use review_platform::{
     PrKey, RefreshOutcome, RejectOutcome, State,
@@ -9,19 +9,11 @@ use review_platform::{
         publisher::{self, GithubPublisher, PostError},
     },
     publication::{AttemptOutcome, PublicationHash, SealedBody},
-    review::{self, DraftOutput, Freshness, RoundId, RoundRecord, RoundStatus},
+    review::{DraftOutput, Freshness, RoundId, RoundRecord, RoundStatus},
 };
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-fn round_path(state_path: &Path, id: &RoundId) -> PathBuf {
-    state_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("rounds")
-        .join(id.as_str())
-}
 
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
@@ -59,27 +51,7 @@ fn sealed_draft(
     key: &PrKey,
     id: &RoundId,
 ) -> Result<(DraftOutput, SealedBody, bool)> {
-    let record = state
-        .round(id)
-        .with_context(|| format!("round {id} does not exist"))?;
-    anyhow::ensure!(record.key() == key, "round {id} belongs to another PR");
-    anyhow::ensure!(
-        record.status().has_saved_draft(),
-        "round {id} has no saved draft"
-    );
-    let base = round_path(state_path, id);
-    let draft = review::read_saved_draft(&base.join("draft.json"))?;
-    let (agent, artifact_hash) = review::read_agent_output_with_hash(
-        &base.join("output").join("review-output.json"),
-        String::new(),
-    )?;
-    anyhow::ensure!(
-        draft.status() == agent.status()
-            && draft.comments() == agent.comments()
-            && draft.lead_advice() == agent.lead_advice(),
-        "saved draft differs from the original agent artifact"
-    );
-    let seal = SealedBody::new(draft.comments(), id.as_str(), artifact_hash);
+    let (draft, seal) = draft_commands::read_verified(state_path, state, key, id)?.into_contents();
     let changed = state.seal_round(id, seal.clone())?;
     Ok((draft, seal, changed))
 }
@@ -114,21 +86,7 @@ pub fn show_draft(
         let confirmed_ids = state.confirmed_review_ids(&key);
         (record, draft, seal, confirmed_ids)
     };
-    let freshness = github::GithubClient::new()
-        .and_then(|client| {
-            let observation = client.observe_pull_excluding(&key, &confirmed_ids)?;
-            let pull = client.pull_request(&key)?;
-            Ok((observation, pull))
-        })
-        .map(|(observation, pull)| {
-            record.publication_freshness(
-                observation.head_sha(),
-                observation.discussion(),
-                pull.head_sha(),
-                pull.availability(),
-            )
-        })
-        .unwrap_or(Freshness::Unknown);
+    let freshness = draft_commands::github_freshness(&record, &confirmed_ids);
     println!("Draft {id} for {key}");
     println!("  reviewed head: {}", record.head_sha());
     println!("  input revision: {}", record.revision());

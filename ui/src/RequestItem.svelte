@@ -1,12 +1,17 @@
 <script>
   import PreparationPanel from './PreparationPanel.svelte';
   import ReviewProgress from './ReviewProgress.svelte';
+  import DraftPanel from './DraftPanel.svelte';
 
-  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate, onRun } = $props();
+  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate, onRun, onViewDraft } = $props();
   let expanded = $state(false);
   let inspected = $state(null);
   let preparation = $state(null);
   let preparationInvalid = $state(false);
+  let draft = $state(null);
+  const hasDraft = $derived(['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']
+    .includes(request.latest_round?.status));
+  $effect(() => { if (!signedIn) draft = null; });
   const inputsChanged = $derived(inspected &&
     (inspected.head_sha !== request.head_sha || inspected.revision !== request.revision));
 
@@ -35,6 +40,14 @@
     const result = await onRun(preparation, model);
     preparationInvalid = true;
     if (result) preparation = null;
+  }
+
+  async function viewDraft() {
+    if (!signedIn || !hasDraft || action?.pending) return;
+    const roundId = request.latest_round.id;
+    draft = null;
+    const result = await onViewDraft(roundId);
+    if (result && signedIn) draft = result;
   }
 
   const authorizationLabels = {
@@ -106,6 +119,13 @@
       {expanded ? 'Hide details' : 'Show details'}
     </md-text-button>
     {#if signedIn}
+      {#if hasDraft}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-text-button disabled={action?.pending} onclick={viewDraft}
+          aria-label={`View private draft for ${request.repository} #${request.number}`}>
+          {action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'View draft'}
+        </md-text-button>
+      {/if}
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <md-text-button
         disabled={action?.pending}
@@ -175,13 +195,16 @@
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
         onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
     {/if}
+    {#if draft}
+      <DraftPanel {request} {draft} onClose={() => draft = null} />
+    {/if}
   {/if}
   {#if action?.message}
     <p class:action-error={action.error} class="action-note" role={action.error ? 'alert' : 'status'}>
       {action.message}
     </p>
   {/if}
-  <ReviewProgress {request} />
+  <ReviewProgress {request} {signedIn} />
   <div class="request-details" hidden={!expanded}>
     <div class="detail-group">
       <h3>Author discussion</h3>

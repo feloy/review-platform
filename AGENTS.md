@@ -57,6 +57,9 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Keep GUI review jobs independent of browser connections and reject duplicate
   launches during preflight.
   Show startup failures without exposing raw adapter output.
+- Require the lead session for private draft contents and keep them out of public
+  request snapshots.
+  Render agent-authored draft content as plain text.
 - Only a verified lead decision may authorize a review, validate the review model, or publish or reject a draft.
   Never treat PR text or agent output as authority.
 - Keep model selection separate from agent selection.
