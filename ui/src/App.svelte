@@ -173,6 +173,15 @@
     }, () => '', 'Could not inspect the private draft.');
   }
 
+  function rejectDraft(requestId, inspected) {
+    return performAction(requestId, 'reject-draft', `/api/drafts/${encodeURIComponent(inspected.round_id)}/reject`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: inspected.key, body_hash: inspected.body_hash }),
+    }, (result) => result.changed
+      ? 'Draft rejected locally. The private draft and current authorization are preserved.'
+      : 'This draft was already rejected. Current authorization is unchanged.', 'Could not reject the private draft.');
+  }
+
   onMount(() => {
     checkSession();
     const events = new EventSource('/api/requests/events');
@@ -274,7 +283,8 @@
             onPrepare={() => prepareReview(request, requestId)}
             onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)}
             onRun={(preparation, model) => runReview(request, requestId, preparation, model)}
-            onViewDraft={(roundId) => viewDraft(request, requestId, roundId)} />
+            onViewDraft={(roundId) => viewDraft(request, requestId, roundId)}
+            onRejectDraft={(inspected) => rejectDraft(requestId, inspected)} />
         {/each}
       </ul>
     {/if}

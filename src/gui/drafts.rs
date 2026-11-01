@@ -1,22 +1,82 @@
 //! Authenticated private draft responses, without exposing logs or adapter errors.
 
-use super::{ApiError, AppState, api_error, has_session};
-use crate::draft_commands::{DraftError, InspectedDraft};
+use super::{ApiError, AppState, AuthorizationResponse, api_error, has_session};
+use crate::{
+    draft_commands::{DraftError, InspectedDraft},
+    publication_commands::{self, RejectError},
+};
 use axum::{
     Json,
     extract::{Path as UrlPath, Query, State as HttpState},
     http::{HeaderMap, StatusCode},
 };
 use review_platform::{
-    HeadSha, InputRevision, PrKey,
+    HeadSha, InputRevision, PrKey, RejectOutcome,
     config::{AgentId, ModelId},
     publication::PublicationHash,
-    review::{Freshness, ReviewStatus, RoundId, RoundStatus},
+    review::{Freshness, ReviewStatus, RoundId, RoundStateError, RoundStatus},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
 
 pub(super) type Inspect = fn(&Path, &PrKey, &RoundId) -> Result<InspectedDraft, DraftError>;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RejectRequest {
+    key: PrKey,
+    body_hash: PublicationHash,
+}
+
+pub(super) async fn reject(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<RoundId>,
+    Json(request): Json<RejectRequest>,
+) -> Result<Json<AuthorizationResponse>, (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    let outcome = tokio::task::spawn_blocking(move || {
+        publication_commands::reject(&state.state_file, &request.key, &id, &request.body_hash)
+    })
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not record draft rejection.",
+        )
+    })?
+    .map_err(reject_error)?;
+    Ok(Json(AuthorizationResponse {
+        changed: outcome == RejectOutcome::Rejected,
+    }))
+}
+
+fn reject_error(error: RejectError) -> (StatusCode, Json<ApiError>) {
+    match error {
+        RejectError::Draft(error) => draft_error(error),
+        RejectError::BodyHashMismatch => api_error(
+            StatusCode::CONFLICT,
+            "The body hash does not match this draft. Reopen the draft before deciding.",
+        ),
+        RejectError::Round(RoundStateError::CleanupPending(_)) => api_error(
+            StatusCode::CONFLICT,
+            "Sandbox cleanup must finish before rejecting this draft.",
+        ),
+        RejectError::Round(_) => api_error(
+            StatusCode::CONFLICT,
+            "This round cannot be rejected in its current state. Reopen the draft before deciding.",
+        ),
+        RejectError::Local(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not record draft rejection in local review state.",
+        ),
+    }
+}
 
 #[derive(Serialize)]
 pub(super) struct DraftResponse {
@@ -216,6 +276,248 @@ mod tests {
             .unwrap();
         storage::save(&state_file, &state).unwrap();
         state_file
+    }
+
+    fn rejection_body(path: &Path) -> serde_json::Value {
+        let state = storage::load(path).unwrap();
+        let id = RoundId::new("r-draft").unwrap();
+        serde_json::json!({
+            "key":{"repository":"owner/repo","number":15},
+            "body_hash":state.round(&id).unwrap().sealed_body().unwrap().hash(),
+        })
+    }
+
+    fn post_rejection(body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/drafts/r-draft/reject")
+            .header(header::HOST, "localhost:8080")
+            .header(header::ORIGIN, "http://localhost:8080")
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
+    #[test]
+    fn rejection_requires_a_verified_lead_and_same_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let original = fs::read(&path).unwrap();
+        let body = rejection_body(&path);
+        runtime().block_on(async {
+            for (change, expected) in [
+                ("no_token", StatusCode::UNAUTHORIZED),
+                ("wrong_token", StatusCode::UNAUTHORIZED),
+                ("no_origin", StatusCode::FORBIDDEN),
+                ("cross_origin", StatusCode::FORBIDDEN),
+                ("wrong_host", StatusCode::MISDIRECTED_REQUEST),
+                ("bootstrap_unused", StatusCode::UNAUTHORIZED),
+            ] {
+                let mut request = post_rejection(&body);
+                match change {
+                    "no_token" => {
+                        request.headers_mut().remove(header::AUTHORIZATION);
+                    }
+                    "wrong_token" => {
+                        request
+                            .headers_mut()
+                            .insert(header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
+                    }
+                    "no_origin" => {
+                        request.headers_mut().remove(header::ORIGIN);
+                    }
+                    "cross_origin" => {
+                        request
+                            .headers_mut()
+                            .insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+                    }
+                    "wrong_host" => {
+                        request
+                            .headers_mut()
+                            .insert(header::HOST, "evil.example".parse().unwrap());
+                    }
+                    "bootstrap_unused" => {}
+                    _ => unreachable!(),
+                }
+                let bootstrap = (change == "bootstrap_unused").then(|| "code".into());
+                let response = app(path.clone(), bootstrap, offline_inspect)
+                    .oneshot(request)
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected, "{change}");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            }
+        });
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn rejection_checks_the_explicit_round_key_hash_and_cleanup_without_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let original = fs::read(&path).unwrap();
+        let body = rejection_body(&path);
+        let id = RoundId::new("r-draft").unwrap();
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let hash = PublicationHash::new(body["body_hash"].as_str().unwrap()).unwrap();
+        assert!(matches!(
+            publication_commands::reject(&path, &key, &id, &hash),
+            Err(RejectError::Round(RoundStateError::CleanupPending(_)))
+        ));
+        assert!(matches!(
+            publication_commands::reject(&path, &key, &id, &PublicationHash::of(b"wrong")),
+            Err(RejectError::BodyHashMismatch)
+        ));
+        runtime().block_on(async {
+            let app = app(path.clone(), None, offline_inspect);
+            for (change, expected) in [
+                ("cleanup", StatusCode::CONFLICT),
+                ("wrong_hash", StatusCode::CONFLICT),
+                ("invalid_hash", StatusCode::UNPROCESSABLE_ENTITY),
+                ("wrong_pr", StatusCode::NOT_FOUND),
+                ("invalid_pr", StatusCode::UNPROCESSABLE_ENTITY),
+                ("missing_round", StatusCode::NOT_FOUND),
+                ("invalid_round", StatusCode::BAD_REQUEST),
+                ("unknown_field", StatusCode::UNPROCESSABLE_ENTITY),
+            ] {
+                let mut body = body.clone();
+                match change {
+                    "wrong_hash" => body["body_hash"] = "0".repeat(64).into(),
+                    "invalid_hash" => body["body_hash"] = "invalid".into(),
+                    "wrong_pr" => body["key"]["number"] = 16.into(),
+                    "invalid_pr" => body["key"]["number"] = 0.into(),
+                    "unknown_field" => body["head_sha"] = "a".repeat(40).into(),
+                    _ => {}
+                }
+                let mut request = post_rejection(&body);
+                if change == "missing_round" {
+                    *request.uri_mut() = "/api/drafts/r-missing/reject".parse().unwrap();
+                }
+                if change == "invalid_round" {
+                    *request.uri_mut() = "/api/drafts/invalid/reject".parse().unwrap();
+                }
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), expected, "{change}");
+            }
+        });
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn rejection_preserves_stale_private_drafts_and_authorization_and_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let body = rejection_body(&path);
+        let id = RoundId::new("r-draft").unwrap();
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let mut state = storage::load(&path).unwrap();
+        state.mark_round_cleaned(&id).unwrap();
+        state
+            .authorize(
+                &key,
+                &HeadSha::new("a".repeat(40)).unwrap(),
+                InputRevision::new(2).unwrap(),
+                review_platform::AuthorizationScope::PrCycle,
+            )
+            .unwrap();
+        let discussion = state.get(&key).unwrap().discussion().unwrap().clone();
+        state
+            .refresh(&key, &HeadSha::new("b".repeat(40)).unwrap(), &discussion)
+            .unwrap();
+        storage::save(&path, &state).unwrap();
+        let files = ["draft.json", "output/review-output.json"]
+            .map(|file| directory.path().join("rounds/r-draft").join(file));
+        let before = files.each_ref().map(|file| fs::read(file).unwrap());
+        runtime().block_on(async {
+            let app = app(path.clone(), None, offline_inspect);
+            let mut recorded = None;
+            for changed in [true, false] {
+                let response = app.clone().oneshot(post_rejection(&body)).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let result: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                        .unwrap();
+                assert_eq!(result, serde_json::json!({"changed":changed}));
+                if let Some(before) = &recorded {
+                    assert_eq!(&fs::read(&path).unwrap(), before);
+                }
+                recorded = Some(fs::read(&path).unwrap());
+            }
+            let response = app
+                .oneshot(get("/api/requests/events", None))
+                .await
+                .unwrap();
+            let mut stream = response.into_body().into_data_stream();
+            let event = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8(event.to_vec()).unwrap();
+            assert!(text.contains("\"status\":\"rejected\""));
+            assert!(!text.contains(ADVICE));
+        });
+        let saved = storage::load(&path).unwrap();
+        saved.validate().unwrap();
+        let round = saved.round(&id).unwrap();
+        assert_eq!(round.status(), RoundStatus::Rejected);
+        assert!(round.rejection().unwrap().at() > 0);
+        assert!(!round.rejection().unwrap().operator().is_empty());
+        assert_eq!(
+            saved.get(&key).unwrap().authorization(),
+            state.get(&key).unwrap().authorization()
+        );
+        for (file, original) in files.iter().zip(before) {
+            assert_eq!(fs::read(file).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn rejection_refuses_altered_artifacts_and_publication_in_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let body = rejection_body(&path);
+        let id = RoundId::new("r-draft").unwrap();
+        let mut state = storage::load(&path).unwrap();
+        state.mark_round_cleaned(&id).unwrap();
+        storage::save(&path, &state).unwrap();
+        let artifact = directory
+            .path()
+            .join("rounds/r-draft/output/review-output.json");
+        let original = fs::read(&artifact).unwrap();
+        let mut altered = original.clone();
+        altered.push(b'\n');
+        fs::write(&artifact, altered).unwrap();
+        runtime().block_on(async {
+            let app = app(path.clone(), None, offline_inspect);
+            let response = app.clone().oneshot(post_rejection(&body)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let text =
+                String::from_utf8(to_bytes(response.into_body(), 8192).await.unwrap().to_vec())
+                    .unwrap();
+            for secret in [ADVICE, "review-output.json", "Private full review log"] {
+                assert!(!text.contains(secret));
+            }
+            fs::write(&artifact, original).unwrap();
+            state
+                .reserve_publication(
+                    &PrKey::new("owner/repo", 15).unwrap(),
+                    &id,
+                    &PublicationHash::new(body["body_hash"].as_str().unwrap()).unwrap(),
+                    "uid:1".into(),
+                    "publisher".into(),
+                    std::num::NonZeroU64::new(7).unwrap(),
+                    vec![],
+                    4,
+                )
+                .unwrap();
+            storage::save(&path, &state).unwrap();
+            let before = fs::read(&path).unwrap();
+            let response = app.oneshot(post_rejection(&body)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(fs::read(&path).unwrap(), before);
+        });
     }
 
     #[test]

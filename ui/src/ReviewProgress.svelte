@@ -38,7 +38,7 @@
     <code>review-platform show-draft {request.repository} {request.number} --round {round.id}</code>
   </p>
   {#if round.freshness === 'stale' || round.freshness === 'unknown'}
-    <p class="action-note warning">Draft freshness is {round.freshness}. Recheck PR inputs before deciding on the draft.</p>
+    <p class="action-note warning">Draft freshness is {round.freshness}. Recheck PR inputs before publishing. The draft can still be rejected.</p>
   {/if}
 {/if}
 {#if round?.cleanup_status === 'needs_attention'}

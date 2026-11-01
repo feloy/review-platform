@@ -82,6 +82,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Record rejection as an explicit decision and preserve the private draft.
   Do not mark a completed draft as failed merely to unblock another round.
   Clear model validation matching the rejected round and preserve a different later choice.
+  Bind GUI rejection to the inspected round and publication body hash.
+  Allow stale drafts to be rejected after sandbox cleanup completes.
 - When a publisher may share the PR author's GitHub identity,
   exclude only review IDs recorded from confirmed publication from author-comment triggers.
   Apply the same exclusions to every discussion pass and final recheck.

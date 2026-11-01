@@ -9,11 +9,30 @@ use review_platform::{
         publisher::{self, GithubPublisher, PostError},
     },
     publication::{AttemptOutcome, PublicationHash, SealedBody},
-    review::{DraftOutput, Freshness, RoundId, RoundRecord, RoundStatus},
+    review::{DraftOutput, Freshness, RoundId, RoundRecord, RoundStateError, RoundStatus},
 };
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum RejectError {
+    #[error(transparent)]
+    Draft(#[from] draft_commands::DraftError),
+    #[error(transparent)]
+    Round(#[from] RoundStateError),
+    #[error("the supplied body hash does not match the sealed publication body")]
+    BodyHashMismatch,
+    #[error("local rejection: {0}")]
+    Local(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<anyhow::Error> for RejectError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Local(error.into())
+    }
+}
 
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
@@ -165,25 +184,7 @@ pub fn reject_draft(
     let id = RoundId::new(round)?;
     let hash = PublicationHash::new(body_hash)?;
     let state_path = storage::resolve_path(state_override)?;
-    let _pr_lock = storage::pr_lock(&state_path, &key)?;
-    let _lock = storage::lock(&state_path)?;
-    let mut state = storage::load(&state_path)?;
-    if let Some(record) = state.round(&id) {
-        if record.key() == &key && record.status() == RoundStatus::Rejected {
-            if let Some(seal) = record.sealed_body() {
-                checked_hash(seal, &hash)?;
-                println!("Round {id} for {key} was already rejected; authorization is unchanged.");
-                return Ok(());
-            }
-        }
-    }
-    let (_, seal, changed) = sealed_draft(&state_path, &mut state, &key, &id)?;
-    checked_hash(&seal, &hash)?;
-    let outcome = state.reject_round(&key, &id, &hash, operator()?, now()?)?;
-    if changed || outcome == RejectOutcome::Rejected {
-        storage::save(&state_path, &state)?;
-    }
-    match outcome {
+    match reject(&state_path, &key, &id, &hash)? {
         RejectOutcome::Rejected => {
             println!("Round {id} for {key} rejected locally; current authorization is preserved.")
         }
@@ -192,6 +193,38 @@ pub fn reject_draft(
         }
     }
     Ok(())
+}
+
+/// Record the lead's decision for this exact draft, without requiring fresh PR inputs.
+pub fn reject(
+    state_path: &Path,
+    key: &PrKey,
+    id: &RoundId,
+    hash: &PublicationHash,
+) -> Result<RejectOutcome, RejectError> {
+    let _pr_lock = storage::pr_lock(state_path, key)?;
+    let _lock = storage::lock(state_path)?;
+    let mut state = storage::load(state_path)?;
+    if let Some(record) = state.round(id) {
+        if record.key() == key && record.status() == RoundStatus::Rejected {
+            if let Some(seal) = record.sealed_body() {
+                if seal.hash() != hash {
+                    return Err(RejectError::BodyHashMismatch);
+                }
+                return Ok(RejectOutcome::AlreadyRejected);
+            }
+        }
+    }
+    let (_, seal) = draft_commands::read_verified(state_path, &state, key, id)?.into_contents();
+    if seal.hash() != hash {
+        return Err(RejectError::BodyHashMismatch);
+    }
+    let changed = state.seal_round(id, seal)?;
+    let outcome = state.reject_round(key, id, hash, operator()?, now()?)?;
+    if changed || outcome == RejectOutcome::Rejected {
+        storage::save(state_path, &state)?;
+    }
+    Ok(outcome)
 }
 
 fn refreshed_freshness(

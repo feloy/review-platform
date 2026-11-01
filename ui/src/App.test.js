@@ -647,7 +647,7 @@ describe('review requests page', () => {
 
   it.each([
     ['stale', 'The PR inputs changed or the PR closed. This draft is stale.'],
-    ['unknown', 'Current PR freshness could not be verified. Recheck GitHub before deciding on this draft.'],
+    ['unknown', 'Current PR freshness could not be verified. Recheck GitHub before publishing. You can still reject this draft.'],
   ])('allows inspecting a draft with %s freshness and explains its limits', async (freshness, message) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
@@ -690,6 +690,136 @@ describe('review requests page', () => {
     await waitFor(() => expect(screen.getByRole('region', { name: 'Review comments' }).textContent).toBe('New draft'));
     expect(fetchMock.mock.calls[2][0]).toContain('/api/drafts/r-new?');
     expect(screen.queryByText(/This view keeps the draft you opened/)).toBeNull();
+  });
+
+  it.each(['stale', 'unknown'])('confirms the displayed draft with %s freshness and waits for SSE after rejection', async (freshness) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishReject;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness }) })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishReject = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const readyRound = round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' });
+    await showSnapshot(source, [request({ authorization: 'pr_cycle', latest_round: readyRound })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    await clickMaterialButton(user, container, 'Reject draft');
+    const confirmation = screen.getByRole('region', { name: 'Confirm draft rejection' });
+    expect(within(confirmation).getByText('r-example')).toBeTruthy();
+    expect(within(confirmation).getByText('d'.repeat(64))).toBeTruthy();
+    expect(within(confirmation).getByText(/private draft and current authorization are preserved/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await clickMaterialButton(user, container, 'Cancel rejection');
+    expect(screen.queryByRole('region', { name: 'Confirm draft rejection' })).toBeNull();
+    await clickMaterialButton(user, container, 'Reject draft');
+    // New PR inputs do not prevent rejecting the old draft or alter the inspected decision.
+    await showSnapshot(source, [request({ authorization: 'pr_cycle', head_sha: 'b'.repeat(40), revision: 2, latest_round: readyRound })]);
+    const confirm = await clickMaterialButton(user, container, 'Confirm rejection');
+    expect(confirm.disabled).toBe(true);
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/drafts/r-example/reject');
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ key: draft().key, body_hash: draft().publication_body_sha256 });
+    await clickMaterialButton(user, container, 'Rejecting…');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    if (freshness === 'unknown') {
+      // SSE can report the recorded decision before its POST response arrives.
+      await showSnapshot(source, [request({ authorization: 'pr_cycle', head_sha: 'b'.repeat(40), revision: 2,
+        latest_round: { ...readyRound, status: 'rejected' } })]);
+    }
+    await act(() => finishReject({ ok: true, json: async () => ({ changed: true }) }));
+    expect(await screen.findByText(/Draft rejected locally/)).toBeTruthy();
+    if (freshness === 'stale') expect(screen.getAllByText('Draft ready').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Round status or cleanup changed/)).toBeNull();
+    expect(screen.queryByText('Reject draft')).toBeNull();
+    expect(screen.getByText(draft().lead_advice)).toBeTruthy();
+    await showSnapshot(source, [request({ authorization: 'pr_cycle', head_sha: 'b'.repeat(40), revision: 2,
+      latest_round: { ...readyRound, status: 'rejected' } })]);
+    expect(screen.getAllByText('Rejected').length).toBeGreaterThan(0);
+    expect(screen.getByText('PR cycle')).toBeTruthy();
+    expect(screen.queryByText('Draft ready')).toBeNull();
+  });
+
+  it.each([
+    [true, 'in_progress'], [true, 'needs_attention'], [true, 'unknown'], [false, 'unknown'],
+  ])('gates rejection until cleanup is complete (%s, %s)', async (cleanup_pending, cleanup_status) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft() });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending, cleanup_status }) })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(true);
+    expect(screen.queryByRole('region', { name: 'Confirm draft rejection' })).toBeNull();
+    await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
+    expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(false);
+    expect(screen.getByRole('region', { name: 'Confirm draft rejection' })).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { id: 'r-new' }, { status: 'publishing' }, { cleanup_pending: true, cleanup_status: 'in_progress' },
+  ])('invalidates an open rejection confirmation when the round changes: %j', async (change) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft() });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const readyRound = round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' });
+    await showSnapshot(source, [request({ latest_round: readyRound })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    await clickMaterialButton(user, container, 'Reject draft');
+    await showSnapshot(source, [request({ latest_round: { ...readyRound, ...change } })]);
+    expect(screen.getByText(/Round status or cleanup changed/)).toBeTruthy();
+    expect((await clickMaterialButton(user, container, 'Confirm rejection')).disabled).toBe(true);
+    // Returning to the prior state must not silently restore the old confirmation.
+    await showSnapshot(source, [request({ latest_round: readyRound })]);
+    expect((await clickMaterialButton(user, container, 'Confirm rejection')).disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('region', { name: 'Confirm draft rejection' }).textContent).toContain('r-example');
+    await clickMaterialButton(user, container, 'Cancel rejection');
+    expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(true);
+  });
+
+  it.each([409, 401, 'offline', 'already_rejected'])('handles rejection result %s without losing private contents unless the session ends', async (result) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft() });
+    if (result === 'offline') fetchMock.mockRejectedValueOnce(new Error('offline'));
+    else if (result === 'already_rejected') fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ changed: false }) });
+    else fetchMock.mockResolvedValueOnce({ ok: false, status: result, json: async () => ({ error: 'Draft decision changed. Reopen it.' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
+    await screen.findByText('View draft');
+    await clickMaterialButton(user, container, 'View draft');
+    await screen.findByText(draft().lead_advice);
+    await clickMaterialButton(user, container, 'Reject draft');
+    await clickMaterialButton(user, container, 'Confirm rejection');
+    const message = result === 401 ? /Your session ended/ : result === 'offline' ? /Could not connect to the local API/
+      : result === 'already_rejected' ? /This draft was already rejected/ : /Draft decision changed/;
+    await screen.findByText(message);
+    if (result === 401) {
+      expect(screen.queryByText(draft().lead_advice)).toBeNull();
+      expect(screen.queryByRole('region', { name: 'Confirm draft rejection' })).toBeNull();
+      expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    } else {
+      expect(screen.getByText(draft().lead_advice)).toBeTruthy();
+      if (result !== 'already_rejected') expect(screen.getByText('Confirm rejection')).toBeTruthy();
+    }
   });
 
   it('removes old draft contents before reporting integrity or connection failures', async () => {
