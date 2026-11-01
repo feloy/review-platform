@@ -71,7 +71,21 @@ Changed inputs, authorization, or configuration require a new preparation and in
 Preparation can clear one-round authorization if GitHub inputs have changed;
 authorize the refreshed inputs and prepare again in that case.
 Preparation and validation never start a review or consume authorization.
-Use the CLI to run the validated review and decide on its draft.
+Use **Run review** once the selected model is validated and preparation is current.
+Startup rechecks PR inputs, exact-head CI, authorization, configuration, and gateway readiness,
+then uses the same runner and sandbox lifecycle as `run-review`.
+The review runs in the GUI server process;
+closing or reloading the browser tab does not interrupt it.
+Keep the GUI process running while the review finishes.
+Live updates show startup, the running round, private draft readiness, failures, and cleanup.
+Startup failures also appear when no round has been recorded yet.
+Duplicate GUI runs for the same PR are rejected while a job is active.
+Use the CLI to inspect, publish, or reject the resulting private draft,
+or to recover a sandbox that needs cleanup.
+The GUI does not retry failed reviews automatically or offer a per-review cancel action.
+On Unix, stopping the GUI with SIGINT or SIGTERM requests cancellation
+and waits for runners to finish their cleanup attempts.
+After a forced process stop, use `recover-review` for unfinished rounds.
 The GUI checks the round's runner lock before warning that cleanup needs attention.
 If the runner lock cannot be inspected, it reports that cleanup status is unavailable.
 Review workflow operations remain available through the CLI while the GUI grows.
@@ -98,7 +112,12 @@ If the session is lost, restart the GUI for a new code.
 The GUI uses the GitHub credentials available when it starts.
 `GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
 Each request includes optional discussion counts and model validation,
-plus a summary of its latest round when one exists.
+plus a summary of its latest round when one exists, including its failure kind and draft freshness.
+The optional `run` reports the latest GUI job for this server launch:
+`status` (`starting`, `running`, `finished`, or `failed`), `round_id`, and `failure`.
+`running` means a round has been recorded; its persisted round status shows execution progress.
+Job failure categories omit raw adapter errors, prompts, and provider details.
+Persisted round and cleanup information remains available after restarting the GUI.
 `GET /api/requests/events` is a server-sent event stream.
 It sends a `requests` event with the same JSON snapshot on connection
 and whenever displayed local state or runner activity changes,
@@ -112,7 +131,8 @@ The read-only endpoints do not require sign-in.
 `POST /api/session` exchanges the one-time code for a launch-scoped session token.
 `POST /api/requests/refresh`, `POST /api/requests/authorize`,
 `POST /api/requests/revoke`, `POST /api/requests/prepare`,
-and `POST /api/requests/validate-model` require that token and a same-origin request;
+`POST /api/requests/validate-model`, and `POST /api/requests/run`
+require that token and a same-origin request;
 the server rejects cross-origin and missing-origin POST requests.
 Authorization accepts `key` with `repository` and `number`,
 the inspected `head_sha` and `revision`, and `scope` (`one_round` or `pr_cycle`).
@@ -134,6 +154,14 @@ Blocked preparation returns a snapshot; blocked or stale validation returns HTTP
 Configuration and archive verification failures return HTTP 422.
 GitHub failures can leave freshly observed inputs saved without a new model choice.
 The snapshots omit prompts, provider details, and archive paths.
+Run accepts the same inspected payload as validation, including the selected model and rules.
+It rechecks the persisted model choice and inspected inputs, authorization, and configuration
+before startup and again before dispatch.
+It returns HTTP 202 with `accepted: true` when the server takes ownership of the job;
+this acknowledges scheduling, not successful startup or agent dispatch.
+An already-active GUI job returns HTTP 409.
+Watch request snapshots or SSE for startup errors and round progress.
+One-round authorization is consumed only when dispatch is recorded.
 
 Keep the compiled UI in `ui/dist` under version control
 so Rust installation does not need to run the frontend build.

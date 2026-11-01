@@ -1,6 +1,7 @@
 //! Loopback HTTP server for the embedded operator UI and local request snapshots.
 
 use crate::{
+    gui_runs::{RunSummary, Runs, StartError},
     preparation_commands::{self, InspectedRules, PrepareError},
     request_commands, review_commands, storage,
 };
@@ -25,7 +26,7 @@ use review_platform::{
     github::GithubError,
     github::checks::CheckSummary,
     preparation::Readiness,
-    review::{RoundRecord, RoundStatus},
+    review::{FailureKind, Freshness, RoundRecord, RoundStatus},
     round::{ModelSelection, RoundError},
 };
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,7 @@ struct RequestSummary {
     discussion: Option<DiscussionSummary>,
     validated_model: Option<ValidatedModelSummary>,
     latest_round: Option<RoundSummary>,
+    run: Option<RunSummary>,
 }
 
 #[derive(Serialize)]
@@ -96,6 +98,8 @@ struct RoundSummary {
     revision: u64,
     model: String,
     agent: String,
+    failure: Option<FailureKind>,
+    freshness: Option<Freshness>,
 }
 
 #[derive(Serialize)]
@@ -127,6 +131,7 @@ struct AppState {
     session: Mutex<Session>,
     refresh: Refresh,
     prepare: Prepare,
+    runs: Arc<Runs>,
 }
 
 struct Session {
@@ -167,9 +172,14 @@ struct AuthorizationResponse {
     changed: bool,
 }
 
+#[derive(Serialize)]
+struct RunResponse {
+    accepted: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ValidateModelRequest {
+struct InspectedModelRequest {
     key: PrKey,
     model: ModelId,
     head_sha: HeadSha,
@@ -244,6 +254,8 @@ pub fn run(state_override: Option<PathBuf>, config_override: Option<PathBuf>) ->
     let config_file = storage::resolve_config_path(config_override)?;
     let bootstrap = random_secret()?;
     let token = random_secret()?;
+    let cancellation = review_commands::Cancellation::new()?;
+    let cancelled = cancellation.flag();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -260,14 +272,24 @@ pub fn run(state_override: Option<PathBuf>, config_override: Option<PathBuf>) ->
         };
         axum::serve(
             listener,
-            router_with_preparation(
+            router_with_runs(
                 state_file,
                 config_file,
                 session,
                 request_commands::refresh,
                 prepare_for_gui,
+                Arc::new(Runs::new(
+                    cancelled.clone(),
+                    review_commands::run_inspected_review,
+                )),
             ),
         )
+        .with_graceful_shutdown(async move {
+            let mut ticker = interval(Duration::from_millis(100));
+            while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                ticker.tick().await;
+            }
+        })
         .await
         .context("serving GUI on 127.0.0.1:8080")
     })
@@ -284,6 +306,7 @@ fn random_secret() -> Result<String> {
     Ok(result)
 }
 
+#[cfg(test)]
 fn router_with_preparation(
     state_file: PathBuf,
     config_file: PathBuf,
@@ -291,12 +314,34 @@ fn router_with_preparation(
     refresh: Refresh,
     prepare: Prepare,
 ) -> Router {
+    router_with_runs(
+        state_file,
+        config_file,
+        session,
+        refresh,
+        prepare,
+        Arc::new(Runs::new(
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            review_commands::run_inspected_review,
+        )),
+    )
+}
+
+fn router_with_runs(
+    state_file: PathBuf,
+    config_file: PathBuf,
+    session: Session,
+    refresh: Refresh,
+    prepare: Prepare,
+    runs: Arc<Runs>,
+) -> Router {
     let state = Arc::new(AppState {
         state_file,
         config_file,
         session: Mutex::new(session),
         refresh,
         prepare,
+        runs,
     });
     Router::new()
         .route("/", get(index))
@@ -310,6 +355,7 @@ fn router_with_preparation(
         .route("/api/requests/revoke", post(revoke_request))
         .route("/api/requests/prepare", post(prepare_request))
         .route("/api/requests/validate-model", post(validate_model_request))
+        .route("/api/requests/run", post(run_request))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
         .layer(from_fn(localhost_guard))
@@ -528,7 +574,7 @@ async fn prepare_request(
 async fn validate_model_request(
     HttpState(state): HttpState<Arc<AppState>>,
     headers: axum::http::HeaderMap,
-    Json(request): Json<ValidateModelRequest>,
+    Json(request): Json<InspectedModelRequest>,
 ) -> Result<Json<PreparationResponse>, (StatusCode, Json<ApiError>)> {
     if !has_session(&state, &headers) {
         return Err(api_error(
@@ -538,6 +584,46 @@ async fn validate_model_request(
     }
     let selection = ModelSelection::new(request.model, request.head_sha, request.revision);
     run_preparation(state, request.key, Some(selection), Some(request.rules)).await
+}
+
+async fn run_request(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<InspectedModelRequest>,
+) -> Result<(StatusCode, Json<RunResponse>), (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    let inspected = review_commands::InspectedRun::new(
+        ModelSelection::new(request.model, request.head_sha, request.revision),
+        request.rules,
+    );
+    state
+        .runs
+        .start(
+            state.state_file.clone(),
+            state.config_file.clone(),
+            request.key,
+            inspected,
+        )
+        .map_err(|error| match error {
+            StartError::Active => api_error(
+                StatusCode::CONFLICT,
+                "A review is already starting or running for this PR.",
+            ),
+            StartError::ShuttingDown => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The GUI server is shutting down.",
+            ),
+            StartError::Unavailable => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not start the review task.",
+            ),
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(RunResponse { accepted: true })))
 }
 
 async fn run_preparation(
@@ -732,7 +818,7 @@ async fn hello() -> impl IntoResponse {
 async fn requests(
     HttpState(state): HttpState<Arc<AppState>>,
 ) -> Result<Json<RequestList>, (StatusCode, Json<ApiError>)> {
-    read_request_list(state.state_file.clone())
+    read_request_list(state.state_file.clone(), state.runs.clone())
         .await
         .map(Json)
         .map_err(|error| {
@@ -752,11 +838,14 @@ async fn request_events(
     let mut ticker = interval(STATE_CHECK_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let updates = stream::unfold(
-        (state.state_file.clone(), ticker, None::<LastEvent>),
-        |(state_file, mut ticker, mut previous)| async move {
+        (state, ticker, None::<LastEvent>),
+        |(state, mut ticker, mut previous)| async move {
             loop {
                 ticker.tick().await;
-                let current = match read_request_list(state_file.clone())
+                if state.runs.is_shutting_down() {
+                    return None;
+                }
+                let current = match read_request_list(state.state_file.clone(), state.runs.clone())
                     .await
                     .and_then(|list| {
                         serde_json::to_string(&list).context("serializing request list")
@@ -781,20 +870,23 @@ async fn request_events(
                         .data("Could not read local review state."),
                 };
                 previous = Some(current);
-                return Some((
-                    Ok::<Event, Infallible>(event),
-                    (state_file, ticker, previous),
-                ));
+                return Some((Ok::<Event, Infallible>(event), (state, ticker, previous)));
             }
         },
     );
     Sse::new(updates).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-async fn read_request_list(state_file: PathBuf) -> Result<RequestList> {
-    tokio::task::spawn_blocking(move || request_list(&state_file))
-        .await
-        .context("joining local state read")?
+async fn read_request_list(state_file: PathBuf, runs: Arc<Runs>) -> Result<RequestList> {
+    tokio::task::spawn_blocking(move || {
+        let mut list = request_list(&state_file)?;
+        for request in &mut list.requests {
+            request.run = runs.summary(&PrKey::new(&request.repository, request.number)?)?;
+        }
+        Ok(list)
+    })
+    .await
+    .context("joining local state read")?
 }
 
 fn request_list(state_file: &Path) -> Result<RequestList> {
@@ -810,6 +902,7 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                 head_sha: request.head_sha().to_string(),
                 revision: request.revision().get(),
                 authorization: request.authorization(),
+                run: None,
                 discussion: request.discussion().map(|discussion| DiscussionSummary {
                     issue_comments: discussion.count(CommentSource::IssueComment),
                     review_comments: discussion.count(CommentSource::ReviewComment),
@@ -833,6 +926,8 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                             revision: round.revision().get(),
                             model: round.model().to_string(),
                             agent: round.agent().to_string(),
+                            failure: round.failure(),
+                            freshness: round.freshness(),
                         })
                     })
                     .transpose()?,
@@ -1000,6 +1095,314 @@ mod tests {
             "model": "model-beta", "head_sha": "a".repeat(40), "revision": 2,
             "rules": {"authorization": "one_round", "configuration_sha256": "a".repeat(64)},
         })
+    }
+
+    fn fake_run(
+        state_file: &Path,
+        config_file: &Path,
+        key: &PrKey,
+        inspected: &review_commands::InspectedRun,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        started: &mut dyn FnMut(&review_platform::review::RoundId),
+    ) -> Result<(), review_commands::RunError> {
+        use review_commands::{InspectionError, RunError};
+        assert_eq!(config_file, state_file.with_extension("config.json"));
+        assert_eq!(inspected.selection().model().as_str(), "model-beta");
+        assert_eq!(inspected.selection().head().as_str(), "a".repeat(40));
+        assert_eq!(inspected.selection().revision().get(), 2);
+        assert_eq!(inspected.rules().authorization(), Authorization::OneRound);
+        assert_eq!(
+            inspected.rules().configuration_sha256().as_str(),
+            "a".repeat(64)
+        );
+        if key.number() == 16 {
+            return Err(RunError::Execution(
+                std::io::Error::other("private prompt and provider details").into(),
+            ));
+        }
+        if key.number() == 17 {
+            return Err(RunError::Inspection(InspectionError::RulesChanged));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for phase in ["begin", "finish"] {
+            while !state_file.with_extension(phase).exists() {
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) || Instant::now() > deadline
+                {
+                    std::fs::write(state_file.with_extension("cancelled"), b"").unwrap();
+                    return Err(RunError::Execution(
+                        std::io::Error::other("interrupted").into(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if phase == "begin" {
+                started(&review_platform::review::RoundId::new("r-gui").unwrap());
+            }
+        }
+        Ok(())
+    }
+
+    async fn wait_for_run(runs: &Runs, key: &PrKey, status: &str) -> serde_json::Value {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = serde_json::to_value(runs.summary(key).unwrap()).unwrap();
+                if snapshot["status"] == status {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("review job did not reach expected status")
+    }
+
+    #[test]
+    fn run_jobs_survive_browser_disconnects_block_duplicates_and_stream_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let mut state = State::default();
+        state
+            .record_request(key.clone(), HeadSha::new("a".repeat(40)).unwrap())
+            .unwrap();
+        storage::save(&state_file, &state).unwrap();
+        let runs = Arc::new(Runs::new(
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fake_run,
+        ));
+        let app = router_with_runs(
+            state_file.clone(),
+            state_file.with_extension("config.json"),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+            fake_prepare,
+            runs.clone(),
+        );
+        test_runtime().block_on(async {
+            let body = validation_body().to_string();
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    "/api/requests/run",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            drop(response);
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    "/api/requests/run",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/requests/events")
+                        .header(header::HOST, "localhost:8080")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut events = response.into_body().into_data_stream();
+            let initial = tokio::time::timeout(Duration::from_secs(3), events.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let initial = String::from_utf8(initial.to_vec()).unwrap();
+            assert!(initial.contains("event: requests"));
+            assert!(initial.contains(r#""run":{"status":"starting""#));
+            drop(events); // Closing the browser stream does not cancel its job.
+            std::fs::write(state_file.with_extension("begin"), b"").unwrap();
+            let running = wait_for_run(&runs, &key, "running").await;
+            assert_eq!(running["round_id"], "r-gui");
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/requests/events")
+                        .header(header::HOST, "localhost:8080")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut events = response.into_body().into_data_stream();
+            let resumed = tokio::time::timeout(Duration::from_secs(3), events.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(
+                String::from_utf8(resumed.to_vec())
+                    .unwrap()
+                    .contains(r#""run":{"status":"running","round_id":"r-gui""#)
+            );
+            std::fs::write(state_file.with_extension("finish"), b"").unwrap();
+            wait_for_run(&runs, &key, "finished").await;
+            let finished = tokio::time::timeout(Duration::from_secs(3), events.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(
+                String::from_utf8(finished.to_vec())
+                    .unwrap()
+                    .contains(r#""run":{"status":"finished""#)
+            );
+            assert!(!state_file.with_extension("cancelled").exists());
+        });
+    }
+
+    #[test]
+    fn run_startup_failures_are_safe_to_display_and_shutdown_cancels_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runs = Arc::new(Runs::new(cancelled.clone(), fake_run));
+        let app = router_with_runs(
+            state_file.clone(),
+            state_file.with_extension("config.json"),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+            fake_prepare,
+            runs.clone(),
+        );
+        test_runtime().block_on(async {
+            for (number, reason) in [(16, "execution"), (17, "stale_preparation")] {
+                let mut body = validation_body();
+                body["key"]["number"] = number.into();
+                let key = PrKey::new("owner/repo", number).unwrap();
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/run",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                let failed = wait_for_run(&runs, &key, "failed").await;
+                assert_eq!(failed["failure"], reason);
+                assert!(failed["round_id"].is_null());
+                assert!(!failed.to_string().contains("private"));
+            }
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    "/api/requests/run",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &validation_body().to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let stream = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/requests/events")
+                        .header(header::HOST, "localhost:8080")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut events = stream.into_body().into_data_stream();
+            tokio::time::timeout(Duration::from_secs(3), events.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(3), events.next())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            wait_for_run(&runs, &PrKey::new("owner/repo", 15).unwrap(), "failed").await;
+            assert!(state_file.with_extension("cancelled").exists());
+            let response = app
+                .oneshot(json_post(
+                    "/api/requests/run",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &validation_body().to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        });
+    }
+
+    #[test]
+    fn run_route_requires_a_complete_well_formed_inspection() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let app = router_with_runs(
+            state_file.clone(),
+            state_file.with_extension("config.json"),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+            fake_prepare,
+            Arc::new(Runs::new(
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                fake_run,
+            )),
+        );
+        test_runtime().block_on(async {
+            for field in ["key", "model", "head_sha", "revision", "rules"] {
+                let mut body = validation_body();
+                body.as_object_mut().unwrap().remove(field);
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/run",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            }
+            let mut body = validation_body();
+            body["rules"]["configuration_sha256"] = "bad".into();
+            let response = app
+                .oneshot(json_post(
+                    "/api/requests/run",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &body.to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        });
+        assert!(!state_file.with_extension("cancelled").exists());
     }
 
     fn fake_prepare(
@@ -1257,6 +1660,7 @@ mod tests {
                     r#"{"repository":"owner/repo","number":15}"#,
                 ),
                 ("/api/requests/validate-model", validation_body.as_str()),
+                ("/api/requests/run", validation_body.as_str()),
             ] {
                 for bootstrap in [Some("test-code".to_owned()), None] {
                     let app = router(
@@ -2141,7 +2545,9 @@ mod tests {
                 "head_sha": "a".repeat(40),
                 "revision": 2,
                 "model": "model-alpha",
-                "agent": "claude"
+                "agent": "claude",
+                "failure": null,
+                "freshness": null
             })
         );
         assert!(!runner.parent().unwrap().exists());

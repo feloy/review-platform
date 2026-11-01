@@ -1,9 +1,12 @@
-//! Foreground review CLI orchestration and private draft presentation.
+//! Shared review execution, sandbox recovery, and private draft presentation.
 
-use crate::storage;
+use crate::{
+    preparation_commands::{InspectedRules, configuration_hash},
+    storage,
+};
 use anyhow::{Context, Result};
 use review_platform::{
-    Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome,
+    Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome, State, StateError,
     agent::{self, AgentRunError},
     archive, checkout,
     config::ReviewConfig,
@@ -14,7 +17,8 @@ use review_platform::{
         DraftOutput, FailureKind, Freshness, OUTPUT_MARKER, REVIEW_RULES, RoundId, RoundRecord,
         RoundStatus,
     },
-    round, sandbox_layout,
+    round::{self, ModelSelection},
+    sandbox_layout,
 };
 #[cfg(unix)]
 use std::fs::File;
@@ -25,14 +29,129 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{Builder, NamedTempFile};
+use thiserror::Error;
+
+/// The frozen preparation the signed-in lead selected for a GUI run.
+pub struct InspectedRun {
+    selection: ModelSelection,
+    rules: InspectedRules,
+}
+
+impl InspectedRun {
+    pub fn new(selection: ModelSelection, rules: InspectedRules) -> Self {
+        Self { selection, rules }
+    }
+
+    pub fn selection(&self) -> &ModelSelection {
+        &self.selection
+    }
+
+    pub fn rules(&self) -> &InspectedRules {
+        &self.rules
+    }
+
+    fn check(
+        &self,
+        state: &State,
+        key: &PrKey,
+        config_bytes: &[u8],
+    ) -> Result<(), InspectionError> {
+        let request = state
+            .get(key)
+            .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+        request.ensure_inspected(self.selection.head(), self.selection.revision())?;
+        if request.authorization() == Authorization::AwaitingLead
+            || request.authorization() != self.rules().authorization()
+            || &configuration_hash(config_bytes)? != self.rules().configuration_sha256()
+        {
+            return Err(InspectionError::RulesChanged);
+        }
+        if !request.model_validation().is_some_and(|validation| {
+            validation.model() == self.selection.model()
+                && validation.head_sha() == self.selection.head()
+                && validation.revision() == self.selection.revision()
+        }) {
+            return Err(InspectionError::ModelChanged);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum InspectionError {
+    #[error(transparent)]
+    Config(#[from] review_platform::config::ConfigError),
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error("authorization or configuration changed; prepare and inspect the review again")]
+    RulesChanged,
+    #[error("validated model changed; prepare and inspect the review again")]
+    ModelChanged,
+}
+
+#[derive(Debug, Error)]
+pub enum RunError {
+    #[error(transparent)]
+    Inspection(InspectionError),
+    #[error("review execution: {0}")]
+    Execution(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// Register cancellation once for the owner of one CLI run or the GUI server.
+pub struct Cancellation {
+    flag: Arc<AtomicBool>,
+    #[cfg(unix)]
+    signals: Vec<signal_hook::SigId>,
+}
+
+impl Cancellation {
+    pub fn new() -> Result<Self> {
+        let mut cancellation = Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            #[cfg(unix)]
+            signals: Vec::new(),
+        };
+        cancellation.register()?;
+        Ok(cancellation)
+    }
+
+    fn register(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            self.signals
+                .push(signal_hook::flag::register(signal, self.flag.clone())?);
+        }
+        Ok(())
+    }
+
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.flag.clone()
+    }
+}
+
+impl Drop for Cancellation {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for signal in self.signals.drain(..) {
+            signal_hook::low_level::unregister(signal);
+        }
+    }
+}
 
 fn load_config(override_path: Option<PathBuf>) -> Result<(PathBuf, ReviewConfig)> {
+    let (path, _, config) = load_config_snapshot(override_path)?;
+    Ok((path, config))
+}
+
+fn load_config_snapshot(
+    override_path: Option<PathBuf>,
+) -> Result<(PathBuf, Vec<u8>, ReviewConfig)> {
     let path = storage::resolve_config_path(override_path)?;
     let bytes = fs::read(&path)
         .with_context(|| format!("reading review configuration {}", path.display()))?;
     let config = ReviewConfig::from_json(&bytes)
         .with_context(|| format!("validating review configuration {}", path.display()))?;
-    Ok((path, config))
+    Ok((path, bytes, config))
 }
 
 pub fn gateway_status(config_override: Option<PathBuf>) -> Result<()> {
@@ -95,16 +214,93 @@ pub fn run_review(
     let inspected_head = HeadSha::new(head)?;
     let inspected_revision = InputRevision::new(revision)?;
     let state_path = storage::resolve_path(state_override)?;
-    let pr_lock = storage::pr_lock(&state_path, &key)?;
-    let (config_path, config) = load_config(config_override)?;
+    let config_path = storage::resolve_config_path(config_override)?;
+    let cancellation = Cancellation::new()?;
+    execute_review(
+        &state_path,
+        &config_path,
+        RunInputs {
+            key: &key,
+            head: &inspected_head,
+            revision: inspected_revision,
+            inspection: None,
+        },
+        cancellation.flag(),
+        &mut |_| {},
+    )
+}
+
+pub fn run_inspected_review(
+    state_path: &Path,
+    config_path: &Path,
+    key: &PrKey,
+    inspected: &InspectedRun,
+    cancelled: Arc<AtomicBool>,
+    started: &mut dyn FnMut(&RoundId),
+) -> Result<(), RunError> {
+    execute_review(
+        state_path,
+        config_path,
+        RunInputs {
+            key,
+            head: inspected.selection().head(),
+            revision: inspected.selection().revision(),
+            inspection: Some(inspected),
+        },
+        cancelled,
+        started,
+    )
+    .map_err(|error| match error.downcast::<InspectionError>() {
+        Ok(error) => RunError::Inspection(error),
+        Err(error) => RunError::Execution(error.into()),
+    })
+}
+
+struct RunInputs<'a> {
+    key: &'a PrKey,
+    head: &'a HeadSha,
+    revision: InputRevision,
+    inspection: Option<&'a InspectedRun>,
+}
+
+impl RunInputs<'_> {
+    fn check(&self, state: &State, config_bytes: &[u8]) -> Result<()> {
+        if let Some(inspection) = self.inspection {
+            inspection.check(state, self.key, config_bytes)?;
+        }
+        Ok(())
+    }
+}
+
+fn execute_review(
+    state_path: &Path,
+    config_path: &Path,
+    inputs: RunInputs<'_>,
+    cancelled: Arc<AtomicBool>,
+    started: &mut dyn FnMut(&RoundId),
+) -> Result<()> {
+    let RunInputs {
+        key,
+        head: inspected_head,
+        revision: inspected_revision,
+        ..
+    } = inputs;
+    anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "review interrupted");
+    let pr_lock = if inputs.inspection.is_some() {
+        storage::try_pr_lock(state_path, key)?
+    } else {
+        storage::pr_lock(state_path, key)?
+    };
+    let (_, config_bytes, config) = load_config_snapshot(Some(config_path.to_owned()))?;
     let shell = OpenShell::new(config.execution());
     {
-        let _lock = storage::lock(&state_path)?;
-        let state = storage::load(&state_path)?;
+        let _lock = storage::lock(state_path)?;
+        let state = storage::load(state_path)?;
+        inputs.check(&state, &config_bytes)?;
         let request = state
-            .get(&key)
+            .get(key)
             .with_context(|| format!("review request not found: {key}"))?;
-        request.ensure_inspected(&inspected_head, inspected_revision)?;
+        request.ensure_inspected(inspected_head, inspected_revision)?;
         anyhow::ensure!(
             request.authorization() != Authorization::AwaitingLead,
             "{key} is awaiting lead authorization"
@@ -112,7 +308,7 @@ pub fn run_review(
         if let Some(blocking) = state
             .rounds()
             .iter()
-            .find(|round| round.key() == &key && round.blocks_new_round())
+            .find(|round| round.key() == key && round.blocks_new_round())
         {
             anyhow::bail!("round {} blocks another review of {key}", blocking.id());
         }
@@ -120,27 +316,27 @@ pub fn run_review(
     // A missing or unsupported gateway cannot consume authorization.
     shell.preflight_gateway()?;
     let client = github::GithubClient::new()?;
-    let observation =
-        client.observe_pull_excluding(&key, &state_confirmed_ids(&state_path, &key)?)?;
+    let observation = client.observe_pull_excluding(key, &state_confirmed_ids(state_path, key)?)?;
     let mut state = {
-        let _lock = storage::lock(&state_path)?;
-        let mut state = storage::load(&state_path)?;
+        let _lock = storage::lock(state_path)?;
+        let mut state = storage::load(state_path)?;
+        inputs.check(&state, &fs::read(config_path)?)?;
         state
-            .get(&key)
+            .get(key)
             .with_context(|| format!("review request not found: {key}"))?
-            .ensure_inspected(&inspected_head, inspected_revision)?;
+            .ensure_inspected(inspected_head, inspected_revision)?;
         let refreshed = round::refresh_observation(&mut state, &config, observation)?;
         if refreshed.outcome() != RefreshOutcome::Unchanged {
-            storage::save(&state_path, &state)?;
+            storage::save(state_path, &state)?;
         }
         state
-            .get(&key)
+            .get(key)
             .with_context(|| format!("review request not found: {key}"))?
-            .ensure_inspected(&inspected_head, inspected_revision)?;
+            .ensure_inspected(inspected_head, inspected_revision)?;
         state
     };
-    let refreshed = round::refresh(&client, &mut state, &config, &key)?;
-    persist_changed_observation(&state_path, &refreshed, inspected_revision)?;
+    let refreshed = round::refresh(&client, &mut state, &config, key)?;
+    persist_changed_observation(state_path, &refreshed, inspected_revision)?;
     anyhow::ensure!(
         refreshed.outcome() == RefreshOutcome::Unchanged,
         "PR inputs changed during preparation; refresh and inspect the new revision"
@@ -153,12 +349,12 @@ pub fn run_review(
     );
     let choice = report.resolved();
     shell.preflight_runner(choice.agent().runner())?;
-    let pull = client.pull_request(&key)?;
+    let pull = client.pull_request(key)?;
     anyhow::ensure!(
-        pull.head_sha() == &inspected_head && pull.state() == PullRequestState::Open,
+        pull.head_sha() == inspected_head && pull.state() == PullRequestState::Open,
         "PR head changed or PR closed during preparation"
     );
-    let round_dir = new_round_dir(&state_path)?;
+    let round_dir = new_round_dir(state_path)?;
     let _runner_lock = storage::try_lock(&round_dir.join("runner"))?;
     let id = RoundId::new(
         round_dir
@@ -168,7 +364,7 @@ pub fn run_review(
             .into_owned(),
     )?;
     let discussion = state
-        .get(&key)
+        .get(key)
         .and_then(|request| request.discussion())
         .context("author discussion is unavailable")?
         .clone();
@@ -181,16 +377,18 @@ pub fn run_review(
         choice,
         now()?,
     );
-    let cancelled = cancellation_flag()?;
     {
-        let _lock = storage::lock(&state_path)?;
-        let mut current = storage::load(&state_path)?;
+        let _lock = storage::lock(state_path)?;
+        let mut current = storage::load(state_path)?;
+        inputs.check(&current, &fs::read(config_path)?)?;
+        anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "review interrupted");
         current.begin_round(record.clone(), choice)?;
-        storage::save(&state_path, &current)?;
+        storage::save(state_path, &current)?;
     }
     // The saved Starting round blocks another round; the runner lock protects
     // this sandbox until execution and cleanup finish.
     drop(pr_lock);
+    started(&id);
     println!("Round {id}: preparing checkout and sandbox.");
     let mut failure = FailureKind::Preflight;
     let mut sandbox_created = false;
@@ -203,7 +401,7 @@ pub fn run_review(
     )> {
         let staged_image = archive::stage_archive(
             choice.archive(),
-            &private_parent(&state_path).join("archives"),
+            &private_parent(state_path).join("archives"),
         )?;
         let executable = staged_image.claude_executable()?;
         if cancelled.load(Ordering::Relaxed) {
@@ -212,7 +410,7 @@ pub fn run_review(
         }
         failure = FailureKind::Checkout;
         let checkout_path = round_dir.join("src");
-        checkout::create_checkout(&checkout_path, &key, &inspected_head, pull.base_sha())?;
+        checkout::create_checkout(&checkout_path, key, inspected_head, pull.base_sha())?;
         if cancelled.load(Ordering::Relaxed) {
             failure = FailureKind::Recovery;
             anyhow::bail!("review interrupted");
@@ -254,29 +452,29 @@ pub fn run_review(
         }
         println!("Round {id}: rechecking PR inputs and authorization.");
         failure = FailureKind::Preflight;
-        let live = client.observe_pull_excluding(&key, &state_confirmed_ids(&state_path, &key)?)?;
+        let live = client.observe_pull_excluding(key, &state_confirmed_ids(state_path, key)?)?;
         let mut current = {
-            let _lock = storage::lock(&state_path)?;
-            let mut current = storage::load(&state_path)?;
+            let _lock = storage::lock(state_path)?;
+            let mut current = storage::load(state_path)?;
             current
-                .get(&key)
+                .get(key)
                 .with_context(|| format!("review request not found: {key}"))?
                 .ensure_inspected(record.head_sha(), record.revision())?;
             let refreshed = round::refresh_observation(&mut current, &config, live)?;
             if refreshed.outcome() != RefreshOutcome::Unchanged {
-                storage::save(&state_path, &current)?;
+                storage::save(state_path, &current)?;
             }
             anyhow::ensure!(
                 current
-                    .get(&key)
+                    .get(key)
                     .is_some_and(|request| request.head_sha() == record.head_sha()
                         && request.discussion() == Some(record.discussion())),
                 "PR head or author discussion changed before dispatch"
             );
             current
         };
-        let refreshed = round::refresh(&client, &mut current, &config, &key)?;
-        persist_changed_observation(&state_path, &refreshed, record.revision())?;
+        let refreshed = round::refresh(&client, &mut current, &config, key)?;
+        persist_changed_observation(state_path, &refreshed, record.revision())?;
         anyhow::ensure!(
             refreshed.outcome() == RefreshOutcome::Unchanged,
             "PR inputs changed before dispatch"
@@ -287,16 +485,16 @@ pub fn run_review(
             "review is not ready: {}",
             readiness.preparation().readiness()
         );
-        let live_pull = client.pull_request(&key)?;
+        let live_pull = client.pull_request(key)?;
         anyhow::ensure!(
             live_pull.head_sha() == record.head_sha()
                 && live_pull.base_sha() == pull.base_sha()
                 && live_pull.state() == PullRequestState::Open,
             "PR head, base, or open state changed before dispatch"
         );
-        let fresh_config = load_config(Some(config_path.clone()))?.1;
+        let fresh_config = load_config(Some(config_path.to_owned()))?.1;
         let current_choice = fresh_config
-            .review_models_for(&key)?
+            .review_models_for(key)?
             .into_iter()
             .find(|candidate| candidate.model().id() == record.model())
             .context("validated model is no longer configured")?;
@@ -315,10 +513,11 @@ pub fn run_review(
         }
         failure = FailureKind::Dispatch;
         {
-            let _lock = storage::lock(&state_path)?;
-            let mut current = storage::load(&state_path)?;
+            let _lock = storage::lock(state_path)?;
+            let mut current = storage::load(state_path)?;
+            inputs.check(&current, &fs::read(config_path)?)?;
             current.dispatch_round(&id, now()?)?;
-            storage::save(&state_path, &current)?;
+            storage::save(state_path, &current)?;
         }
         println!("Round {id}: running Claude.");
         let prompt_path = sandbox_layout::system_prompt_file();
@@ -371,7 +570,7 @@ pub fn run_review(
             id.as_str(),
             artifact_hash,
         );
-        Ok((refresh_freshness(&client, &state_path, &record), stop_error, seal))
+        Ok((refresh_freshness(&client, state_path, &record), stop_error, seal))
     })();
     let (freshness, stop_error, seal) = match operation {
         Ok(result) => result,
@@ -392,8 +591,8 @@ pub fn run_review(
                     agent_log.as_bytes(),
                 );
             }
-            let _lock = storage::lock(&state_path)?;
-            let mut current = storage::load(&state_path)?;
+            let _lock = storage::lock(state_path)?;
+            let mut current = storage::load(state_path)?;
             current.fail_round(
                 &id,
                 now()?,
@@ -404,7 +603,7 @@ pub fn run_review(
             if cleaned {
                 current.mark_round_cleaned(&id)?;
             }
-            storage::save(&state_path, &current)?;
+            storage::save(state_path, &current)?;
             return Err(error).with_context(|| {
                 format!(
                     "round {id} failed{}",
@@ -418,16 +617,16 @@ pub fn run_review(
         }
     };
     {
-        let _lock = storage::lock(&state_path)?;
-        let mut current = storage::load(&state_path)?;
+        let _lock = storage::lock(state_path)?;
+        let mut current = storage::load(state_path)?;
         current.complete_round(&id, now()?, freshness)?;
         current.seal_round(&id, seal)?;
-        storage::save(&state_path, &current)?;
+        storage::save(state_path, &current)?;
     }
-    finish_completed_cleanup(&shell, &record, &state_path, stop_error)?;
+    finish_completed_cleanup(&shell, &record, state_path, stop_error)?;
     println!(
         "Round {id}: private draft available ({freshness}). Run {}.",
-        show_draft_command(&key, &id)
+        show_draft_command(key, &id)
     );
     Ok(())
 }
@@ -598,16 +797,6 @@ fn freshness_for(
     }
 }
 
-fn cancellation_flag() -> Result<Arc<AtomicBool>> {
-    let flag = Arc::new(AtomicBool::new(false));
-    #[cfg(unix)]
-    {
-        signal_hook::flag::register(signal_hook::consts::SIGINT, flag.clone())?;
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, flag.clone())?;
-    }
-    Ok(flag)
-}
-
 fn private_parent(state_path: &Path) -> PathBuf {
     state_path
         .parent()
@@ -706,6 +895,131 @@ fn now() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inspected_run(config_bytes: &[u8]) -> InspectedRun {
+        InspectedRun::new(
+            ModelSelection::new(
+                review_platform::config::ModelId::new("model-alpha").unwrap(),
+                HeadSha::new("a".repeat(40)).unwrap(),
+                InputRevision::new(2).unwrap(),
+            ),
+            serde_json::from_value(serde_json::json!({
+                "authorization": "one_round",
+                "configuration_sha256": configuration_hash(config_bytes).unwrap(),
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn gui_run_rechecks_frozen_inputs_rules_and_model_before_any_external_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("state.json");
+        let config_file = dir.path().join("config.json");
+        let config = serde_json::to_vec(&serde_json::json!({
+            "schema_version":5,
+            "execution":{"openshell":dir.path().join("missing-openshell"), "gateway":"gateway", "workspace":"default", "driver":"vm", "github_provider":"github-ro"},
+            "models":[], "agents":[], "repositories":[],
+        })).unwrap();
+        fs::write(&config_file, &config).unwrap();
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let fixture = serde_json::json!({
+            "schema_version":6, "rounds":[],
+            "requests":[{
+                "key":key, "head_sha":"a".repeat(40), "revision":2, "authorization":"one_round",
+                "discussion":{"author_id":7, "comments":[]},
+                "model_validation":{
+                    "model":"model-alpha", "agent":"claude", "head_sha":"a".repeat(40), "revision":2,
+                    "prompt_sha256":"a".repeat(64), "format_sha256":"b".repeat(64),
+                    "execution_sha256":"c".repeat(64), "runner_sha256":"d".repeat(64),
+                    "vm_archive":{"path":dir.path().join("reviewer.tar"), "sha256":"e".repeat(64), "config_sha256":"f".repeat(64)}
+                }
+            }],
+        });
+        let state: State = serde_json::from_value(fixture.clone()).unwrap();
+        state.validate().unwrap();
+        let inspected = inspected_run(&config);
+        inspected.check(&state, &key, &config).unwrap();
+        // These changes invalidate the same displayed model even when its name is unchanged.
+        for field in [
+            "head_sha",
+            "revision",
+            "authorization",
+            "model_validation",
+            "configuration",
+            "selected_model",
+            "missing_request",
+        ] {
+            let mut saved = fixture.clone();
+            let mut decision = inspected_run(&config);
+            let mut current_config = config.clone();
+            match field {
+                "head_sha" => {
+                    saved["requests"][0]["head_sha"] = "b".repeat(40).into();
+                    saved["requests"][0]["model_validation"] = serde_json::Value::Null;
+                }
+                "revision" => {
+                    saved["requests"][0]["revision"] = 3.into();
+                    saved["requests"][0]["model_validation"] = serde_json::Value::Null;
+                }
+                "authorization" => {
+                    saved["requests"][0]["authorization"] = "pr_cycle".into();
+                    saved["requests"][0]["model_validation"] = serde_json::Value::Null;
+                }
+                "model_validation" => {
+                    saved["requests"][0]["model_validation"] = serde_json::Value::Null
+                }
+                "configuration" => current_config.push(b'\n'),
+                "selected_model" => {
+                    decision.selection = ModelSelection::new(
+                        review_platform::config::ModelId::new("model-beta").unwrap(),
+                        HeadSha::new("a".repeat(40)).unwrap(),
+                        InputRevision::new(2).unwrap(),
+                    )
+                }
+                "missing_request" => saved["requests"] = serde_json::json!([]),
+                _ => unreachable!(),
+            }
+            fs::write(&config_file, &current_config).unwrap();
+            fs::write(&state_file, serde_json::to_vec(&saved).unwrap()).unwrap();
+            let original = fs::read(&state_file).unwrap();
+            let error = run_inspected_review(
+                &state_file,
+                &config_file,
+                &key,
+                &decision,
+                Arc::new(AtomicBool::new(false)),
+                &mut |_| panic!("stale run started a round"),
+            )
+            .unwrap_err();
+            let RunError::Inspection(error) = error else {
+                panic!("reached external work for {field}: {error}");
+            };
+            match field {
+                "head_sha" => assert!(matches!(
+                    error,
+                    InspectionError::State(StateError::HeadMismatch { .. })
+                )),
+                "revision" => assert!(matches!(
+                    error,
+                    InspectionError::State(StateError::RevisionMismatch { .. })
+                )),
+                "missing_request" => assert!(matches!(
+                    error,
+                    InspectionError::State(StateError::RequestNotFound(_))
+                )),
+                "configuration" | "authorization" => {
+                    assert!(matches!(error, InspectionError::RulesChanged))
+                }
+                "model_validation" | "selected_model" => {
+                    assert!(matches!(error, InspectionError::ModelChanged))
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(fs::read(&state_file).unwrap(), original);
+            assert!(!dir.path().join("rounds").exists());
+        }
+    }
 
     #[test]
     fn cleanup_error_includes_copyable_recovery_and_draft_commands() {

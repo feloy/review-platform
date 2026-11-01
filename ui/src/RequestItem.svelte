@@ -1,7 +1,8 @@
 <script>
   import PreparationPanel from './PreparationPanel.svelte';
+  import ReviewProgress from './ReviewProgress.svelte';
 
-  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate } = $props();
+  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate, onRun } = $props();
   let expanded = $state(false);
   let inspected = $state(null);
   let preparation = $state(null);
@@ -29,6 +30,13 @@
     else preparationInvalid = true;
   }
 
+  async function runReview(model) {
+    if (!preparation || preparationInvalid || action?.pending) return;
+    const result = await onRun(preparation, model);
+    preparationInvalid = true;
+    if (result) preparation = null;
+  }
+
   const authorizationLabels = {
     awaiting_lead: 'Awaiting lead',
     one_round: 'One round',
@@ -38,7 +46,7 @@
   const roundLabels = {
     starting: 'Starting',
     running: 'Running',
-    awaiting_decision: 'Awaiting decision',
+    awaiting_decision: 'Draft ready',
     publishing: 'Publishing',
     publication_unknown: 'Publication unknown',
     published: 'Published',
@@ -165,7 +173,7 @@
     {/if}
     {#if preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
-        onValidate={validateModel} onClose={() => preparation = null} />
+        onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
     {/if}
   {/if}
   {#if action?.message}
@@ -173,6 +181,7 @@
       {action.message}
     </p>
   {/if}
+  <ReviewProgress {request} />
   <div class="request-details" hidden={!expanded}>
     <div class="detail-group">
       <h3>Author discussion</h3>

@@ -386,6 +386,7 @@ describe('review requests page', () => {
     expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(true);
     const button = await clickMaterialButton(user, container, 'Validate model');
     expect(button.disabled).toBe(true);
+    expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -485,6 +486,122 @@ describe('review requests page', () => {
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
     expect(screen.queryByText('Prepare review')).toBeNull();
     expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+  });
+
+  it('runs the validated selection for frozen inputs and prevents duplicate clicks', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let acceptRun;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({
+        readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-beta', resolved_model: 'model-beta',
+      }) })
+      .mockImplementationOnce(() => new Promise((resolve) => { acceptRun = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-beta', agent: 'claude-alt' } })]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findByText('ready to run');
+    const model = screen.getByLabelText('Review model for owner/repo #15');
+    await user.selectOptions(model, 'model-alpha');
+    expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await user.selectOptions(model, 'model-beta');
+    const run = await clickMaterialButton(user, container, 'Run review');
+    expect(run.disabled).toBe(true);
+    expect(model.disabled).toBe(true);
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/run');
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({
+      key: { repository: 'owner/repo', number: 15 }, model: 'model-beta', head_sha: 'a'.repeat(40), revision: 2,
+      rules: { authorization: 'one_round', configuration_sha256: 'c'.repeat(64) },
+    });
+    await clickMaterialButton(user, container, 'Starting review…');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await act(() => acceptRun({ ok: true, status: 202, json: async () => ({ accepted: true }) }));
+    expect(await screen.findByText('Review accepted. Starting checks on the server.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Review preparation for owner/repo #15' })).toBeNull();
+    expect(screen.getByText('No rounds yet', { selector: '.secondary' })).toBeTruthy();
+  });
+
+  it.each([
+    { head_sha: 'b'.repeat(40), revision: 3 }, { revision: 3 }, { authorization: 'pr_cycle' },
+    { validated_model: { model: 'model-beta', agent: 'claude-alt' } },
+    { validated_model: null },
+    { run: { status: 'starting' } }, { run: { status: 'running', round_id: 'r-example' } },
+    { latest_round: round() },
+    { latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) },
+    { latest_round: round({ status: 'failed', cleanup_status: 'needs_attention' }) },
+  ])('disables running after live state changes to %o', async (change) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({
+        readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-alpha',
+      }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const original = preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } });
+    await showSnapshot(source, [original]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findByText('ready to run');
+    expect(screen.getByText('Run review').disabled).toBe(false);
+    await showSnapshot(source, [{ ...original, ...change }]);
+    expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('requires a new preparation after a rejected run request', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({
+        readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-alpha',
+      }) })
+      .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'A review is already starting or running for this PR.' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
+    await screen.findByText('Prepare review');
+    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findByText('ready to run');
+    await clickMaterialButton(user, container, 'Run review');
+    expect(await screen.findByText('A review is already starting or running for this PR.')).toBeTruthy();
+    expect(screen.getByText(/This preparation is outdated/)).toBeTruthy();
+    expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('shows server progress, private draft readiness, failures, and cleanup from live updates', async () => {
+    const { unmount } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [request({ run: { status: 'starting' } })]);
+    expect(screen.getByText(/Starting review…/)).toBeTruthy();
+    expect(screen.getByText(/You can close this tab and return to see progress/)).toBeTruthy();
+    await showSnapshot(source, [request({ latest_round: round(), run: { status: 'running', round_id: 'r-example' } })]);
+    expect(screen.getAllByText('Running').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Starting review…/)).toBeNull();
+    await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision', freshness: 'stale' }),
+      run: { status: 'running', round_id: 'r-example' } })]);
+    expect(screen.getAllByText('Draft ready').length).toBeGreaterThan(0);
+    expect(screen.getByText('Finishing cleanup…')).toBeTruthy();
+    expect(screen.getByText(/review-platform show-draft owner\/repo 15 --round r-example/)).toBeTruthy();
+    expect(screen.getByText(/Draft freshness is stale/)).toBeTruthy();
+    await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision', cleanup_status: 'needs_attention' }),
+      run: { status: 'failed', round_id: 'r-example', failure: 'execution' } })]);
+    expect(screen.getByRole('alert').textContent).toContain('The private draft was saved');
+    expect(screen.getByText(/review-platform recover-review owner\/repo 15/)).toBeTruthy();
+    await showSnapshot(source, [request({ run: { status: 'failed', round_id: null, failure: 'stale_preparation' } })]);
+    expect(screen.getByRole('alert').textContent).toContain('Prepare and inspect the review again');
+    await showSnapshot(source, [request({ latest_round: round({ status: 'failed', failure: 'timeout', cleanup_pending: false, cleanup_status: 'complete' }),
+      run: { status: 'failed', round_id: 'r-example', failure: 'execution' } })]);
+    expect(screen.getByRole('alert').textContent).toContain('The GUI review job failed');
+    expect(screen.getByText(/Agent timed out/)).toBeTruthy();
+    unmount();
+    expect(source.close).toHaveBeenCalledOnce();
   });
 
   it('keeps request details open and updates them when a new snapshot arrives', async () => {

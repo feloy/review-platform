@@ -155,7 +155,7 @@ fn read_config(path: &Path) -> Result<Vec<u8>, PrepareError> {
     })
 }
 
-fn configuration_hash(bytes: &[u8]) -> Result<PromptHash, ConfigError> {
+pub(crate) fn configuration_hash(bytes: &[u8]) -> Result<PromptHash, ConfigError> {
     PromptHash::new(format!("{:x}", Sha256::digest(bytes)))
 }
 

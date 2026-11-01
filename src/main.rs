@@ -1,6 +1,7 @@
 //! Operator CLI for PR authorization, review rounds, and draft decisions.
 
 mod gui;
+mod gui_runs;
 mod preparation_commands;
 mod publication_commands;
 mod request_commands;
