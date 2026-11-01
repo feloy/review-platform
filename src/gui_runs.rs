@@ -1,6 +1,9 @@
 //! Server-owned review jobs; browser requests observe but never own their lifetime.
 
-use crate::review_commands::{InspectedRun, RunError};
+use crate::{
+    gui_diagnostics,
+    review_commands::{InspectedRun, RunError},
+};
 use review_platform::{PrKey, review::RoundId};
 use serde::Serialize;
 use std::{
@@ -133,10 +136,25 @@ impl Runs {
         // This supervisor is detached from the HTTP response and SSE connections.
         let owner = self.clone();
         tokio::spawn(async move {
-            let failure = match task.await {
+            let result = task.await;
+            let round_id = owner
+                .summary(&key)
+                .ok()
+                .flatten()
+                .and_then(|job| job.round_id);
+            let failure = match result {
                 Ok(Ok(())) => None,
-                Ok(Err(RunError::Inspection(_))) => Some(RunFailure::StalePreparation),
-                Ok(Err(RunError::Execution(_))) | Err(_) => Some(RunFailure::Execution),
+                Ok(Err(error)) => {
+                    gui_diagnostics::report("review", &key, round_id.as_ref(), &error);
+                    Some(match error {
+                        RunError::Inspection(_) => RunFailure::StalePreparation,
+                        RunError::Execution(_) => RunFailure::Execution,
+                    })
+                }
+                Err(error) => {
+                    gui_diagnostics::report("review", &key, round_id.as_ref(), &error);
+                    Some(RunFailure::Execution)
+                }
             };
             if let Ok(mut jobs) = owner.jobs.lock() {
                 if let Some(job) = jobs.get_mut(&key) {

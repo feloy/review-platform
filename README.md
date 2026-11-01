@@ -152,6 +152,11 @@ The optional `run` reports the latest GUI job for this server launch:
 `status` (`starting`, `running`, `finished`, or `failed`), `round_id`, and `failure`.
 `running` means a round has been recorded; its persisted round status shows execution progress.
 Job failure categories omit raw adapter errors, prompts, and provider details.
+Review and publication job failures also write local diagnostics to the GUI server's terminal (stderr),
+including the PR, round when known, and underlying error causes.
+Inspect that terminal for configuration, credentials, network, or state persistence failures.
+JSON diagnostics report the error category and location while omitting input values;
+worker task failures report panic or cancellation without repeating panic payloads.
 The optional `publication` reports the latest GUI publication job for this server launch:
 `round_id`, `status` (`active`, `published`, `failed`, or `unknown`), safe `error`,
 and optional post-publication `freshness`.
