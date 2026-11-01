@@ -1,15 +1,22 @@
 <script>
-  let { request, preparation, invalid, action, onValidate, onClose } = $props();
+  let { request, preparation, invalid, action, onValidate, onRun, onClose } = $props();
   let selectedModel = $state('');
   $effect(() => { selectedModel = preparation.resolved_model; });
 
   const stale = $derived(invalid || preparation.head_sha !== request.head_sha ||
-    preparation.revision !== request.revision || preparation.authorization !== request.authorization);
+    preparation.revision !== request.revision || preparation.authorization !== request.authorization ||
+    (preparation.validated_model && request.validated_model &&
+      preparation.validated_model !== request.validated_model.model));
+  const runBlocked = $derived(['starting', 'running'].includes(request.run?.status) ||
+    request.latest_round?.cleanup_pending ||
+    ['starting', 'running', 'awaiting_decision', 'publishing', 'publication_unknown'].includes(request.latest_round?.status));
   const permitsValidation = $derived(preparation.readiness === 'ready' ||
     preparation.readiness === 'model_validation_required');
   const selected = $derived(preparation.models.find((choice) => choice.model === selectedModel));
   const modelValidated = $derived(!stale && preparation.readiness === 'ready' &&
     preparation.validated_model === selectedModel);
+  const currentModelValidated = $derived(modelValidated && request.validated_model?.model === selectedModel &&
+    request.validated_model?.agent === selected?.agent);
   const checkLabels = {
     green: 'Green', pending: 'Pending', failing: 'Failing', unknown: 'Unknown', no_results: 'No checks reported',
   };
@@ -54,7 +61,16 @@
       {action?.pending && action.operation === 'validate-model' ? 'Validating model…' : modelValidated ? 'Model validated' : 'Validate model'}
     </md-filled-button>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <md-filled-button disabled={action?.pending || !currentModelValidated || runBlocked}
+      onclick={() => onRun(selectedModel)}>
+      {action?.pending && action.operation === 'run' ? 'Starting review…' : 'Run review'}
+    </md-filled-button>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <md-text-button disabled={action?.pending} onclick={onClose}>Close preparation</md-text-button>
   </div>
-  <p>Run the review through the CLI after validation.</p>
+  <p>Running rechecks GitHub inputs, checks, authorization, configuration, and gateway readiness.</p>
+  {#if modelValidated && !currentModelValidated}
+    <p>Waiting for the saved model validation. Prepare again if it was cleared.</p>
+  {/if}
+  {#if runBlocked}<p>A review is active, needs a lead decision, or requires sandbox cleanup before another round.</p>{/if}
 </section>

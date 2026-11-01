@@ -137,6 +137,7 @@ h1 {
   color: #5b5963;
   font-size: 0.86rem;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .action-error,

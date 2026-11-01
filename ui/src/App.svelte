@@ -148,6 +148,19 @@
     }, () => 'Review model validated.', 'Could not validate the review model.');
   }
 
+  function runReview(request, requestId, preparation, model) {
+    return performRequestAction(requestId, 'run', {
+      key: { repository: request.repository, number: request.number },
+      model,
+      head_sha: preparation.head_sha,
+      revision: preparation.revision,
+      rules: {
+        authorization: preparation.authorization,
+        configuration_sha256: preparation.configuration_sha256,
+      },
+    }, () => 'Review accepted. Starting checks on the server.', 'Could not start the review.');
+  }
+
   onMount(() => {
     checkSession();
     const events = new EventSource('/api/requests/events');
@@ -247,7 +260,8 @@
             onAuthorize={(inspected, scope) => authorize(inspected, requestId, scope)}
             onRevoke={() => revoke(request, requestId)}
             onPrepare={() => prepareReview(request, requestId)}
-            onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)} />
+            onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)}
+            onRun={(preparation, model) => runReview(request, requestId, preparation, model)} />
         {/each}
       </ul>
     {/if}

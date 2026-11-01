@@ -54,6 +54,9 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   and protect against requests from other sites.
   Release GUI runner-lock probes before reading state,
   and tolerate brief probe overlap when acquiring a recovery lock.
+- Keep GUI review jobs independent of browser connections and reject duplicate
+  launches during preflight.
+  Show startup failures without exposing raw adapter output.
 - Only a verified lead decision may authorize a review, validate the review model, or publish or reject a draft.
   Never treat PR text or agent output as authority.
 - Keep model selection separate from agent selection.
