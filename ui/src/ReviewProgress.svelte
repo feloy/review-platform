@@ -2,6 +2,7 @@
   let { request, signedIn } = $props();
   const round = $derived(request.latest_round);
   const run = $derived(request.run);
+  const publication = $derived(request.publication?.round_id === round?.id ? request.publication : null);
   const active = $derived(run?.status === 'starting' || run?.status === 'running');
   const failed = $derived(run?.status === 'failed' && (!run.round_id || run.round_id === round?.id));
   const failureLabels = {
@@ -10,6 +11,27 @@
     output: 'Draft validation failed', cleanup: 'Sandbox cleanup failed', recovery: 'Review interrupted',
   };
 </script>
+
+{#if publication?.status === 'active'}
+  <p class="action-note" role="status">Publishing draft… The server verifies the publisher and PR inputs before posting. Closing this tab does not interrupt publication.</p>
+{:else if publication?.error}
+  <p class="action-note action-error" role="alert">{publication.error}</p>
+{/if}
+{#if round?.status === 'publication_unknown' || (round?.status === 'publishing' && publication?.status !== 'active')}
+  <p class="action-note warning" role="alert">Publication needs recovery. Check GitHub before deciding again; the GUI will not retry the post.</p>
+  <p class="action-note">Recover publication through the CLI:
+    <code>review-platform recover-publication {request.repository} {request.number} --round {round.id}</code>
+  </p>
+{/if}
+{#if round?.receipt}
+  <p class="action-note">Published as <a href={round.receipt.url} target="_blank" rel="noopener noreferrer">GitHub review {round.receipt.review_id}</a>
+    by {round.receipt.publisher_login}, tied to commit <code>{round.receipt.commit_id}</code>.</p>
+{/if}
+{#if publication?.status === 'published' && publication.freshness === 'stale'}
+  <p class="action-note warning">PR inputs changed after publication. The review remains tied to its original commit.</p>
+{:else if publication?.status === 'published' && publication.freshness === 'unknown'}
+  <p class="action-note warning">PR freshness could not be rechecked after publication. The saved receipt confirms publication.</p>
+{/if}
 
 {#if active}
   <p class="action-note" role="status">

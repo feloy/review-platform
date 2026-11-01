@@ -4,11 +4,14 @@ use crate::{draft_commands, escape_terminal_controls, storage};
 use anyhow::{Context, Result};
 use review_platform::{
     PrKey, RefreshOutcome, RejectOutcome, State,
+    config::{ConfigError, ReviewConfig},
     github::{
-        self,
-        publisher::{self, GithubPublisher, PostError},
+        self, GithubError,
+        publisher::{self, GithubPublisher, PostError, PublisherError},
     },
-    publication::{AttemptOutcome, PublicationHash, SealedBody},
+    publication::{
+        AttemptOutcome, PublicationHash, PublicationReceipt, PublicationStateError, SealedBody,
+    },
     review::{DraftOutput, Freshness, RoundId, RoundRecord, RoundStateError, RoundStatus},
 };
 use std::num::NonZeroU64;
@@ -31,6 +34,48 @@ pub enum RejectError {
 impl From<anyhow::Error> for RejectError {
     fn from(error: anyhow::Error) -> Self {
         Self::Local(error.into())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum PublishError {
+    #[error(transparent)]
+    Draft(#[from] draft_commands::DraftError),
+    #[error(transparent)]
+    Round(#[from] RoundStateError),
+    #[error(transparent)]
+    Body(#[from] PublicationStateError),
+    #[error("PR is closed or the draft's reviewed head or author discussion is stale")]
+    Stale,
+    #[error("reading publication configuration: {0}")]
+    ReadConfig(#[source] std::io::Error),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Publisher(#[from] PublisherError),
+    #[error(transparent)]
+    Github(#[from] GithubError),
+    #[error("publication outcome unknown; recover-publication is required: {0}")]
+    OutcomeUnknown(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("local publication state: {0}")]
+    Local(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<anyhow::Error> for PublishError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Local(error.into())
+    }
+}
+
+/// A confirmed local receipt, with an optional post-publication freshness check.
+pub struct PublicationReport {
+    record: RoundRecord,
+    freshness: Option<Freshness>,
+}
+
+impl PublicationReport {
+    pub fn freshness(&self) -> Option<Freshness> {
+        self.freshness
     }
 }
 
@@ -73,14 +118,6 @@ fn sealed_draft(
     let (draft, seal) = draft_commands::read_verified(state_path, state, key, id)?.into_contents();
     let changed = state.seal_round(id, seal.clone())?;
     Ok((draft, seal, changed))
-}
-
-fn checked_hash(seal: &SealedBody, supplied: &PublicationHash) -> Result<()> {
-    anyhow::ensure!(
-        seal.hash() == supplied,
-        "the supplied body hash does not match the sealed publication body"
-    );
-    Ok(())
 }
 
 pub fn show_draft(
@@ -231,7 +268,7 @@ fn refreshed_freshness(
     client: &github::GithubClient,
     state_path: &Path,
     round: &RoundRecord,
-) -> Result<Freshness> {
+) -> Result<Freshness, PublishError> {
     let key = round.key();
     // save() atomically replaces the state file, so an unlocked read sees a complete snapshot.
     // Reload under the lock before applying the GitHub observation.
@@ -247,7 +284,9 @@ fn refreshed_freshness(
     );
     let _lock = storage::lock(state_path)?;
     let mut state = storage::load(state_path)?;
-    let outcome = state.refresh(key, observation.head_sha(), observation.discussion())?;
+    let outcome = state
+        .refresh(key, observation.head_sha(), observation.discussion())
+        .map_err(RoundStateError::from)?;
     if outcome != RefreshOutcome::Unchanged {
         storage::save(state_path, &state)?;
     }
@@ -258,12 +297,11 @@ fn require_fresh(
     client: &github::GithubClient,
     state_path: &Path,
     round: &RoundRecord,
-) -> Result<()> {
-    anyhow::ensure!(
-        refreshed_freshness(client, state_path, round)? == Freshness::Fresh,
-        "PR is closed or the draft's reviewed head or author discussion is stale"
-    );
-    Ok(())
+) -> Result<(), PublishError> {
+    match refreshed_freshness(client, state_path, round)? {
+        Freshness::Fresh => Ok(()),
+        Freshness::Stale | Freshness::Unknown => Err(PublishError::Stale),
+    }
 }
 
 fn print_receipt(round: &RoundRecord) -> Result<()> {
@@ -308,113 +346,167 @@ pub fn publish_draft(
     let id = RoundId::new(round)?;
     let hash = PublicationHash::new(body_hash)?;
     let state_path = storage::resolve_path(state_override)?;
-    let _pr_lock = storage::pr_lock(&state_path, &key)?;
+    let config_path = storage::resolve_config_path(config_override)?;
+    let report = publish(&state_path, &config_path, &key, &id, &hash).with_context(|| {
+        format!("publishing round {id}; if outcome is unknown, run recover-publication {} {} --round {id}", key.repository(), key.number())
+    })?;
+    print_receipt(&report.record)?;
+    match report.freshness() {
+        None | Some(Freshness::Fresh) => {}
+        Some(Freshness::Stale) => println!(
+            "  PR inputs changed after publication; the review remains tied to its original commit."
+        ),
+        Some(Freshness::Unknown) => {
+            println!("  PR freshness could not be rechecked after publication.")
+        }
+    }
+    Ok(())
+}
+
+/// Publish only the exact approved seal, keeping uncertain dispatches out of retries.
+pub fn publish(
+    state_path: &Path,
+    config_path: &Path,
+    key: &PrKey,
+    id: &RoundId,
+    hash: &PublicationHash,
+) -> Result<PublicationReport, PublishError> {
+    let _pr_lock = storage::pr_lock(state_path, key)?;
     let (record, seal) = {
-        let _lock = storage::lock(&state_path)?;
-        let mut state = storage::load(&state_path)?;
-        if let Some(record) = state.round(&id) {
-            if record.key() == &key && record.status() == RoundStatus::Published {
+        let _lock = storage::lock(state_path)?;
+        let mut state = storage::load(state_path)?;
+        if let Some(record) = state.round(id) {
+            if record.key() == key && record.status() == RoundStatus::Published {
                 let seal = record
                     .sealed_body()
-                    .context("published round has no sealed body")?;
-                checked_hash(seal, &hash)?;
-                return print_receipt(record);
+                    .ok_or_else(|| RoundStateError::InvalidRecord(id.clone()))?;
+                if seal.hash() != hash {
+                    return Err(PublicationStateError::BodyHashMismatch.into());
+                }
+                return Ok(PublicationReport {
+                    record: record.clone(),
+                    freshness: None,
+                });
             }
         }
-        let (_, seal, changed) = sealed_draft(&state_path, &mut state, &key, &id)?;
-        checked_hash(&seal, &hash)?;
-        if changed {
-            storage::save(&state_path, &state)?;
+        let (_, seal) = draft_commands::read_verified(state_path, &state, key, id)?.into_contents();
+        if seal.hash() != hash {
+            return Err(PublicationStateError::BodyHashMismatch.into());
         }
-        (state.round(&id).context("round disappeared")?.clone(), seal)
+        let record = state
+            .round(id)
+            .ok_or_else(|| RoundStateError::NotFound(id.clone()))?;
+        match record.status() {
+            RoundStatus::AwaitingDecision => {}
+            RoundStatus::Starting
+            | RoundStatus::Running
+            | RoundStatus::Publishing
+            | RoundStatus::PublicationUnknown
+            | RoundStatus::Published
+            | RoundStatus::Rejected
+            | RoundStatus::Failed
+            | RoundStatus::Interrupted => {
+                return Err(RoundStateError::WrongStatus(id.clone()).into());
+            }
+        }
+        if record.cleanup_pending() {
+            return Err(RoundStateError::CleanupPending(id.clone()).into());
+        }
+        seal.ensure_github_limit()?;
+        // Reject locally stale inputs before loading credentials or contacting GitHub.
+        let request = state
+            .get(key)
+            .ok_or_else(|| RoundStateError::NotFound(id.clone()))?;
+        request
+            .ensure_inspected(record.head_sha(), record.revision())
+            .map_err(RoundStateError::from)?;
+        if request.discussion() != Some(record.discussion()) {
+            return Err(PublishError::Stale);
+        }
+        let record = record.clone();
+        if state.seal_round(id, seal.clone())? {
+            storage::save(state_path, &state)?;
+        }
+        (record, seal)
     };
-    if record.status() == RoundStatus::Published {
-        return print_receipt(&record);
-    }
-    anyhow::ensure!(
-        record.status() == RoundStatus::AwaitingDecision,
-        "round {id} is not awaiting a decision; recover uncertain publication first"
-    );
-    anyhow::ensure!(
-        !record.cleanup_pending(),
-        "round {id} still needs sandbox cleanup"
-    );
-    seal.ensure_github_limit()?;
 
-    let config_path = storage::resolve_config_path(config_override)?;
-    let config_bytes = std::fs::read(&config_path)
-        .with_context(|| format!("reading {}", config_path.display()))?;
-    let config = review_platform::config::ReviewConfig::from_json(&config_bytes)?;
+    let config_bytes = std::fs::read(config_path).map_err(PublishError::ReadConfig)?;
+    let config = ReviewConfig::from_json(&config_bytes)?;
     let publisher = GithubPublisher::new(config.publisher_login())?;
     let identity = publisher.verify_identity()?;
     let reader = github::GithubClient::new()?;
-    require_fresh(&reader, &state_path, &record)?;
+    require_fresh(&reader, state_path, &record)?;
     let preexisting = publisher
-        .reviews(&key)?
+        .reviews(key)?
         .into_iter()
         .filter(|review| review.matches(identity.id().get(), record.head_sha(), seal.body()))
         .map(|review| review.nonzero_id())
         .collect();
-    require_fresh(&reader, &state_path, &record)?;
+    require_fresh(&reader, state_path, &record)?;
     let attempt_id = {
-        let _lock = storage::lock(&state_path)?;
-        let mut state = storage::load(&state_path)?;
+        let _lock = storage::lock(state_path)?;
+        let mut state = storage::load(state_path)?;
         let attempt_id = state.reserve_publication(
-            &key,
-            &id,
-            &hash,
+            key,
+            id,
+            hash,
             operator()?,
             identity.login().to_owned(),
             identity.id(),
             preexisting,
             now()?,
         )?;
-        storage::save(&state_path, &state)?;
+        storage::save(state_path, &state)?;
         attempt_id
     };
     {
-        let _lock = storage::lock(&state_path)?;
-        let mut state = storage::load(&state_path)?;
-        state.mark_publication_dispatched(&id, attempt_id, now()?)?;
-        storage::save(&state_path, &state)?;
+        let _lock = storage::lock(state_path)?;
+        let mut state = storage::load(state_path)?;
+        state.mark_publication_dispatched(id, attempt_id, now()?)?;
+        storage::save(state_path, &state)?;
     }
-    match publisher.create_review(&key, record.head_sha(), seal.body(), &identity) {
+    let result = publisher.create_review(key, record.head_sha(), seal.body(), &identity);
+    let published = record_post_result(state_path, id, attempt_id, result)?;
+    let freshness =
+        refreshed_freshness(&reader, state_path, &published).unwrap_or(Freshness::Unknown);
+    Ok(PublicationReport {
+        record: published,
+        freshness: Some(freshness),
+    })
+}
+
+/// Persist outcomes even when the browser is gone; a failed save after dispatch needs recovery.
+fn record_post_result(
+    state_path: &Path,
+    id: &RoundId,
+    attempt_id: u64,
+    result: Result<PublicationReceipt, PostError>,
+) -> Result<RoundRecord, PublishError> {
+    match result {
         Ok(receipt) => {
-            let published = {
-                let _lock = storage::lock(&state_path)?;
-                let mut state = storage::load(&state_path)?;
-                state.record_publication(&id, attempt_id, receipt, now()?)?;
-                storage::save(&state_path, &state)?;
-                state.round(&id).context("round disappeared")?.clone()
+            let save = || -> Result<RoundRecord> {
+                let _lock = storage::lock(state_path)?;
+                let mut state = storage::load(state_path)?;
+                state.record_publication(id, attempt_id, receipt, now()?)?;
+                storage::save(state_path, &state)?;
+                Ok(state.round(id).context("round disappeared")?.clone())
             };
-            print_receipt(&published)?;
-            match refreshed_freshness(&reader, &state_path, &published) {
-                Ok(Freshness::Fresh) => {}
-                Ok(Freshness::Stale) => println!(
-                    "  PR inputs changed after publication; the review remains tied to its original commit."
-                ),
-                Ok(Freshness::Unknown) | Err(_) => {
-                    println!("  PR freshness could not be rechecked after publication.")
-                }
-            }
-            Ok(())
+            save().map_err(|error| PublishError::OutcomeUnknown(error.into()))
         }
         Err(PostError::BeforeDispatch(error) | PostError::Definitive(error)) => {
             finish_attempt(
-                &state_path,
-                &id,
+                state_path,
+                id,
                 attempt_id,
                 AttemptOutcome::DefinitiveFailure,
-            )?;
-            Err(error.into())
+            )
+            .map_err(|error| PublishError::OutcomeUnknown(error.into()))?;
+            Err(PublishError::Publisher(error))
         }
         Err(PostError::Unknown(error)) => {
-            finish_attempt(&state_path, &id, attempt_id, AttemptOutcome::Unknown)?;
-            Err(error).context(format!(
-                "publication outcome unknown; run recover-publication {} {} --round {id}",
-                key.repository(),
-                key.number()
-            ))
+            finish_attempt(state_path, id, attempt_id, AttemptOutcome::Unknown)
+                .map_err(|error| PublishError::OutcomeUnknown(error.into()))?;
+            Err(PublishError::OutcomeUnknown(Box::new(error)))
         }
     }
 }
@@ -536,4 +628,208 @@ pub fn recover_publication(
     state.record_recovered_publication(&id, attempt.id(), receipt, operator()?, now()?)?;
     storage::save(&state_path, &state)?;
     print_receipt(state.round(&id).context("round disappeared")?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use review_platform::HeadSha;
+    use std::fs;
+
+    fn fixture(directory: &Path) -> (PathBuf, PrKey, RoundId, PublicationHash) {
+        let path = directory.join("state.json");
+        let id = RoundId::new("r-publish").unwrap();
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let artifact = serde_json::to_vec(&serde_json::json!({
+            "status":"ACCEPT", "comments":"Exact comments", "lead_advice":"Private advice",
+        }))
+        .unwrap();
+        let seal = SealedBody::new(
+            "Exact comments",
+            id.as_str(),
+            PublicationHash::of(&artifact),
+        );
+        let hash = seal.hash().clone();
+        let round_dir = directory.join("rounds/r-publish");
+        fs::create_dir_all(round_dir.join("output")).unwrap();
+        fs::write(round_dir.join("output/review-output.json"), artifact).unwrap();
+        fs::write(round_dir.join("draft.json"), serde_json::to_vec(&serde_json::json!({
+            "status":"ACCEPT", "comments":"Exact comments", "lead_advice":"Private advice", "review_log":"Private log",
+        })).unwrap()).unwrap();
+        let state = serde_json::json!({
+            "schema_version":6,
+            "requests":[{"key":key, "head_sha":"a".repeat(40), "authorization":"awaiting_lead", "revision":2,
+                "discussion":{"author_id":7,"comments":[]}, "model_validation":null}],
+            "rounds":[{"id":id,"key":key,"status":"awaiting_decision", "sandbox":"rp-722d7075626c697368",
+                "head_sha":"a".repeat(40),"revision":2,"discussion":{"author_id":7,"comments":[]},
+                "model":"model-alpha","agent":"claude","gateway":"gateway","workspace":"default","driver":"vm",
+                "model_provider":"model-provider","github_provider":"github-ro","prompt_sha256":"a".repeat(64),
+                "format_sha256":"b".repeat(64),"archive_sha256":"c".repeat(64),"archive_config_sha256":"d".repeat(64),
+                "execution_sha256":"e".repeat(64),"runner_sha256":"f".repeat(64),"created_at":1,"dispatched_at":2,
+                "finished_at":3,"freshness":"fresh","failure":null,"incomplete_log":false,"cleanup_pending":false,
+                "sealed_body":seal}],
+        });
+        let state: State = serde_json::from_value(state).unwrap();
+        storage::save(&path, &state).unwrap();
+        (path, key, id, hash)
+    }
+
+    fn dispatch(path: &Path, key: &PrKey, id: &RoundId, hash: &PublicationHash) -> u64 {
+        let mut state = storage::load(path).unwrap();
+        let attempt = state
+            .reserve_publication(
+                key,
+                id,
+                hash,
+                "uid:1".into(),
+                "publisher".into(),
+                NonZeroU64::new(7).unwrap(),
+                vec![],
+                4,
+            )
+            .unwrap();
+        state.mark_publication_dispatched(id, attempt, 5).unwrap();
+        storage::save(path, &state).unwrap();
+        attempt
+    }
+
+    fn receipt() -> PublicationReceipt {
+        PublicationReceipt::new(
+            NonZeroU64::new(71).unwrap(),
+            "https://github.com/owner/repo/pull/15#pullrequestreview-71".into(),
+            "publisher".into(),
+            NonZeroU64::new(7).unwrap(),
+            HeadSha::new("a".repeat(40)).unwrap(),
+            "2026-11-01T18:00:00Z".into(),
+        )
+    }
+
+    #[test]
+    fn publication_gates_local_changes_cleanup_hash_and_artifacts_before_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, key, id, hash) = fixture(directory.path());
+        let config = directory.path().join("no-configuration.json");
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            publish(&path, &config, &key, &id, &PublicationHash::of(b"wrong")),
+            Err(PublishError::Body(PublicationStateError::BodyHashMismatch))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let mut state: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        state["rounds"][0]["cleanup_pending"] = true.into();
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(matches!(
+            publish(&path, &config, &key, &id, &hash),
+            Err(PublishError::Round(RoundStateError::CleanupPending(_)))
+        ));
+        fs::write(&path, &before).unwrap();
+        let mut state = storage::load(&path).unwrap();
+        let discussion = state.get(&key).unwrap().discussion().unwrap().clone();
+        state
+            .refresh(&key, &HeadSha::new("b".repeat(40)).unwrap(), &discussion)
+            .unwrap();
+        storage::save(&path, &state).unwrap();
+        assert!(matches!(
+            publish(&path, &config, &key, &id, &hash),
+            Err(PublishError::Round(RoundStateError::State(_)))
+        ));
+        fs::write(&path, &before).unwrap();
+        fs::write(
+            directory
+                .path()
+                .join("rounds/r-publish/output/review-output.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(matches!(
+            publish(&path, &config, &key, &id, &hash),
+            Err(PublishError::Draft(_))
+        ));
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn confirmed_publication_is_saved_and_repeated_without_credentials_or_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, key, id, hash) = fixture(directory.path());
+        let attempt = dispatch(&path, &key, &id, &hash);
+        let record = record_post_result(&path, &id, attempt, Ok(receipt())).unwrap();
+        assert_eq!(record.status(), RoundStatus::Published);
+        assert_eq!(record.receipt().unwrap().review_id(), 71);
+        let before = fs::read(&path).unwrap();
+        fs::remove_file(directory.path().join("rounds/r-publish/draft.json")).unwrap();
+        let config = directory.path().join("no-configuration.json");
+        let repeated = publish(&path, &config, &key, &id, &hash).ok().unwrap();
+        assert_eq!(repeated.record.receipt().unwrap().review_id(), 71);
+        assert_eq!(repeated.freshness(), None);
+        assert!(matches!(
+            publish(&path, &config, &key, &id, &PublicationHash::of(b"other")),
+            Err(PublishError::Body(PublicationStateError::BodyHashMismatch))
+        ));
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn uncertain_publication_is_recorded_and_never_automatically_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, key, id, hash) = fixture(directory.path());
+        let attempt = dispatch(&path, &key, &id, &hash);
+        let error = PostError::Unknown(PublisherError::InvalidResponse {
+            operation: "create review",
+            detail: "private adapter detail".into(),
+        });
+        assert!(matches!(
+            record_post_result(&path, &id, attempt, Err(error)),
+            Err(PublishError::OutcomeUnknown(_))
+        ));
+        let state = storage::load(&path).unwrap();
+        assert_eq!(
+            state.round(&id).unwrap().status(),
+            RoundStatus::PublicationUnknown
+        );
+        assert_eq!(
+            state
+                .round(&id)
+                .unwrap()
+                .current_attempt()
+                .unwrap()
+                .outcome(),
+            AttemptOutcome::Unknown
+        );
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            publish(&path, &directory.path().join("unused"), &key, &id, &hash),
+            Err(PublishError::Round(RoundStateError::WrongStatus(_)))
+        ));
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn definitive_failure_returns_to_decision_but_failed_receipt_save_requires_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, key, id, hash) = fixture(directory.path());
+        let attempt = dispatch(&path, &key, &id, &hash);
+        assert!(matches!(
+            record_post_result(
+                &path,
+                &id,
+                attempt,
+                Err(PostError::Definitive(PublisherError::HttpStatus {
+                    operation: "create review",
+                    status: 403,
+                }))
+            ),
+            Err(PublishError::Publisher(_))
+        ));
+        assert_eq!(
+            storage::load(&path).unwrap().round(&id).unwrap().status(),
+            RoundStatus::AwaitingDecision
+        );
+        let attempt = dispatch(&path, &key, &id, &hash);
+        fs::write(&path, b"invalid local state").unwrap();
+        assert!(matches!(
+            record_post_result(&path, &id, attempt, Ok(receipt())),
+            Err(PublishError::OutcomeUnknown(_))
+        ));
+    }
 }

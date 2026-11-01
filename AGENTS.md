@@ -79,6 +79,9 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Recheck at round start because an operator display is only a snapshot.
 - Post only the exact draft the lead approved.
   Rejection posts nothing and leaves the current authorization unchanged.
+  Bind GUI publication to the inspected round and publication body hash.
+  Keep publication jobs independent of browser connections and reject duplicate starts during preflight.
+  Require explicit recovery for uncertain publication; never automatically retry the post.
 - Record rejection as an explicit decision and preserve the private draft.
   Do not mark a completed draft as failed merely to unblock another round.
   Clear model validation matching the rejected round and preserve a different later choice.

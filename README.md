@@ -100,7 +100,23 @@ It clears model validation matching that round and preserves a different later c
 Stale drafts and drafts with unknown freshness can still be rejected.
 Live input changes do not retarget the confirmation;
 if the latest round, decision, or cleanup changes, reopen the draft before rejecting it.
-Use the CLI to publish a draft or recover a sandbox that needs cleanup.
+Use **Publish draft** after cleanup when the opened draft has verified fresh inputs.
+Inspect the fixed round and publication body hash, then choose **Confirm publication**.
+The server re-verifies the exact saved body, configured publisher identity,
+live PR head, open state, and author discussion before posting one comment review
+on the reviewed commit.
+Private lead advice stays private.
+Changed local inputs invalidate an open publication confirmation;
+stale or unknown freshness requires reopening the draft and inspecting fresh inputs.
+Publication runs in the server, survives browser disconnects, and rejects duplicate GUI starts during preflight.
+Live updates show progress, safe preflight failures, and the saved GitHub receipt.
+The GUI uses its effective configuration file and the server's read and write GitHub credentials.
+Set `publisher_login` and `REVIEW_PLATFORM_GITHUB_TOKEN_RW` before launching the GUI.
+Stopping the server waits for its blocking publication work; it does not cancel a dispatched post.
+If publication is interrupted or its outcome is uncertain, inspect GitHub and use `recover-publication` through the CLI.
+The GUI never automatically retries a publication request.
+After a definitive failure, reopen and inspect the draft before making another explicit decision.
+Use the CLI to recover a sandbox that needs cleanup.
 The GUI does not retry failed reviews automatically or offer a per-review cancel action.
 On Unix, stopping the GUI with SIGINT or SIGTERM requests cancellation
 and waits for runners to finish their cleanup attempts.
@@ -136,6 +152,13 @@ The optional `run` reports the latest GUI job for this server launch:
 `status` (`starting`, `running`, `finished`, or `failed`), `round_id`, and `failure`.
 `running` means a round has been recorded; its persisted round status shows execution progress.
 Job failure categories omit raw adapter errors, prompts, and provider details.
+The optional `publication` reports the latest GUI publication job for this server launch:
+`round_id`, `status` (`active`, `published`, `failed`, or `unknown`), safe `error`,
+and optional post-publication `freshness`.
+`active` includes preflight; it does not mean GitHub has received a post.
+The latest round's optional `receipt` contains the confirmed review ID and URL,
+publisher login and numeric ID, reviewed commit ID, and publication time.
+Saved receipts and pending publication states remain visible after a server restart.
 Persisted round and cleanup information remains available after restarting the GUI.
 `GET /api/requests/events` is a server-sent event stream.
 It sends a `requests` event with the same JSON snapshot on connection
@@ -152,7 +175,7 @@ Private draft contents require the lead session token.
 `POST /api/requests/refresh`, `POST /api/requests/authorize`,
 `POST /api/requests/revoke`, `POST /api/requests/prepare`,
 `POST /api/requests/validate-model`, `POST /api/requests/run`,
-and `POST /api/drafts/ROUND_ID/reject`
+`POST /api/drafts/ROUND_ID/reject`, and `POST /api/drafts/ROUND_ID/publish`
 require that token and a same-origin request;
 the server rejects cross-origin and missing-origin POST requests.
 Authorization accepts `key` with `repository` and `number`,
@@ -187,7 +210,7 @@ One-round authorization is consumed only when dispatch is recorded.
 requires the session token in its `Authorization: Bearer TOKEN` header.
 It accepts a validated round ID and PR key and returns only a completed draft belonging to that PR.
 The response contains `key`, `round_id`, `head_sha`, `revision`, `decision`, `model`, `agent`,
-`verdict`, `freshness`, `publication_body`, `publication_body_sha256`, and `lead_advice`.
+`verdict`, `freshness`, `publication_body`, `publication_body_sha256`, `lead_advice`, and optional `receipt`.
 The body includes the exact round footer that publication would post.
 Freshness uses the CLI's live GitHub checks and confirmed-publication exclusions;
 it is separate from the round's recorded freshness in public snapshots.
@@ -204,6 +227,16 @@ It returns `changed: true` for a new rejection and `changed: false` for a repeat
 A different hash, pending cleanup, or a conflicting decision returns HTTP 409;
 failed draft verification returns HTTP 422.
 Watch request snapshots or SSE for the recorded decision.
+`POST /api/drafts/ROUND_ID/publish` accepts the same `key` and inspected `body_hash`.
+It returns HTTP 202 with `accepted: true` when the server owns the publication job,
+or HTTP 409 when a GUI publication for the PR is already active.
+Acceptance acknowledges scheduling; watch request snapshots or SSE for the outcome.
+Preflight failures do not post a review and appear as safe job errors.
+Rejection is blocked while a GUI publication for that PR is active.
+The shared CLI operation verifies artifacts, the body hash and GitHub size limit,
+completed cleanup, publisher identity, and live freshness before recording dispatch.
+A matching completed publication returns its saved receipt without another post.
+Unknown outcomes and an uncompleted publication require CLI recovery before another decision.
 
 Keep the compiled UI in `ui/dist` under version control
 so Rust installation does not need to run the frontend build.

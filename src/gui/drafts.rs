@@ -1,6 +1,8 @@
 //! Authenticated private draft responses, without exposing logs or adapter errors.
 
-use super::{ApiError, AppState, AuthorizationResponse, api_error, has_session};
+use super::{
+    ApiError, AppState, AuthorizationResponse, RunResponse, api_error, has_session, publications,
+};
 use crate::{
     draft_commands::{DraftError, InspectedDraft},
     publication_commands::{self, RejectError},
@@ -23,22 +25,73 @@ pub(super) type Inspect = fn(&Path, &PrKey, &RoundId) -> Result<InspectedDraft, 
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RejectRequest {
+pub(super) struct DraftDecisionRequest {
     key: PrKey,
     body_hash: PublicationHash,
+}
+
+pub(super) async fn publish(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<RoundId>,
+    Json(request): Json<DraftDecisionRequest>,
+) -> Result<(StatusCode, Json<RunResponse>), (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    if state.runs.is_shutting_down() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The GUI server is shutting down.",
+        ));
+    }
+    state
+        .publications
+        .start(
+            state.state_file.clone(),
+            state.config_file.clone(),
+            request.key,
+            id,
+            request.body_hash,
+        )
+        .map_err(publication_start_error)?;
+    Ok((StatusCode::ACCEPTED, Json(RunResponse { accepted: true })))
+}
+
+fn publication_start_error(error: publications::StartError) -> (StatusCode, Json<ApiError>) {
+    match error {
+        publications::StartError::Active => api_error(
+            StatusCode::CONFLICT,
+            "A publication is already active for this PR. Watch its status before deciding again.",
+        ),
+        publications::StartError::Unavailable => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not read GUI publication jobs.",
+        ),
+    }
 }
 
 pub(super) async fn reject(
     HttpState(state): HttpState<Arc<AppState>>,
     headers: HeaderMap,
     UrlPath(id): UrlPath<RoundId>,
-    Json(request): Json<RejectRequest>,
+    Json(request): Json<DraftDecisionRequest>,
 ) -> Result<Json<AuthorizationResponse>, (StatusCode, Json<ApiError>)> {
     if !has_session(&state, &headers) {
         return Err(api_error(
             StatusCode::UNAUTHORIZED,
             "Sign in again to use GUI actions.",
         ));
+    }
+    if state
+        .publications
+        .is_active(&request.key)
+        .map_err(publication_start_error)?
+    {
+        return Err(publication_start_error(publications::StartError::Active));
     }
     let outcome = tokio::task::spawn_blocking(move || {
         publication_commands::reject(&state.state_file, &request.key, &id, &request.body_hash)
@@ -92,6 +145,7 @@ pub(super) struct DraftResponse {
     publication_body: String,
     publication_body_sha256: PublicationHash,
     lead_advice: String,
+    receipt: Option<review_platform::publication::PublicationReceipt>,
 }
 
 pub(super) async fn inspect(
@@ -130,6 +184,7 @@ pub(super) async fn inspect(
         publication_body: inspected.seal().body().to_owned(),
         publication_body_sha256: inspected.seal().hash().clone(),
         lead_advice: inspected.draft().lead_advice().to_owned(),
+        receipt: record.receipt().cloned(),
     }))
 }
 
@@ -204,6 +259,20 @@ mod tests {
     }
 
     fn app(path: PathBuf, bootstrap: Option<String>, inspect_draft: Inspect) -> Router {
+        app_with_publications(
+            path,
+            bootstrap,
+            inspect_draft,
+            Arc::new(publications::Publications::default()),
+        )
+    }
+
+    fn app_with_publications(
+        path: PathBuf,
+        bootstrap: Option<String>,
+        inspect_draft: Inspect,
+        publications: Arc<publications::Publications>,
+    ) -> Router {
         router_with_state(Arc::new(AppState {
             state_file: path,
             config_file: PathBuf::from("unused-config.json"),
@@ -218,6 +287,7 @@ mod tests {
                 review_commands::run_inspected_review,
             )),
             inspect_draft,
+            publications,
         }))
     }
 
@@ -297,6 +367,265 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_vec(body).unwrap()))
             .unwrap()
+    }
+
+    fn post_publication(body: &serde_json::Value) -> Request<Body> {
+        let mut request = post_rejection(body);
+        *request.uri_mut() = "/api/drafts/r-draft/publish".parse().unwrap();
+        request
+    }
+
+    fn blocked_publication(
+        path: &Path,
+        config: &Path,
+        key: &PrKey,
+        id: &RoundId,
+        hash: &PublicationHash,
+    ) -> Result<publication_commands::PublicationReport, publication_commands::PublishError> {
+        assert_eq!(config, Path::new("unused-config.json"));
+        assert_eq!(key, &PrKey::new("owner/repo", 15).unwrap());
+        assert_eq!(id, &RoundId::new("r-draft").unwrap());
+        assert_eq!(
+            hash.as_str(),
+            rejection_body(path)["body_hash"].as_str().unwrap()
+        );
+        fs::write(path.with_extension("started"), b"started").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !path.with_extension("release").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(publication_commands::PublishError::Publisher(
+            review_platform::github::publisher::PublisherError::WrongPublisher {
+                expected: "publisher".into(),
+                actual: "PRIVATE_ADAPTER_DETAIL".into(),
+            },
+        ))
+    }
+
+    fn confirmed_publication(
+        path: &Path,
+        config: &Path,
+        key: &PrKey,
+        id: &RoundId,
+        hash: &PublicationHash,
+    ) -> Result<publication_commands::PublicationReport, publication_commands::PublishError> {
+        // Simulate the adapter's confirmed response through the actual domain transitions.
+        {
+            let _pr_lock = storage::pr_lock(path, key)?;
+            let _lock = storage::lock(path)?;
+            let mut state = storage::load(path)?;
+            state.mark_round_cleaned(id)?;
+            let attempt = state.reserve_publication(
+                key,
+                id,
+                hash,
+                "uid:1".into(),
+                "publisher".into(),
+                std::num::NonZeroU64::new(7).unwrap(),
+                vec![],
+                4,
+            )?;
+            state.mark_publication_dispatched(id, attempt, 5)?;
+            state.record_publication(
+                id,
+                attempt,
+                review_platform::publication::PublicationReceipt::new(
+                    std::num::NonZeroU64::new(71).unwrap(),
+                    "https://github.com/owner/repo/pull/15#pullrequestreview-71".into(),
+                    "publisher".into(),
+                    std::num::NonZeroU64::new(7).unwrap(),
+                    HeadSha::new("a".repeat(40)).unwrap(),
+                    "2026-11-01T18:00:00Z".into(),
+                ),
+                6,
+            )?;
+            storage::save(path, &state)?;
+        }
+        publication_commands::publish(path, config, key, id, hash)
+    }
+
+    #[test]
+    fn confirmed_publication_exposes_the_saved_receipt_without_private_draft_leaks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let body = rejection_body(&path);
+        let jobs = Arc::new(publications::Publications::new(confirmed_publication));
+        runtime().block_on(async {
+            let app = app_with_publications(path.clone(), None, unknown_freshness, jobs);
+            assert_eq!(
+                app.clone()
+                    .oneshot(post_publication(&body))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::ACCEPTED
+            );
+            let public = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let response = app
+                        .clone()
+                        .oneshot(get("/api/requests", None))
+                        .await
+                        .unwrap();
+                    let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+                    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    if result["requests"][0]["publication"]["status"] == "published" {
+                        break bytes;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&public).unwrap();
+            assert_eq!(
+                result["requests"][0]["latest_round"]["receipt"]["review_id"],
+                71
+            );
+            assert_eq!(result["requests"][0]["latest_round"]["status"], "published");
+            let text = String::from_utf8(public.to_vec()).unwrap();
+            for secret in [ADVICE, "alert('draft')", "Private full review log"] {
+                assert!(!text.contains(secret));
+            }
+            let response = app.oneshot(get(URI, Some("test-token"))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let result: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                    .unwrap();
+            assert_eq!(result["receipt"]["review_id"], 71);
+            assert_eq!(result["decision"], "published");
+        });
+    }
+
+    #[test]
+    fn publication_requires_lead_session_same_origin_and_valid_inspected_identifiers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let before = fs::read(&path).unwrap();
+        let body = rejection_body(&path);
+        runtime().block_on(async {
+            for (change, expected) in [
+                ("no_token", StatusCode::UNAUTHORIZED),
+                ("wrong_token", StatusCode::UNAUTHORIZED),
+                ("bootstrap_unused", StatusCode::UNAUTHORIZED),
+                ("no_origin", StatusCode::FORBIDDEN),
+                ("cross_origin", StatusCode::FORBIDDEN),
+                ("wrong_host", StatusCode::MISDIRECTED_REQUEST),
+                ("invalid_hash", StatusCode::UNPROCESSABLE_ENTITY),
+                ("invalid_pr", StatusCode::UNPROCESSABLE_ENTITY),
+                ("missing_hash", StatusCode::UNPROCESSABLE_ENTITY),
+                ("invalid_round", StatusCode::BAD_REQUEST),
+                ("unknown_field", StatusCode::UNPROCESSABLE_ENTITY),
+            ] {
+                let mut body = body.clone();
+                match change {
+                    "invalid_hash" => body["body_hash"] = "invalid".into(),
+                    "invalid_pr" => body["key"]["number"] = 0.into(),
+                    "missing_hash" => {
+                        body.as_object_mut().unwrap().remove("body_hash");
+                    }
+                    "unknown_field" => body["publication_body"] = "untrusted replacement".into(),
+                    _ => {}
+                }
+                let mut request = post_publication(&body);
+                match change {
+                    "no_token" => {
+                        request.headers_mut().remove(header::AUTHORIZATION);
+                    }
+                    "wrong_token" => {
+                        request
+                            .headers_mut()
+                            .insert(header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
+                    }
+                    "no_origin" => {
+                        request.headers_mut().remove(header::ORIGIN);
+                    }
+                    "cross_origin" => {
+                        request
+                            .headers_mut()
+                            .insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+                    }
+                    "wrong_host" => {
+                        request
+                            .headers_mut()
+                            .insert(header::HOST, "evil.example".parse().unwrap());
+                    }
+                    "invalid_round" => {
+                        *request.uri_mut() = "/api/drafts/invalid/publish".parse().unwrap()
+                    }
+                    _ => {}
+                }
+                let response = app(
+                    path.clone(),
+                    (change == "bootstrap_unused").then(|| "code".into()),
+                    offline_inspect,
+                )
+                .oneshot(request)
+                .await
+                .unwrap();
+                assert_eq!(response.status(), expected, "{change}");
+            }
+        });
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn publication_jobs_survive_responses_reject_duplicates_and_stream_safe_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let before = fs::read(&path).unwrap();
+        let body = rejection_body(&path);
+        let jobs = Arc::new(publications::Publications::new(blocked_publication));
+        runtime().block_on(async {
+            let app = app_with_publications(path.clone(), None, offline_inspect, jobs.clone());
+            let response = app.clone().oneshot(post_publication(&body)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            drop(response); // No browser connection owns the worker.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !path.with_extension("started").exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            for request in [post_publication(&body), post_rejection(&body)] {
+                assert_eq!(
+                    app.clone().oneshot(request).await.unwrap().status(),
+                    StatusCode::CONFLICT
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(get("/api/requests/events", None))
+                .await
+                .unwrap();
+            let mut stream = response.into_body().into_data_stream();
+            let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(
+                String::from_utf8(event.to_vec())
+                    .unwrap()
+                    .contains("\"status\":\"active\"")
+            );
+            fs::write(path.with_extension("release"), b"release").unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8(event.to_vec()).unwrap();
+            assert!(text.contains("\"status\":\"failed\""));
+            assert!(text.contains("Check publisher_login"));
+            for secret in ["PRIVATE_ADAPTER_DETAIL", ADVICE, "Private full review log"] {
+                assert!(!text.contains(secret));
+            }
+            drop(stream);
+            drop(app);
+        });
+        assert_eq!(fs::read(path).unwrap(), before);
     }
 
     #[test]
