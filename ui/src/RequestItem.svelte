@@ -1,13 +1,32 @@
 <script>
-  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke } = $props();
+  import PreparationPanel from './PreparationPanel.svelte';
+
+  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate } = $props();
   let expanded = $state(false);
   let inspected = $state(null);
+  let preparation = $state(null);
+  let preparationInvalid = $state(false);
   const inputsChanged = $derived(inspected &&
     (inspected.head_sha !== request.head_sha || inspected.revision !== request.revision));
 
   async function authorize(scope) {
     if (!inspected || inputsChanged || action?.pending) return;
     if (await onAuthorize(inspected, scope)) inspected = null;
+  }
+
+  async function prepareReview() {
+    if (action?.pending) return;
+    preparation = null;
+    preparationInvalid = false;
+    const result = await onPrepare();
+    if (result) preparation = result;
+  }
+
+  async function validateModel(model) {
+    if (!preparation || preparationInvalid || action?.pending) return;
+    const result = await onValidate(preparation, model);
+    if (result) preparation = result;
+    else preparationInvalid = true;
   }
 
   const authorizationLabels = {
@@ -92,6 +111,12 @@
         aria-label={`Manage authorization for ${request.repository} #${request.number}`}
         onclick={() => inspected = { ...request }}
       >Manage authorization</md-text-button>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-text-button disabled={action?.pending}
+        aria-label={`Prepare review for ${request.repository} #${request.number}`}
+        onclick={prepareReview}>
+        {action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Prepare review'}
+      </md-text-button>
       {#if request.authorization !== 'awaiting_lead' || request.validated_model}
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <md-text-button disabled={action?.pending}
@@ -137,6 +162,10 @@
           <p role="status">Saving authorization…</p>
         {/if}
       </section>
+    {/if}
+    {#if preparation}
+      <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
+        onValidate={validateModel} onClose={() => preparation = null} />
     {/if}
   {/if}
   {#if action?.message}

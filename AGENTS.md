@@ -63,6 +63,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Reject it if the recorded head has changed; revocation needs no head match.
   Keep inspected inputs fixed in GUI decision forms;
   live updates must not silently retarget a pending lead decision.
+  Bind GUI model validation to the inspected configuration and authorization too.
+  Recheck persisted state even when the model choice appears unchanged.
 - A round requires green checks for the exact PR head being reviewed.
   Bind each draft to that head and the author comments seen; mark it stale on change.
 - Combine check runs and commit statuses for the exact PR head when assessing CI.

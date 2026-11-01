@@ -60,6 +60,18 @@ Use **Revoke authorization** to withdraw permission for further rounds,
 including after inputs change or before discussion is refreshed.
 Changing authorization can clear model validation.
 Authorization alone does not start a review.
+Use **Prepare review** to refresh the request and inspect CI readiness for its exact head,
+the proposed model, and the configured model choices with their resolved agents.
+Select a model and use **Validate model** to confirm it for the prepared head and revision.
+The confirmed selection shows **Model validated**;
+selecting a different model enables **Validate model** again.
+Validation fetches fresh GitHub inputs and checks and verifies the selected VM archive.
+It requires active authorization, an open PR, and green reported checks.
+Changed inputs, authorization, or configuration require a new preparation and inspection.
+Preparation can clear one-round authorization if GitHub inputs have changed;
+authorize the refreshed inputs and prepare again in that case.
+Preparation and validation never start a review or consume authorization.
+Use the CLI to run the validated review and decide on its draft.
 The GUI checks the round's runner lock before warning that cleanup needs attention.
 If the runner lock cannot be inspected, it reports that cleanup status is unavailable.
 Review workflow operations remain available through the CLI while the GUI grows.
@@ -99,7 +111,8 @@ reloading the page also starts a new connection.
 The read-only endpoints do not require sign-in.
 `POST /api/session` exchanges the one-time code for a launch-scoped session token.
 `POST /api/requests/refresh`, `POST /api/requests/authorize`,
-and `POST /api/requests/revoke` require that token and a same-origin request;
+`POST /api/requests/revoke`, `POST /api/requests/prepare`,
+and `POST /api/requests/validate-model` require that token and a same-origin request;
 the server rejects cross-origin and missing-origin POST requests.
 Authorization accepts `key` with `repository` and `number`,
 the inspected `head_sha` and `revision`, and `scope` (`one_round` or `pr_cycle`).
@@ -108,6 +121,19 @@ Both return `changed` to report whether local state changed.
 Authorization conflicts return HTTP 409 and missing requests return HTTP 404.
 These decisions compare local state, using the same rules and locks as the CLI.
 Refresh from GitHub before inspecting the inputs for a decision.
+Preparation accepts `repository` and `number` and uses the effective `--config-file`.
+It returns the prepared `head_sha`, `revision`, `authorization`,
+`configuration_sha256`, exact-head `checks`, `readiness` and `readiness_message`,
+`proposed_model`, `proposal_matches_coauthor`, `validated_model`, `resolved_model`,
+and `models` with each configured model and its resolved agent.
+Validation accepts `key` with `repository` and `number`, the selected `model`,
+the inspected `head_sha` and `revision`,
+and `rules` with the prepared `authorization` and `configuration_sha256`.
+It returns a new preparation snapshot after saving the model choice.
+Blocked preparation returns a snapshot; blocked or stale validation returns HTTP 409.
+Configuration and archive verification failures return HTTP 422.
+GitHub failures can leave freshly observed inputs saved without a new model choice.
+The snapshots omit prompts, provider details, and archive paths.
 
 Keep the compiled UI in `ui/dist` under version control
 so Rust installation does not need to run the frontend build.

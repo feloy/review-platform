@@ -4,6 +4,7 @@ use crate::config::{
     AgentId, CoauthorIdentity, ConfigError, ModelId, PromptHash, ResolvedReviewModel, VmArchive,
 };
 use crate::{Authorization, HeadSha, InputRevision, PrKey, ReviewRequest};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
@@ -71,7 +72,8 @@ impl<'a> CiObservation<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Readiness {
     Ready,
     AwaitingAuthorization,

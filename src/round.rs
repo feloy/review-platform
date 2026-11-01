@@ -98,6 +98,10 @@ impl<'a> RoundPreparation<'a> {
     pub fn validation_changed(&self) -> bool {
         self.validation_changed
     }
+
+    pub fn into_preparation(self) -> Preparation {
+        self.preparation
+    }
 }
 
 /// Refresh recorded inputs before the caller persists them and continues.

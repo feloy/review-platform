@@ -1,6 +1,9 @@
 //! Loopback HTTP server for the embedded operator UI and local request snapshots.
 
-use crate::{request_commands, review_commands, storage};
+use crate::{
+    preparation_commands::{self, InspectedRules, PrepareError},
+    request_commands, review_commands, storage,
+};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -16,10 +19,14 @@ use axum::{
 use futures_util::{Stream, stream};
 use include_dir::{Dir, include_dir};
 use review_platform::{
-    Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, PrKey,
-    RefreshOutcome, StateError,
+    Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, ModelValidationError,
+    PrKey, RefreshOutcome, StateError,
+    config::{AgentId, ModelId, PromptHash},
     github::GithubError,
+    github::checks::CheckSummary,
+    preparation::Readiness,
     review::{RoundRecord, RoundStatus},
+    round::{ModelSelection, RoundError},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -106,11 +113,20 @@ struct ApiError {
 }
 
 type Refresh = fn(&Path, &PrKey) -> Result<RefreshOutcome, request_commands::RefreshError>;
+type Prepare = fn(
+    &Path,
+    &Path,
+    &PrKey,
+    Option<&ModelSelection>,
+    Option<&InspectedRules>,
+) -> Result<PreparationResponse, PrepareError>;
 
 struct AppState {
     state_file: PathBuf,
+    config_file: PathBuf,
     session: Mutex<Session>,
     refresh: Refresh,
+    prepare: Prepare,
 }
 
 struct Session {
@@ -151,17 +167,81 @@ struct AuthorizationResponse {
     changed: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidateModelRequest {
+    key: PrKey,
+    model: ModelId,
+    head_sha: HeadSha,
+    revision: InputRevision,
+    rules: InspectedRules,
+}
+
+#[derive(Serialize)]
+struct ModelOption {
+    model: ModelId,
+    agent: AgentId,
+}
+
+#[derive(Serialize)]
+struct PreparationResponse {
+    head_sha: HeadSha,
+    revision: InputRevision,
+    authorization: Authorization,
+    configuration_sha256: PromptHash,
+    checks: CheckSummary,
+    readiness: Readiness,
+    readiness_message: String,
+    proposed_model: ModelId,
+    proposal_matches_coauthor: bool,
+    validated_model: Option<ModelId>,
+    resolved_model: ModelId,
+    models: Vec<ModelOption>,
+}
+
+fn prepare_for_gui(
+    state_file: &Path,
+    config_file: &Path,
+    key: &PrKey,
+    selection: Option<&ModelSelection>,
+    rules: Option<&InspectedRules>,
+) -> Result<PreparationResponse, PrepareError> {
+    let report = preparation_commands::prepare(state_file, config_file, key, selection, rules)?;
+    Ok(PreparationResponse {
+        head_sha: report.request().head_sha().clone(),
+        revision: report.request().revision(),
+        authorization: report.request().authorization(),
+        configuration_sha256: report.configuration_sha256().clone(),
+        checks: report.checks(),
+        readiness: report.preparation().readiness(),
+        readiness_message: report.preparation().readiness().to_string(),
+        proposed_model: report.preparation().proposed_model().clone(),
+        proposal_matches_coauthor: report.preparation().proposal_matches_coauthor(),
+        validated_model: report.preparation().validated_model().cloned(),
+        resolved_model: report.resolved().model().clone(),
+        models: report
+            .models()
+            .iter()
+            .map(|model| ModelOption {
+                model: model.model().clone(),
+                agent: model.agent().clone(),
+            })
+            .collect(),
+    })
+}
+
 #[derive(PartialEq, Eq)]
 enum LastEvent {
     Snapshot(String),
     ReadError,
 }
 
-pub fn run(state_override: Option<PathBuf>) -> Result<()> {
+pub fn run(state_override: Option<PathBuf>, config_override: Option<PathBuf>) -> Result<()> {
     if !std::io::stdout().is_terminal() {
         anyhow::bail!("GUI requires a terminal to display its one-time sign-in code");
     }
     let state_file = storage::resolve_path(state_override)?;
+    let config_file = storage::resolve_config_path(config_override)?;
     let bootstrap = random_secret()?;
     let token = random_secret()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -180,7 +260,13 @@ pub fn run(state_override: Option<PathBuf>) -> Result<()> {
         };
         axum::serve(
             listener,
-            router(state_file, session, request_commands::refresh),
+            router_with_preparation(
+                state_file,
+                config_file,
+                session,
+                request_commands::refresh,
+                prepare_for_gui,
+            ),
         )
         .await
         .context("serving GUI on 127.0.0.1:8080")
@@ -198,11 +284,19 @@ fn random_secret() -> Result<String> {
     Ok(result)
 }
 
-fn router(state_file: PathBuf, session: Session, refresh: Refresh) -> Router {
+fn router_with_preparation(
+    state_file: PathBuf,
+    config_file: PathBuf,
+    session: Session,
+    refresh: Refresh,
+    prepare: Prepare,
+) -> Router {
     let state = Arc::new(AppState {
         state_file,
+        config_file,
         session: Mutex::new(session),
         refresh,
+        prepare,
     });
     Router::new()
         .route("/", get(index))
@@ -214,9 +308,22 @@ fn router(state_file: PathBuf, session: Session, refresh: Refresh) -> Router {
         .route("/api/requests/refresh", post(refresh_request))
         .route("/api/requests/authorize", post(authorize_request))
         .route("/api/requests/revoke", post(revoke_request))
+        .route("/api/requests/prepare", post(prepare_request))
+        .route("/api/requests/validate-model", post(validate_model_request))
         .route("/assets/{*path}", get(asset))
         .with_state(state)
         .layer(from_fn(localhost_guard))
+}
+
+#[cfg(test)]
+fn router(state_file: PathBuf, session: Session, refresh: Refresh) -> Router {
+    router_with_preparation(
+        state_file,
+        PathBuf::from("unused-config.json"),
+        session,
+        refresh,
+        prepare_for_gui,
+    )
 }
 
 async fn localhost_guard(request: Request<axum::body::Body>, next: Next) -> Response {
@@ -402,6 +509,125 @@ async fn revoke_request(
             })?
             .map_err(authorization_error)?;
     Ok(Json(AuthorizationResponse { changed }))
+}
+
+async fn prepare_request(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(key): Json<PrKey>,
+) -> Result<Json<PreparationResponse>, (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    run_preparation(state, key, None, None).await
+}
+
+async fn validate_model_request(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<ValidateModelRequest>,
+) -> Result<Json<PreparationResponse>, (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    let selection = ModelSelection::new(request.model, request.head_sha, request.revision);
+    run_preparation(state, request.key, Some(selection), Some(request.rules)).await
+}
+
+async fn run_preparation(
+    state: Arc<AppState>,
+    key: PrKey,
+    selection: Option<ModelSelection>,
+    rules: Option<InspectedRules>,
+) -> Result<Json<PreparationResponse>, (StatusCode, Json<ApiError>)> {
+    tokio::task::spawn_blocking(move || {
+        (state.prepare)(
+            &state.state_file,
+            &state.config_file,
+            &key,
+            selection.as_ref(),
+            rules.as_ref(),
+        )
+    })
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The preparation task failed.",
+        )
+    })?
+    .map(Json)
+    .map_err(preparation_error)
+}
+
+fn preparation_error(error: PrepareError) -> (StatusCode, Json<ApiError>) {
+    match error {
+        PrepareError::State(error)
+        | PrepareError::Round(RoundError::State(error))
+        | PrepareError::Validation(ModelValidationError::State(error))
+        | PrepareError::Round(RoundError::Validation(ModelValidationError::State(error))) => {
+            match error {
+                StateError::RequestNotFound(_) => {
+                    api_error(StatusCode::NOT_FOUND, "Review request no longer exists.")
+                }
+                StateError::HeadMismatch { .. }
+                | StateError::RevisionMismatch { .. }
+                | StateError::DiscussionNotObserved(_)
+                | StateError::PublicationUnresolved(_) => api_error(
+                    StatusCode::CONFLICT,
+                    "Review inputs changed or are unavailable. Prepare and inspect the current inputs before validating the model.",
+                ),
+                _ => api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not update local review state.",
+                ),
+            }
+        }
+        PrepareError::Github(error) | PrepareError::Round(RoundError::Github(error)) => {
+            refresh_error(request_commands::RefreshError::Github(error))
+        }
+        PrepareError::StaleRules
+        | PrepareError::Round(RoundError::StaleObservation(_))
+        | PrepareError::Validation(ModelValidationError::StalePreparation)
+        | PrepareError::Round(RoundError::Validation(ModelValidationError::StalePreparation)) => {
+            api_error(
+                StatusCode::CONFLICT,
+                "Inputs, authorization, or configuration changed. Prepare and inspect the review again.",
+            )
+        }
+        PrepareError::Validation(ModelValidationError::Blocked(readiness))
+        | PrepareError::Round(RoundError::Validation(ModelValidationError::Blocked(readiness))) => {
+            api_error(
+                StatusCode::CONFLICT,
+                format!("Model validation is blocked: {readiness}. Prepare the review again."),
+            )
+        }
+        PrepareError::Config(_)
+        | PrepareError::ReadConfig { .. }
+        | PrepareError::Round(RoundError::Config(_)) => api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Check the review configuration and configured models, then prepare again.",
+        ),
+        PrepareError::Archive(_) | PrepareError::Round(RoundError::Archive(_)) => api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Could not verify the VM archive. Check its configured paths and checksums, then prepare again.",
+        ),
+        PrepareError::Validation(_)
+        | PrepareError::Round(RoundError::Validation(_) | RoundError::Preparation(_)) => api_error(
+            StatusCode::CONFLICT,
+            "Model validation is no longer valid. Prepare and inspect the review again.",
+        ),
+        PrepareError::Storage(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not update local review state.",
+        ),
+    }
 }
 
 fn authorization_error(
@@ -768,6 +994,235 @@ mod tests {
         .to_string()
     }
 
+    fn validation_body() -> serde_json::Value {
+        serde_json::json!({
+            "key": {"repository": "owner/repo", "number": 15},
+            "model": "model-beta", "head_sha": "a".repeat(40), "revision": 2,
+            "rules": {"authorization": "one_round", "configuration_sha256": "a".repeat(64)},
+        })
+    }
+
+    fn fake_prepare(
+        state_file: &Path,
+        config_file: &Path,
+        key: &PrKey,
+        selection: Option<&ModelSelection>,
+        rules: Option<&InspectedRules>,
+    ) -> Result<PreparationResponse, PrepareError> {
+        assert_eq!(config_file, state_file.with_extension("config.json"));
+        if key.number() == 16 {
+            return Err(GithubError::RateLimited.into());
+        }
+        let model = selection
+            .map(|choice| choice.model().as_str())
+            .unwrap_or("model-alpha");
+        if let Some(choice) = selection {
+            assert_eq!(choice.head().as_str(), "a".repeat(40));
+            assert_eq!(choice.revision().get(), 2);
+            let rules = rules.unwrap();
+            if rules.authorization() != Authorization::OneRound
+                || rules.configuration_sha256().as_str() != "a".repeat(64)
+            {
+                return Err(PrepareError::StaleRules);
+            }
+        } else {
+            assert!(rules.is_none());
+        }
+        let readiness = if selection.is_some() {
+            Readiness::Ready
+        } else {
+            Readiness::ModelValidationRequired
+        };
+        Ok(PreparationResponse {
+            head_sha: HeadSha::new("a".repeat(40)).unwrap(),
+            revision: InputRevision::new(2).unwrap(),
+            authorization: Authorization::OneRound,
+            configuration_sha256: PromptHash::new("a".repeat(64)).unwrap(),
+            checks: CheckSummary::Green,
+            readiness,
+            readiness_message: readiness.to_string(),
+            proposed_model: ModelId::new("model-alpha").unwrap(),
+            proposal_matches_coauthor: false,
+            validated_model: selection.map(|choice| choice.model().clone()),
+            resolved_model: ModelId::new(model).unwrap(),
+            models: vec![
+                ModelOption {
+                    model: ModelId::new("model-alpha").unwrap(),
+                    agent: AgentId::new("claude").unwrap(),
+                },
+                ModelOption {
+                    model: ModelId::new("model-beta").unwrap(),
+                    agent: AgentId::new("claude-alt").unwrap(),
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn preparation_routes_return_model_choices_and_forward_inspected_rules() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let app = router_with_preparation(
+            state_file.clone(),
+            state_file.with_extension("config.json"),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+            fake_prepare,
+        );
+        test_runtime().block_on(async {
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    "/api/requests/prepare",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    r#"{"repository":"owner/repo","number":15}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 8192).await.unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result["checks"], "green");
+            assert_eq!(result["readiness"], "model_validation_required");
+            assert_eq!(result["head_sha"], "a".repeat(40));
+            assert_eq!(result["revision"], 2);
+            assert_eq!(result["configuration_sha256"], "a".repeat(64));
+            assert_eq!(result["models"][1]["agent"], "claude-alt");
+            assert!(result["validated_model"].is_null());
+            assert!(result.get("prompt").is_none());
+            assert!(result.get("vm_archive").is_none());
+            let response = app
+                .clone()
+                .oneshot(json_post(
+                    "/api/requests/validate-model",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &validation_body().to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 8192).await.unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result["readiness"], "ready");
+            assert_eq!(result["validated_model"], "model-beta");
+            for field in ["authorization", "configuration_sha256"] {
+                let mut body = validation_body();
+                body["rules"][field] = if field == "authorization" {
+                    "pr_cycle".into()
+                } else {
+                    "b".repeat(64).into()
+                };
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/validate-model",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+            }
+            let response = app
+                .oneshot(json_post(
+                    "/api/requests/prepare",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    r#"{"repository":"owner/repo","number":16}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        });
+        assert!(!state_file.exists());
+    }
+
+    #[test]
+    fn validation_route_rejects_malformed_or_incomplete_decisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let app = router_with_preparation(
+            state_file.clone(),
+            state_file.with_extension("config.json"),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+            fake_prepare,
+        );
+        test_runtime().block_on(async {
+            for (field, value) in [
+                ("model", serde_json::json!("invalid model")),
+                ("head_sha", serde_json::json!("bad")), ("revision", serde_json::json!(0)),
+                ("key", serde_json::json!({"repository":"owner/repo", "number":0})),
+                ("rules", serde_json::json!({"authorization":"one_round", "configuration_sha256":"bad"})),
+                ("rules", serde_json::json!({"authorization":"unknown", "configuration_sha256":"a".repeat(64)})),
+                ("extra", serde_json::json!(true)),
+            ] {
+                let mut body = validation_body(); body[field] = value;
+                let response = app.clone().oneshot(json_post("/api/requests/validate-model", Some("http://localhost:8080"), Some("test-token"),
+                    &body.to_string())).await.unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "field: {field}");
+            }
+            for field in ["model", "head_sha", "revision", "rules", "key"] {
+                let mut body = validation_body(); body.as_object_mut().unwrap().remove(field);
+                let response = app.clone().oneshot(json_post("/api/requests/validate-model", Some("http://localhost:8080"), Some("test-token"),
+                    &body.to_string())).await.unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "missing: {field}");
+            }
+        });
+        assert!(!state_file.exists());
+    }
+
+    #[test]
+    fn preparation_errors_report_blockers_without_exposing_private_configuration() {
+        for (error, expected) in [
+            (PrepareError::StaleRules, StatusCode::CONFLICT),
+            (
+                PrepareError::Validation(ModelValidationError::Blocked(Readiness::ChecksPending)),
+                StatusCode::CONFLICT,
+            ),
+            (
+                PrepareError::Round(RoundError::Validation(
+                    ModelValidationError::StalePreparation,
+                )),
+                StatusCode::CONFLICT,
+            ),
+            (
+                PrepareError::Config(
+                    review_platform::config::ConfigError::RepositoryNotConfigured(
+                        "private/repo".into(),
+                    ),
+                ),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                PrepareError::Archive(review_platform::archive::ArchiveError::NotRegular(
+                    PathBuf::from("/private/secret.tar"),
+                )),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                PrepareError::State(StateError::RequestNotFound(
+                    PrKey::new("owner/repo", 15).unwrap(),
+                )),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let (status, Json(body)) = preparation_error(error);
+            assert_eq!(status, expected);
+            assert!(!body.error.contains("private/repo"));
+            assert!(!body.error.contains("/private/secret.tar"));
+        }
+    }
+
     #[test]
     fn authorization_routes_require_lead_session_and_same_origin() {
         let directory = tempfile::tempdir().unwrap();
@@ -789,6 +1244,7 @@ mod tests {
         storage::save(&state_file, &state).unwrap();
         let original = std::fs::read(&state_file).unwrap();
         let authorize_body = authorization_body(head.as_str(), 2, "pr_cycle");
+        let validation_body = validation_body().to_string();
         test_runtime().block_on(async {
             for (path, body) in [
                 ("/api/requests/authorize", authorize_body.as_str()),
@@ -796,6 +1252,11 @@ mod tests {
                     "/api/requests/revoke",
                     r#"{"repository":"owner/repo","number":15}"#,
                 ),
+                (
+                    "/api/requests/prepare",
+                    r#"{"repository":"owner/repo","number":15}"#,
+                ),
+                ("/api/requests/validate-model", validation_body.as_str()),
             ] {
                 for bootstrap in [Some("test-code".to_owned()), None] {
                     let app = router(

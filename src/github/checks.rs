@@ -3,7 +3,7 @@
 use super::{GithubClient, GithubError, GithubResult, PullRequest};
 use crate::preparation::{CiObservation, CiState};
 use crate::{HeadSha, PrKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -73,7 +73,8 @@ impl CheckReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckSummary {
     Green,
     Pending,
