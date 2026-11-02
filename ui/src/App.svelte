@@ -294,7 +294,7 @@
       <ul class="request-list">
         {#each requests as request (request.repository + '#' + request.number)}
           {@const requestId = request.repository + '#' + request.number}
-          <RequestItem {request} signedIn={Boolean(sessionToken)} action={requestActions[requestId]}
+          <RequestItem {request} {checkingSession} signedIn={Boolean(sessionToken)} action={requestActions[requestId]}
             onRefresh={() => refreshFromGithub(request, requestId)}
             onAuthorize={(inspected, scope) => authorize(inspected, requestId, scope)}
             onRevoke={() => revoke(request, requestId)}

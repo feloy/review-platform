@@ -28,14 +28,21 @@ pub(super) type Inspect = fn(&Path, &PrKey, &RoundId) -> Result<InspectedDraft, 
 pub(super) struct DraftDecisionRequest {
     key: PrKey,
     body_hash: PublicationHash,
-    publisher_login: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PublishDraftRequest {
+    key: PrKey,
+    body_hash: PublicationHash,
+    publisher_login: String,
 }
 
 pub(super) async fn publish(
     HttpState(state): HttpState<Arc<AppState>>,
     headers: HeaderMap,
     UrlPath(id): UrlPath<RoundId>,
-    Json(request): Json<DraftDecisionRequest>,
+    Json(request): Json<PublishDraftRequest>,
 ) -> Result<(StatusCode, Json<RunResponse>), (StatusCode, Json<ApiError>)> {
     if !has_session(&state, &headers) {
         return Err(api_error(
@@ -374,6 +381,12 @@ mod tests {
         })
     }
 
+    fn publication_body(path: &Path) -> serde_json::Value {
+        let mut body = rejection_body(path);
+        body["publisher_login"] = "publisher".into();
+        body
+    }
+
     fn post_rejection(body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
@@ -405,8 +418,9 @@ mod tests {
         key: &PrKey,
         id: &RoundId,
         hash: &PublicationHash,
-        _publisher_login: Option<&str>,
+        publisher_login: &str,
     ) -> Result<publication_commands::PublicationReport, publication_commands::PublishError> {
+        assert_eq!(publisher_login, "publisher");
         assert_eq!(config, Path::new("unused-config.json"));
         assert_eq!(key, &PrKey::new("owner/repo", 15).unwrap());
         assert_eq!(id, &RoundId::new("r-draft").unwrap());
@@ -433,8 +447,9 @@ mod tests {
         key: &PrKey,
         id: &RoundId,
         hash: &PublicationHash,
-        _publisher_login: Option<&str>,
+        publisher_login: &str,
     ) -> Result<publication_commands::PublicationReport, publication_commands::PublishError> {
+        assert_eq!(publisher_login, "publisher");
         // Simulate the adapter's confirmed response through the actual domain transitions.
         {
             let _pr_lock = storage::pr_lock(path, key)?;
@@ -474,7 +489,7 @@ mod tests {
     fn confirmed_publication_exposes_the_saved_receipt_without_private_draft_leaks() {
         let directory = tempfile::tempdir().unwrap();
         let path = fixture(directory.path());
-        let body = rejection_body(&path);
+        let body = publication_body(&path);
         let jobs = Arc::new(publications::Publications::new(confirmed_publication));
         runtime().block_on(async {
             let app = app_with_publications(path.clone(), None, unknown_freshness, jobs);
@@ -528,7 +543,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = fixture(directory.path());
         let before = fs::read(&path).unwrap();
-        let body = rejection_body(&path);
+        let body = publication_body(&path);
         runtime().block_on(async {
             for (change, expected) in [
                 ("no_token", StatusCode::UNAUTHORIZED),
@@ -540,6 +555,9 @@ mod tests {
                 ("invalid_hash", StatusCode::UNPROCESSABLE_ENTITY),
                 ("invalid_pr", StatusCode::UNPROCESSABLE_ENTITY),
                 ("missing_hash", StatusCode::UNPROCESSABLE_ENTITY),
+                ("missing_publisher", StatusCode::UNPROCESSABLE_ENTITY),
+                ("null_publisher", StatusCode::UNPROCESSABLE_ENTITY),
+                ("invalid_publisher", StatusCode::UNPROCESSABLE_ENTITY),
                 ("invalid_round", StatusCode::BAD_REQUEST),
                 ("unknown_field", StatusCode::UNPROCESSABLE_ENTITY),
             ] {
@@ -550,6 +568,11 @@ mod tests {
                     "missing_hash" => {
                         body.as_object_mut().unwrap().remove("body_hash");
                     }
+                    "missing_publisher" => {
+                        body.as_object_mut().unwrap().remove("publisher_login");
+                    }
+                    "null_publisher" => body["publisher_login"] = serde_json::Value::Null,
+                    "invalid_publisher" => body["publisher_login"] = 42.into(),
                     "unknown_field" => body["publication_body"] = "untrusted replacement".into(),
                     _ => {}
                 }
@@ -600,7 +623,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = fixture(directory.path());
         let before = fs::read(&path).unwrap();
-        let body = rejection_body(&path);
+        let body = publication_body(&path);
         let jobs = Arc::new(publications::Publications::new(blocked_publication));
         runtime().block_on(async {
             let app = app_with_publications(path.clone(), None, offline_inspect, jobs.clone());
@@ -616,7 +639,7 @@ mod tests {
             .unwrap();
             for request in [
                 post_publication(&body),
-                post_rejection(&body),
+                post_rejection(&rejection_body(&path)),
                 post_unmanage(),
             ] {
                 assert_eq!(
@@ -674,7 +697,7 @@ mod tests {
             runtime().block_on(async {
                 let response = app
                     .clone()
-                    .oneshot(post_publication(&rejection_body(&path)))
+                    .oneshot(post_publication(&publication_body(&path)))
                     .await
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::ACCEPTED);

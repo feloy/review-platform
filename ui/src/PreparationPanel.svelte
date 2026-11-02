@@ -7,9 +7,7 @@
   $effect(() => { onSelect(selectedModel); });
 
   const stale = $derived(preparationOutdated(request, preparation, invalid));
-  const runBlocked = $derived(['starting', 'running'].includes(request.run?.status) ||
-    request.latest_round?.cleanup_pending ||
-    ['starting', 'running', 'awaiting_decision', 'publishing', 'publication_unknown'].includes(request.latest_round?.status));
+  const workflowBlocker = $derived(reviewBlocker(request));
   const permitsValidation = $derived(preparation.readiness === 'ready' ||
     preparation.readiness === 'model_validation_required');
   const selected = $derived(preparation.models.find((choice) => choice.model === selectedModel));
@@ -31,7 +29,7 @@
     : !selected ? 'Choose an available review model first.'
     : modelValidated ? 'This model is already confirmed for the inspected inputs.' : '');
   const runReason = $derived(stale ? 'Prepare again and inspect the current PR before starting.'
-    : reviewBlocker(request) || (!modelValidated ? 'Confirm the selected review model before starting.'
+    : workflowBlocker || (!modelValidated ? 'Confirm the selected review model before starting.'
     : !currentModelValidated ? 'Waiting for the saved model choice. Prepare again if it was cleared.' : ''));
   const checkLabels = {
     green: 'Green', pending: 'Pending', failing: 'Failing', unknown: 'Unknown', no_results: 'No checks reported',
@@ -87,7 +85,7 @@
     </div>
     <div class="action-choice">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <md-filled-button disabled={action?.pending || !currentModelValidated || runBlocked}
+    <md-filled-button disabled={action?.pending || !currentModelValidated || Boolean(workflowBlocker)}
       onclick={() => onRun(selectedModel)}>
       {action?.pending && action.operation === 'run' ? 'Starting review…' : 'Run review'}
     </md-filled-button>
@@ -100,5 +98,4 @@
   {#if modelValidated && !currentModelValidated}
     <p>Waiting for the saved model validation. Prepare again if it was cleared.</p>
   {/if}
-
 </section>

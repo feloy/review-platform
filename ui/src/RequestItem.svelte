@@ -6,7 +6,7 @@
   import { reviewSituation } from './request-status.js';
   import { tick } from 'svelte';
 
-  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
+  let { request, signedIn, checkingSession, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
   let menuButton = $state();
   let actionsMenu;
@@ -157,9 +157,9 @@
         {#if signedIn}
           {#if hasDraft}
             <md-menu-item type="button" disabled={action?.pending}
-              aria-label={`View private draft for ${request.repository} #${request.number}`}
+              aria-label={`Read private draft for ${request.repository} #${request.number}`}
               onclose-menu={(event) => selectMenuAction(event, viewDraft)}>
-              <div slot="headline">{action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'View draft'}</div>
+              <div slot="headline">{action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'Read private draft'}</div>
             </md-menu-item>
           {/if}
           <md-menu-item type="button" disabled={action?.pending}
@@ -174,9 +174,9 @@
             <div slot="headline">Manage authorization</div>
           </md-menu-item>
           <md-menu-item type="button" disabled={action?.pending}
-            aria-label={`Prepare review for ${request.repository} #${request.number}`}
+            aria-label={`Check review readiness for ${request.repository} #${request.number}`}
             onclose-menu={(event) => selectMenuAction(event, prepareReview)}>
-            <div slot="headline">{action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Prepare review'}</div>
+            <div slot="headline">{action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Check review readiness'}</div>
           </md-menu-item>
           {#if request.authorization !== 'awaiting_lead' || request.validated_model}
             <md-menu-item type="button" disabled={action?.pending}
@@ -208,7 +208,7 @@
           · <a href={`https://github.com/${request.repository}/commit/${request.context.head_sha}`} target="_blank" rel="noopener noreferrer">commit {request.context.head_sha.slice(0, 7)}</a>
           {#if request.context.checks} · Checks: {{ green: 'passed', pending: 'pending', failing: 'failing', unknown: 'unknown', no_results: 'none reported' }[request.context.checks]}{/if}
         {:else}
-          GitHub has not been checked for these inputs during this server session.
+          No GitHub check details are available for these inputs in this server session.
         {/if}
       </p>
       {#if request.context?.head_changed || request.context?.discussion_changed}
@@ -221,7 +221,7 @@
       <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <md-filled-button disabled={action?.pending} onclick={nextAction}>{situation.label}</md-filled-button>
-    {:else if situation.action}
+    {:else if situation.action && !checkingSession}
       <a href="#sign-in-heading">Sign in to continue</a>
     {/if}
   </section>

@@ -90,10 +90,7 @@
     {#if !cleanupComplete}
       <p class="action-note">Sandbox cleanup must finish before deciding on this draft.</p>
     {/if}
-    {#if !fresh}
-      <p class="action-note">Reopen the draft and verify fresh PR inputs before publishing. Rejection remains available after cleanup.</p>
-    {/if}
-    {#if !fresh}<p class="control-reason">{draft.freshness === 'stale' ? 'Publication is blocked because the PR changed or closed. You can reject this draft and prepare a new review.' : 'Publication is blocked until GitHub freshness is verified. Reopen the draft to check again.'}</p>{/if}
+    {#if !fresh}<p class="control-reason">{draft.freshness === 'stale' || changed ? 'Publication is blocked because the PR changed or closed. You can reject this draft and prepare a new review.' : 'Publication is blocked until GitHub freshness is verified. Reopen the draft to check again.'}</p>{/if}
     {#if publishing}<p class="control-reason">Wait for the current publication to finish before making another decision.</p>{/if}
     <div class="authorization-buttons">
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

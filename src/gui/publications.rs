@@ -23,7 +23,7 @@ pub(super) type Publish = fn(
     &PrKey,
     &RoundId,
     &PublicationHash,
-    Option<&str>,
+    &str,
 ) -> Result<PublicationReport, PublishError>;
 
 #[derive(Clone, Serialize)]
@@ -98,7 +98,7 @@ impl Publications {
         key: PrKey,
         id: RoundId,
         hash: PublicationHash,
-        publisher_login: Option<String>,
+        publisher_login: String,
     ) -> Result<(), StartError> {
         {
             let mut jobs = self.jobs.lock().map_err(|_| StartError::Unavailable)?;
@@ -128,7 +128,7 @@ impl Publications {
                 &worker_key,
                 &worker_id,
                 &hash,
-                publisher_login.as_deref(),
+                &publisher_login,
             )
         });
         let owner = self.clone();

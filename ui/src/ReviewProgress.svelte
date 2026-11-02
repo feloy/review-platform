@@ -25,9 +25,8 @@
   </p>
 {/if}
 {#if round?.receipt}
-  <p class="action-note">Published <TimeAgo value={round.receipt.published_at} /> by @{round.receipt.publisher_login}.</p>
-  <p class="action-note">Published as <a href={round.receipt.url} target="_blank" rel="noopener noreferrer">GitHub review {round.receipt.review_id}</a>
-    by {round.receipt.publisher_login}, tied to commit <code>{round.receipt.commit_id}</code>.</p>
+  <p class="action-note">Published <TimeAgo value={round.receipt.published_at} /> as <a href={round.receipt.url} target="_blank" rel="noopener noreferrer">GitHub review {round.receipt.review_id}</a>
+    by @{round.receipt.publisher_login}, tied to commit <code>{round.receipt.commit_id}</code>.</p>
 {/if}
 {#if publication?.status === 'published' && publication.freshness === 'stale'}
   <p class="action-note warning">PR inputs changed after publication. The review remains tied to its original commit.</p>
@@ -59,7 +58,7 @@
 {/if}
 {#if round?.status === 'awaiting_decision'}
   <p class="action-note">Private draft ready.
-    {#if signedIn}Use View draft to inspect it here, or use the CLI:
+    {#if signedIn}Choose “Read private draft” to inspect it here, or use the CLI:
     {:else}Sign in to view it here, or inspect it through the CLI:{/if}
     <code>review-platform show-draft {request.repository} {request.number} --round {round.id}</code>
   </p>

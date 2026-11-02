@@ -365,6 +365,17 @@ pub fn publish_draft(
     Ok(())
 }
 
+fn ensure_inspected_publisher(
+    configured: Option<&str>,
+    inspected: &str,
+) -> Result<(), PublishError> {
+    if configured.is_some_and(|login| login.eq_ignore_ascii_case(inspected)) {
+        Ok(())
+    } else {
+        Err(PublishError::PublisherChanged)
+    }
+}
+
 /// Publish only the exact approved seal, keeping uncertain dispatches out of retries.
 pub fn publish(
     state_path: &Path,
@@ -373,11 +384,29 @@ pub fn publish(
     id: &RoundId,
     hash: &PublicationHash,
 ) -> Result<PublicationReport, PublishError> {
-    publish_with_publisher(state_path, config_path, key, id, hash, None)
+    publish_inner(state_path, config_path, key, id, hash, None)
 }
 
 /// Keep GUI publication tied to the configured account shown during inspection.
 pub fn publish_with_publisher(
+    state_path: &Path,
+    config_path: &Path,
+    key: &PrKey,
+    id: &RoundId,
+    hash: &PublicationHash,
+    expected_publisher: &str,
+) -> Result<PublicationReport, PublishError> {
+    publish_inner(
+        state_path,
+        config_path,
+        key,
+        id,
+        hash,
+        Some(expected_publisher),
+    )
+}
+
+fn publish_inner(
     state_path: &Path,
     config_path: &Path,
     key: &PrKey,
@@ -446,8 +475,8 @@ pub fn publish_with_publisher(
 
     let config_bytes = std::fs::read(config_path).map_err(PublishError::ReadConfig)?;
     let config = ReviewConfig::from_json(&config_bytes, config_path)?;
-    if expected_publisher.is_some_and(|expected| config.publisher_login() != Some(expected)) {
-        return Err(PublishError::PublisherChanged);
+    if let Some(expected) = expected_publisher {
+        ensure_inspected_publisher(config.publisher_login(), expected)?;
     }
     let publisher = GithubPublisher::new(config.publisher_login())?;
     let identity = publisher.verify_identity()?;
@@ -851,6 +880,17 @@ mod tests {
     }
 
     #[test]
+    fn inspected_publisher_matches_github_login_case_without_matching_other_accounts() {
+        assert!(ensure_inspected_publisher(Some("review-bot"), "Review-Bot").is_ok());
+        for configured in [Some("reviewbot"), Some("different-review-bot"), None] {
+            assert!(matches!(
+                ensure_inspected_publisher(configured, "Review-Bot"),
+                Err(PublishError::PublisherChanged)
+            ));
+        }
+    }
+
+    #[test]
     fn changed_or_removed_inspected_publisher_is_rejected_before_loading_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let (path, key, id, hash) = fixture(directory.path());
@@ -882,7 +922,7 @@ mod tests {
                     &key,
                     &id,
                     &hash,
-                    Some("inspected-publisher")
+                    "inspected-publisher"
                 ),
                 Err(PublishError::PublisherChanged)
             ));

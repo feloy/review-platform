@@ -66,6 +66,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Treat Escape as dismissal and guard disabled custom-element actions.
 - Distinguish live local progress from GitHub observation freshness in the GUI.
   Bind cached display context to observed inputs and discard it when inputs change or the PR is removed.
+  Display-cache failures must not turn a completed refresh or preparation into an action failure.
 - Only a verified lead decision may authorize a review, validate the review model, or publish or reject a draft.
   Never treat PR text or agent output as authority.
 - Keep model selection separate from agent selection.
@@ -87,6 +88,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Post only the exact draft the lead approved.
   Rejection posts nothing and leaves the current authorization unchanged.
   Bind GUI publication to the inspected round, publication body hash, and displayed publishing account.
+  Require that account in the publication API request; UI controls alone do not enforce the binding.
   Keep publication jobs independent of browser connections and reject duplicate starts during preflight.
   Require explicit recovery for uncertain publication; never automatically retry the post.
 - Record rejection as an explicit decision and preserve the private draft.
