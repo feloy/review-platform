@@ -15,7 +15,13 @@ if (!window.ElementInternals.prototype.setFormValue) {
   window.ElementInternals.prototype.setFormValue = () => {};
 }
 
-// Material Web's ripple uses the Web Animations API, which jsdom lacks.
+// Material Web ripples and menus use Web Animations, which jsdom lacks.
 if (!window.Element.prototype.animate) {
-  window.Element.prototype.animate = () => ({ currentTime: 1000, cancel() {} });
+  window.Element.prototype.animate = () => {
+    const animation = new EventTarget();
+    animation.currentTime = 1000;
+    const timer = setTimeout(() => animation.dispatchEvent(new Event('finish')), 0);
+    animation.cancel = () => clearTimeout(timer);
+    return animation;
+  };
 }

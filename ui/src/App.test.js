@@ -1,6 +1,9 @@
 import '@material/web/button/text-button.js';
 import '@material/web/button/filled-button.js';
 import '@material/web/divider/divider.js';
+import '@material/web/iconbutton/icon-button.js';
+import '@material/web/menu/menu.js';
+import '@material/web/menu/menu-item.js';
 import '@material/web/progress/linear-progress.js';
 import { act, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
@@ -96,12 +99,25 @@ async function showSnapshot(source, requests) {
 }
 
 async function clickMaterialButton(user, container, label) {
-  const control = [...container.querySelectorAll('md-text-button, md-filled-button')]
+  const control = [...container.querySelectorAll('md-text-button, md-filled-button, md-menu-item')]
     .find((button) => button.textContent.trim() === label);
   expect(control).toBeTruthy();
+  const menu = control.closest('md-menu');
+  if (menu && !menu.open) await openActionsMenu(user, menu.closest('.request-item'));
   await waitFor(() => expect(control.shadowRoot.querySelector('button')).toBeTruthy());
   await user.click(control.shadowRoot.querySelector('button'));
   return control;
+}
+
+async function openActionsMenu(user, row) {
+  const trigger = row.querySelector('md-icon-button');
+  await trigger.updateComplete;
+  const menu = row.querySelector('md-menu');
+  const opened = new Promise((resolve) => menu.addEventListener('opened', resolve, { once: true }));
+  await user.click(trigger.shadowRoot.querySelector('button'));
+  await opened;
+  expect(menu.open).toBe(true);
+  return menu;
 }
 
 beforeEach(() => {
@@ -115,6 +131,89 @@ afterEach(() => {
 });
 
 describe('review requests page', () => {
+  it('offers public details in the row menu and closes it after selection or outside clicks', async () => {
+    const user = userEvent.setup();
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    const row = container.querySelector('.request-item');
+    const trigger = row.querySelector('md-icon-button');
+    const menu = row.querySelector('md-menu');
+    expect(menu.open).toBe(false);
+    expect(row.querySelector('.request-heading md-icon-button')).toBe(trigger);
+    await openActionsMenu(user, row);
+    expect(trigger.ariaLabel).toBe('More actions for owner/repo #15');
+    expect(trigger.ariaHasPopup).toBe('menu');
+    expect(trigger.ariaExpanded).toBe('true');
+    expect([...menu.querySelectorAll('md-menu-item')].map((item) => item.textContent.trim()))
+      .toEqual(['Show details']);
+    await clickMaterialButton(user, row, 'Show details');
+    await waitFor(() => expect(menu.open).toBe(false));
+    expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
+    await openActionsMenu(user, row);
+    expect(within(menu).getByText('Hide details')).toBeTruthy();
+    await user.click(screen.getByRole('heading', { name: 'Review requests', level: 1 }));
+    await waitFor(() => expect(menu.open).toBe(false));
+    await waitFor(() => expect(trigger.ariaExpanded).toBe('false'));
+  });
+
+  it('keeps row menus independent and refreshes the PR whose menu was selected', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ changed: false }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request(), request({ number: 16 })]);
+    await screen.findAllByText('Refresh from GitHub');
+    const [first, second] = container.querySelectorAll('.request-item');
+    expect(second.querySelector('.next-step md-filled-button').textContent.trim()).toBe('Fetch pull request details');
+    await openActionsMenu(user, first);
+    const secondMenu = await openActionsMenu(user, second);
+    expect(first.querySelector('md-menu').open).toBe(false);
+    expect(secondMenu.anchorElement).toBe(second.querySelector('md-icon-button'));
+    await clickMaterialButton(user, second, 'Refresh from GitHub');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 16 });
+    await waitFor(() => expect(secondMenu.open).toBe(false));
+  });
+
+  it('opens the menu with arrow keys, navigates enabled actions, and restores focus on Escape', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    await screen.findByText('Manage authorization');
+    const row = container.querySelector('.request-item');
+    const trigger = row.querySelector('md-icon-button');
+    const menu = row.querySelector('md-menu');
+    const items = [...menu.querySelectorAll('md-menu-item')];
+    await trigger.updateComplete;
+    trigger.shadowRoot.querySelector('button').focus();
+    await user.keyboard('{ArrowDown}');
+    await waitFor(() => expect(trigger.ariaExpanded).toBe('true'));
+    await waitFor(() => expect(document.activeElement).toBe(items[0]));
+    await user.keyboard('{ArrowDown}{ArrowDown}');
+    expect(document.activeElement).toBe(items.find((item) => item.textContent.trim() === 'Prepare review'));
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(menu.open).toBe(false));
+    expect(document.activeElement).toBe(trigger);
+    expect(trigger.shadowRoot.activeElement).toBe(trigger.shadowRoot.querySelector('button'));
+    await user.keyboard('{ArrowUp}');
+    await waitFor(() => expect(document.activeElement).toBe(items.at(-1)));
+    await user.keyboard('{Escape}');
+  });
+
+  it.each(['{Enter}', ' '])('selects a menu action with the keyboard using %s', async (key) => {
+    const user = userEvent.setup();
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    const row = container.querySelector('.request-item');
+    const menu = await openActionsMenu(user, row);
+    await user.keyboard(key);
+    await waitFor(() => expect(menu.open).toBe(false));
+    expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
+  });
+
   it('shows PR context as text with a GitHub check time distinct from local updates', async () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
@@ -215,8 +314,7 @@ describe('review requests page', () => {
     expect(sessionStorage.getItem('review-platform-session')).toBe('session-token');
     expect(screen.getByText(/Changed inputs can clear one-round authorization/)).toBeTruthy();
 
-    const refresh = [...container.querySelectorAll('md-text-button')].find((button) => button.textContent.includes('Refresh from GitHub'));
-    await user.click(refresh.shadowRoot.querySelector('button'));
+    const refresh = await clickMaterialButton(user, container, 'Refresh from GitHub');
     expect(screen.getByText('Refreshing…')).toBeTruthy();
     expect(refresh.disabled).toBe(true);
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/refresh');
@@ -245,10 +343,9 @@ describe('review requests page', () => {
     expect(await screen.findByText(/code is invalid or already used/)).toBeTruthy();
     await user.click(signIn.shadowRoot.querySelector('button'));
     await screen.findByText('Refresh from GitHub');
-    const refresh = [...container.querySelectorAll('md-text-button')].find((button) => button.textContent.includes('Refresh from GitHub'));
-    await user.click(refresh.shadowRoot.querySelector('button'));
+    await clickMaterialButton(user, container, 'Refresh from GitHub');
     expect(await screen.findByText('GitHub rate limit reached. Try again later.')).toBeTruthy();
-    await user.click(refresh.shadowRoot.querySelector('button'));
+    await clickMaterialButton(user, container, 'Refresh from GitHub');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
     expect(sessionStorage.getItem('review-platform-session')).toBeNull();
   });
@@ -1162,12 +1259,8 @@ describe('review requests page', () => {
     expect(screen.getAllByText('No rounds yet').some((element) => !element.closest('[hidden]'))).toBe(true);
     expect(screen.queryByRole('heading', { name: 'Author discussion' })).toBeNull();
 
-    const detailsControl = container.querySelector('md-text-button');
-    await waitFor(() => expect(detailsControl.shadowRoot.querySelector('button')).toBeTruthy());
-    const button = detailsControl.shadowRoot.querySelector('button');
-    expect(button.getAttribute('aria-expanded')).toBe('false');
-    await user.click(button);
-    await waitFor(() => expect(button.getAttribute('aria-expanded')).toBe('true'));
+    const detailsControl = await clickMaterialButton(user, container, 'Show details');
+    await waitFor(() => expect(detailsControl.ariaExpanded).toBe('true'));
     expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
     expect(screen.getByText('Not yet observed')).toBeTruthy();
 
@@ -1197,8 +1290,8 @@ describe('review requests page', () => {
     expect(screen.queryByText('Cleanup pending')).toBeNull();
     expect(screen.queryByText('Review stopped; cleanup may be required')).toBeNull();
 
-    await user.click(button);
-    await waitFor(() => expect(button.getAttribute('aria-expanded')).toBe('false'));
+    await clickMaterialButton(user, container, 'Hide details');
+    await waitFor(() => expect(detailsControl.ariaExpanded).toBe('false'));
     expect(screen.queryByRole('heading', { name: 'Author discussion' })).toBeNull();
   });
 

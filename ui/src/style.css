@@ -1,5 +1,7 @@
 :root {
-  font-family: Roboto, "Helvetica Neue", Arial, sans-serif;
+  --md-ref-typeface-plain: Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  font-family: var(--md-ref-typeface-plain);
   color: #1d1b20;
   background: #f8f7fb;
   font-synthesis: none;
@@ -190,7 +192,7 @@ h2 {
   list-style: none;
 }
 
-.request-item:last-child md-divider {
+.request-item:last-child > md-divider {
   display: none;
 }
 
@@ -241,7 +243,25 @@ h2 {
 }
 
 .request-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   padding: 22px 28px 16px;
+}
+
+.request-identity {
+  min-width: 0;
+}
+
+.request-actions {
+  flex: none;
+}
+
+.request-actions svg {
+  width: 24px;
+  height: 24px;
+  fill: currentColor;
 }
 
 .next-step {
@@ -375,13 +395,6 @@ h2 {
 .badge[data-state="pr_cycle"] {
   background: #dcefe0;
   color: #245b30;
-}
-
-.details-toggle {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 0 20px 12px;
 }
 
 .authorization-panel,
@@ -544,10 +557,6 @@ h3 {
   .request-details,
   .state-message {
     padding: 20px;
-  }
-
-  .details-toggle {
-    padding: 0 12px 12px;
   }
 
   .next-step {

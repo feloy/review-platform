@@ -8,6 +8,9 @@
 
   let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
+  let menuButton = $state();
+  let actionsMenu;
+  let menuOpen = $state(false);
   let itemElement;
   let selectedModel = $state('');
   let inspected = $state(null);
@@ -15,6 +18,27 @@
   let preparationInvalid = $state(false);
   const situation = $derived(reviewSituation(request, preparation, preparationInvalid, selectedModel));
   const pullUrl = $derived(`https://github.com/${request.repository}/pull/${request.number}`);
+
+  function toggleMenu() {
+    if (actionsMenu.open) actionsMenu.close();
+    else {
+      actionsMenu.defaultFocus = 'first-item';
+      actionsMenu.show();
+    }
+  }
+
+  function menuKeydown(event) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    actionsMenu.defaultFocus = event.key === 'ArrowUp' ? 'last-item' : 'first-item';
+    actionsMenu.show();
+  }
+
+  function selectMenuAction(event, operation) {
+    // Material reports mouse and keyboard selection through close-menu.
+    // Escape only dismisses; disabled custom elements must not run an action.
+    if (event.detail.reason.key !== 'Escape' && !event.currentTarget.disabled) operation();
+  }
 
   async function nextAction() {
     if (!signedIn || action?.pending) return;
@@ -104,10 +128,75 @@
 
 <li class="request-item" bind:this={itemElement}>
   <header class="request-heading">
+    <div class="request-identity">
       <p class="field-label">Pull request</p>
       {#if request.context?.title}<p class="pr-title"><a href={pullUrl} target="_blank" rel="noopener noreferrer">{request.context.title}</a></p>{/if}
       <p class="request-name"><a href={pullUrl} target="_blank" rel="noopener noreferrer">{request.repository} <span>#{request.number}</span></a></p>
       {#if request.context}<p class="secondary">by @{request.context.author} · {request.context.state === 'closed' ? 'Closed' : request.context.draft ? 'Draft PR' : 'Open'}</p>{/if}
+    </div>
+    <div class="request-actions">
+      <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-icon-button bind:this={menuButton}
+        aria-label={`More actions for ${request.repository} #${request.number}`}
+        aria-haspopup="menu" aria-expanded={menuOpen}
+        title="More actions" onclick={toggleMenu} onkeydown={menuKeydown}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" />
+        </svg>
+      </md-icon-button>
+      <md-menu bind:this={actionsMenu} anchorElement={menuButton}
+        positioning="popover" anchor-corner="end-end" menu-corner="start-end"
+        aria-label={`Actions for ${request.repository} #${request.number}`}
+        onopening={() => menuOpen = true} onclosing={() => menuOpen = false}>
+        <md-menu-item type="button" aria-expanded={expanded}
+          aria-label={`${expanded ? 'Hide' : 'Show'} details for ${request.repository} #${request.number}`}
+          onclose-menu={(event) => selectMenuAction(event, () => expanded = !expanded)}>
+          <div slot="headline">{expanded ? 'Hide details' : 'Show details'}</div>
+        </md-menu-item>
+        {#if signedIn}
+          {#if hasDraft}
+            <md-menu-item type="button" disabled={action?.pending}
+              aria-label={`View private draft for ${request.repository} #${request.number}`}
+              onclose-menu={(event) => selectMenuAction(event, viewDraft)}>
+              <div slot="headline">{action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'View draft'}</div>
+            </md-menu-item>
+          {/if}
+          <md-menu-item type="button" disabled={action?.pending}
+            aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
+            onclose-menu={(event) => selectMenuAction(event, onRefresh)}>
+            <div slot="headline">{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</div>
+          </md-menu-item>
+          <md-menu-item type="button" disabled={action?.pending || !request.discussion}
+            aria-expanded={Boolean(inspected)}
+            aria-label={`Manage authorization for ${request.repository} #${request.number}`}
+            onclose-menu={(event) => selectMenuAction(event, () => inspected = { ...request })}>
+            <div slot="headline">Manage authorization</div>
+          </md-menu-item>
+          <md-menu-item type="button" disabled={action?.pending}
+            aria-label={`Prepare review for ${request.repository} #${request.number}`}
+            onclose-menu={(event) => selectMenuAction(event, prepareReview)}>
+            <div slot="headline">{action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Prepare review'}</div>
+          </md-menu-item>
+          {#if request.authorization !== 'awaiting_lead' || request.validated_model}
+            <md-menu-item type="button" disabled={action?.pending}
+              aria-label={`Revoke authorization for ${request.repository} #${request.number}`}
+              onclose-menu={(event) => selectMenuAction(event, onRevoke)}>
+              <div slot="headline">{action?.pending && action.operation === 'revoke' ? 'Revoking…' : 'Revoke authorization'}</div>
+            </md-menu-item>
+          {/if}
+          <md-divider></md-divider>
+          <md-menu-item type="button" disabled={action?.pending || managementBlocked}
+            aria-label={`Stop managing ${request.repository} #${request.number}`}
+            title={managementBlocked
+              ? 'Finish or recover the active review, cleanup, or publication before stopping management.'
+              : 'Permanently delete this PR and its local drafts, logs, and review history.'}
+            onclose-menu={(event) => selectMenuAction(event, () => confirmingRemoval = true)}>
+            <div slot="headline">{action?.pending && action.operation === 'unmanage' ? 'Stopping management…' : 'Stop managing PR'}</div>
+          </md-menu-item>
+        {/if}
+      </md-menu>
+    </div>
   </header>
   <section class="next-step" data-tone={situation.tone} aria-label={`Next step for ${request.repository} #${request.number}`}>
     <div>
@@ -169,62 +258,6 @@
         <p class="secondary">No rounds yet</p>
       {/if}
     </div>
-  </div>
-  <div class="details-toggle">
-    <!-- Material Web handles keyboard activation inside its button shadow DOM. -->
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <md-text-button
-      aria-expanded={expanded}
-      aria-label={`${expanded ? 'Hide' : 'Show'} details for ${request.repository} #${request.number}`}
-      onclick={() => expanded = !expanded}
-    >
-      {expanded ? 'Hide details' : 'Show details'}
-    </md-text-button>
-    {#if signedIn}
-      {#if hasDraft}
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-text-button disabled={action?.pending} onclick={viewDraft}
-          aria-label={`View private draft for ${request.repository} #${request.number}`}>
-          {action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'View draft'}
-        </md-text-button>
-      {/if}
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-text-button
-        disabled={action?.pending}
-        aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
-        onclick={() => onRefresh()}
-      >{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</md-text-button>
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-text-button
-        disabled={action?.pending || !request.discussion}
-        aria-expanded={Boolean(inspected)}
-        aria-label={`Manage authorization for ${request.repository} #${request.number}`}
-        onclick={() => inspected = { ...request }}
-      >Manage authorization</md-text-button>
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-text-button disabled={action?.pending}
-        aria-label={`Prepare review for ${request.repository} #${request.number}`}
-        onclick={prepareReview}>
-        {action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Prepare review'}
-      </md-text-button>
-      {#if request.authorization !== 'awaiting_lead' || request.validated_model}
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-text-button disabled={action?.pending}
-          aria-label={`Revoke authorization for ${request.repository} #${request.number}`}
-          onclick={() => onRevoke()}>
-          {action?.pending && action.operation === 'revoke' ? 'Revoking…' : 'Revoke authorization'}
-        </md-text-button>
-      {/if}
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-text-button disabled={action?.pending || managementBlocked}
-        aria-label={`Stop managing ${request.repository} #${request.number}`}
-        title={managementBlocked
-          ? 'Finish or recover the active review, cleanup, or publication before stopping management.'
-          : 'Permanently delete this PR and its local drafts, logs, and review history.'}
-        onclick={() => confirmingRemoval = true}>
-        {action?.pending && action.operation === 'unmanage' ? 'Stopping management…' : 'Stop managing PR'}
-      </md-text-button>
-    {/if}
   </div>
   {#if signedIn}
     {#if confirmingRemoval}
