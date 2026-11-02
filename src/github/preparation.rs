@@ -17,6 +17,10 @@ pub struct PreparationInputs {
 }
 
 impl PreparationInputs {
+    pub fn into_pull(self) -> PullRequest {
+        self.pull
+    }
+
     pub fn head_sha(&self) -> &HeadSha {
         self.pull.head_sha()
     }

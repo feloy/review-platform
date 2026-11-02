@@ -196,7 +196,7 @@ h2 {
 
 .request-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
   gap: 24px;
   padding: 22px 28px;
 }
@@ -219,6 +219,116 @@ h2 {
 
 .request-name span {
   white-space: nowrap;
+}
+
+.request-name a,
+.pr-title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.request-name a:hover,
+.pr-title a:hover {
+  text-decoration: underline;
+}
+
+.pr-title {
+  margin-bottom: 6px;
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.request-heading {
+  padding: 22px 28px 16px;
+}
+
+.next-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 0 28px 16px;
+  padding: 18px 20px;
+  border-left: 4px solid #465b9a;
+  border-radius: 8px;
+  background: #f0f3fb;
+}
+
+.next-step > div {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.next-step h3 {
+  margin-bottom: 8px;
+}
+
+.next-step p {
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.next-step .github-observation,
+.next-step .observed-change {
+  margin-bottom: 0;
+  color: #4a4852;
+  font-size: 0.83rem;
+}
+
+.next-step[data-tone="warning"] {
+  border-left-color: #a45e00;
+  background: #fff5e5;
+}
+
+.next-step[data-tone="success"] {
+  border-left-color: #245b30;
+  background: #edf7ef;
+}
+
+.primary-link {
+  display: inline-block;
+  padding: 12px 20px;
+  border-radius: 24px;
+  background: var(--md-sys-color-primary);
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.action-choice {
+  flex: 1 1 210px;
+}
+
+.preparation-panel .control-reason,
+.draft-panel .control-reason {
+  margin: 8px 0;
+  color: #5b5963;
+}
+
+.readiness-checklist {
+  display: grid;
+  gap: 8px;
+  padding-left: 20px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.publication-destination {
+  margin-bottom: 20px;
+  padding: 0 16px 8px;
+  border: 1px solid #d4dbea;
+  border-radius: 8px;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
+.publication-destination h4 {
+  margin-top: 16px;
 }
 
 .head-sha {
@@ -429,6 +539,7 @@ h3 {
   }
 
   .queue-heading,
+  .request-heading,
   .request-row,
   .request-details,
   .state-message {
@@ -437,6 +548,12 @@ h3 {
 
   .details-toggle {
     padding: 0 12px 12px;
+  }
+
+  .next-step {
+    margin-right: 12px;
+    margin-left: 12px;
+    padding: 16px;
   }
 
   .request-row {

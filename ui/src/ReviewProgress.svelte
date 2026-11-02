@@ -1,4 +1,5 @@
 <script>
+  import TimeAgo from './TimeAgo.svelte';
   let { request, signedIn } = $props();
   const round = $derived(request.latest_round);
   const run = $derived(request.run);
@@ -24,6 +25,7 @@
   </p>
 {/if}
 {#if round?.receipt}
+  <p class="action-note">Published <TimeAgo value={round.receipt.published_at} /> by @{round.receipt.publisher_login}.</p>
   <p class="action-note">Published as <a href={round.receipt.url} target="_blank" rel="noopener noreferrer">GitHub review {round.receipt.review_id}</a>
     by {round.receipt.publisher_login}, tied to commit <code>{round.receipt.commit_id}</code>.</p>
 {/if}
@@ -33,6 +35,8 @@
   <p class="action-note warning">PR freshness could not be rechecked after publication. The saved receipt confirms publication.</p>
 {/if}
 
+{#if round?.dispatched_at}<p class="action-note">Review started <TimeAgo value={round.dispatched_at} />{#if round.finished_at}; finished <TimeAgo value={round.finished_at} />{/if}.</p>
+{:else if round?.created_at}<p class="action-note">Review setup began <TimeAgo value={round.created_at} />.</p>{/if}
 {#if active}
   <p class="action-note" role="status">
     {#if run.status === 'starting' || run.round_id !== round?.id}Starting review… {/if}

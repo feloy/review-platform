@@ -1,4 +1,5 @@
 <script>
+  import TimeAgo from './TimeAgo.svelte';
   let { request, draft, action, onReject, onPublish, onClose } = $props();
   let confirmation = $state(null);
   let confirmationInvalid = $state(false);
@@ -13,18 +14,18 @@
   const fresh = $derived(draft.freshness === 'fresh' && !changed);
   $effect(() => {
     if (confirmation && (!awaitingDecision || !cleanupComplete || publishing ||
-      (confirmation.kind === 'publish' && !fresh))) confirmationInvalid = true;
+      (confirmation.kind === 'publish' && (!fresh || !draft.publisher_login)))) confirmationInvalid = true;
   });
 
   function confirmDecision(kind) {
     if (!awaitingDecision || !cleanupComplete || publishing || action?.pending || decisionSubmitted || confirmationInvalid ||
-      (kind === 'publish' && !fresh)) return;
-    confirmation = { kind, key: { ...draft.key }, round_id: draft.round_id, body_hash: draft.publication_body_sha256 };
+      (kind === 'publish' && (!fresh || !draft.publisher_login))) return;
+    confirmation = { kind, key: { ...draft.key }, round_id: draft.round_id, body_hash: draft.publication_body_sha256, publisher_login: draft.publisher_login };
   }
 
   async function decide() {
     if (!confirmation || confirmationInvalid || !awaitingDecision || !cleanupComplete || publishing || action?.pending || decisionSubmitted ||
-      (confirmation.kind === 'publish' && !fresh)) return;
+      (confirmation.kind === 'publish' && (!fresh || !draft.publisher_login))) return;
     const result = await (confirmation.kind === 'publish' ? onPublish(confirmation) : onReject(confirmation));
     if (result) {
       decisionSubmitted = true;
@@ -45,6 +46,16 @@
     <h3>Private draft</h3>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <md-text-button disabled={action?.pending} onclick={onClose}>Close draft</md-text-button>
+  </div>
+  <div class="publication-destination">
+    <h4>Publication destination</h4>
+    <p>Review destination: <a href={`https://github.com/${draft.key.repository}/pull/${draft.key.number}`} target="_blank" rel="noopener noreferrer">{draft.key.repository} #{draft.key.number}</a>
+      on <a href={`https://github.com/${draft.key.repository}/commit/${draft.head_sha}`} target="_blank" rel="noopener noreferrer">commit {draft.head_sha.slice(0, 7)}</a>.
+      {#if draft.receipt}Published by <strong>@{draft.receipt.publisher_login}</strong>.
+      {:else if draft.publisher_login}Publishing account: <strong>@{draft.publisher_login}</strong>. The server verifies this account before posting.
+      {:else}The publishing account is unavailable. Configure publisher_login and reopen this draft before publishing.{/if}</p>
+    <p>Publication posts a comment review. The agent’s recommendation does not formally approve or merge the PR.</p>
+    {#if draft.inspected_at}<p>Draft inspected <TimeAgo value={draft.inspected_at} />. {draft.freshness === 'fresh' ? 'No PR changes were found at that check.' : draft.freshness === 'stale' ? 'The PR has changed or closed.' : 'GitHub freshness could not be verified.'}</p>{/if}
   </div>
   <dl class="detail-list">
     <div><dt>Round</dt><dd><code>{draft.round_id}</code></dd></div>
@@ -82,9 +93,11 @@
     {#if !fresh}
       <p class="action-note">Reopen the draft and verify fresh PR inputs before publishing. Rejection remains available after cleanup.</p>
     {/if}
+    {#if !fresh}<p class="control-reason">{draft.freshness === 'stale' ? 'Publication is blocked because the PR changed or closed. You can reject this draft and prepare a new review.' : 'Publication is blocked until GitHub freshness is verified. Reopen the draft to check again.'}</p>{/if}
+    {#if publishing}<p class="control-reason">Wait for the current publication to finish before making another decision.</p>{/if}
     <div class="authorization-buttons">
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-filled-button disabled={action?.pending || !cleanupComplete || confirmationInvalid || publishing || !fresh}
+      <md-filled-button disabled={action?.pending || !cleanupComplete || confirmationInvalid || publishing || !fresh || !draft.publisher_login}
         onclick={() => confirmDecision('publish')}>Publish draft</md-filled-button>
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <md-text-button disabled={action?.pending || !cleanupComplete || confirmationInvalid || publishing}
@@ -99,6 +112,7 @@
     <section class="authorization-panel" aria-label={publish ? 'Confirm draft publication' : 'Confirm draft rejection'}>
       <h4>{publish ? 'Publish this draft?' : 'Reject this draft?'}</h4>
       {#if publish}
+        <p>Post to {draft.key.repository} #{draft.key.number} as <strong>@{confirmation.publisher_login}</strong>.</p>
         <p>The exact review comments shown above, including the round footer, will be posted to GitHub as a comment review on the reviewed commit.
           Private lead advice stays private. The server rechecks PR freshness and publisher identity before posting.</p>
       {:else}
@@ -111,7 +125,7 @@
       </dl>
       <div class="authorization-buttons">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-filled-button disabled={action?.pending || confirmationInvalid || !awaitingDecision || !cleanupComplete || publishing || (publish && !fresh)}
+        <md-filled-button disabled={action?.pending || confirmationInvalid || !awaitingDecision || !cleanupComplete || publishing || (publish && (!fresh || !draft.publisher_login))}
           onclick={decide}>{action?.pending ? (publish ? 'Starting publication…' : 'Rejecting…') : (publish ? 'Confirm publication' : 'Confirm rejection')}</md-filled-button>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <md-text-button disabled={action?.pending} onclick={() => confirmation = null}>{publish ? 'Cancel publication' : 'Cancel rejection'}</md-text-button>

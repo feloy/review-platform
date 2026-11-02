@@ -51,6 +51,20 @@ Expand a request to see observed author discussion counts,
 the current validated model and agent, and the latest round's recorded inputs and model.
 The list comes from the local state file.
 
+Each PR also shows a plain-language situation and its next useful action,
+such as checking GitHub, granting permission, choosing a model, or reading a draft.
+Review preparation explains the individual requirements and why an action is blocked.
+The situation describes the latest observed state; starting a review still rechecks it.
+
+Refreshing or preparing a PR adds its title, author, open or closed state,
+the inspected commit, and when GitHub was checked.
+Preparation also shows the check result for that commit.
+The page's local update time describes browser updates, separately from GitHub checks.
+GitHub display context lasts for the current server launch, survives browser reloads,
+and is discarded when recorded inputs change or the PR is removed.
+After restarting the GUI, refresh or prepare a PR to load its display context again.
+Review start and finish times and confirmed publication times come from saved records.
+
 After signing in, use **Refresh from GitHub** on a request to fetch its current head
 and author discussion, using the same rules as the `refresh` command.
 Changed inputs may clear one-round authorization and model validation.
@@ -121,6 +135,9 @@ Live input changes do not retarget the confirmation;
 if the latest round, decision, or cleanup changes, reopen the draft before rejecting it.
 
 Use **Publish draft** after cleanup when the opened draft has verified fresh inputs.
+The draft shows its destination PR and commit and the configured publishing account.
+If that account is unavailable, configure `publisher_login` and reopen the draft.
+Publication rejects a changed publishing account rather than posting under a different one.
 Inspect the fixed round and publication body hash, then choose **Confirm publication**.
 The server re-verifies the exact saved body, configured publisher identity,
 live PR head, open state, and author discussion before posting one comment review
@@ -173,6 +190,9 @@ The GUI uses the GitHub credentials available when it starts.
 `GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
 Each request includes optional discussion counts and model validation,
 plus a summary of its latest round when one exists, including its failure kind and draft freshness.
+The optional `context` contains display-only GitHub metadata bound to `head_sha` and `revision`,
+with `checked_at`, optional exact-head `checks`, and code and discussion change flags.
+Round summaries include `created_at`, optional `dispatched_at`, and optional `finished_at`.
 
 The optional `run` reports the latest GUI job for this server launch:
 `status` (`starting`, `running`, `finished`, or `failed`), `round_id`, and `failure`.
@@ -266,6 +286,8 @@ requires the session token in its `Authorization: Bearer TOKEN` header.
 It accepts a validated round ID and PR key and returns only a completed draft belonging to that PR.
 The response contains `key`, `round_id`, `head_sha`, `revision`, `decision`, `model`, `agent`,
 `verdict`, `freshness`, `publication_body`, `publication_body_sha256`, `lead_advice`, and optional `receipt`.
+It also reports the inspected `publisher_login` when configuration is available
+and the `inspected_at` time, without preventing inspection when publication setup is unavailable.
 The body includes the exact round footer that publication would post.
 
 Freshness uses the CLI's live GitHub checks and confirmed-publication exclusions;
@@ -287,6 +309,7 @@ failed draft verification returns HTTP 422.
 Watch request snapshots or SSE for the recorded decision.
 
 `POST /api/drafts/ROUND_ID/publish` accepts the same `key` and inspected `body_hash`.
+The GUI also supplies the inspected `publisher_login` so startup can reject account changes.
 It returns HTTP 202 with `accepted: true` when the server owns the publication job,
 or HTTP 409 when a GUI publication for the PR is already active.
 Acceptance acknowledges scheduling; watch request snapshots or SSE for the outcome.

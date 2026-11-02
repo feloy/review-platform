@@ -17,8 +17,14 @@ use std::{
 };
 use thiserror::Error;
 
-pub(super) type Publish =
-    fn(&Path, &Path, &PrKey, &RoundId, &PublicationHash) -> Result<PublicationReport, PublishError>;
+pub(super) type Publish = fn(
+    &Path,
+    &Path,
+    &PrKey,
+    &RoundId,
+    &PublicationHash,
+    Option<&str>,
+) -> Result<PublicationReport, PublishError>;
 
 #[derive(Clone, Serialize)]
 pub(super) struct PublicationSummary {
@@ -92,6 +98,7 @@ impl Publications {
         key: PrKey,
         id: RoundId,
         hash: PublicationHash,
+        publisher_login: Option<String>,
     ) -> Result<(), StartError> {
         {
             let mut jobs = self.jobs.lock().map_err(|_| StartError::Unavailable)?;
@@ -115,7 +122,14 @@ impl Publications {
         let worker_key = key.clone();
         let worker_id = id.clone();
         let task = tokio::task::spawn_blocking(move || {
-            publish(&state_file, &config_file, &worker_key, &worker_id, &hash)
+            publish(
+                &state_file,
+                &config_file,
+                &worker_key,
+                &worker_id,
+                &hash,
+                publisher_login.as_deref(),
+            )
         });
         let owner = self.clone();
         // The supervisor outlives the HTTP response and every browser connection.
@@ -159,6 +173,9 @@ impl Publications {
 
 pub(super) fn public_message(error: &PublishError) -> &'static str {
     match error {
+        PublishError::PublisherChanged => {
+            "The configured publishing account changed. Reopen the draft and inspect its destination before publishing."
+        }
         PublishError::Draft(_) => {
             "Could not verify the private draft against its original output and publication seal. Check the saved round files."
         }
@@ -197,6 +214,6 @@ pub(super) fn public_message(error: &PublishError) -> &'static str {
 
 impl Default for Publications {
     fn default() -> Self {
-        Self::new(publication_commands::publish)
+        Self::new(publication_commands::publish_with_publisher)
     }
 }

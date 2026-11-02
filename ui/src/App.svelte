@@ -3,9 +3,9 @@
   import RequestItem from './RequestItem.svelte';
 
   const connectionLabels = {
-    connecting: 'Connecting to local API',
+    connecting: 'Connecting to Review Platform',
     connected: 'Live local updates',
-    reconnecting: 'Reconnecting to local API',
+    reconnecting: 'Reconnecting to Review Platform',
   };
 
   let requests = $state([]);
@@ -112,9 +112,13 @@
   function refreshFromGithub(request, requestId) {
     return performRequestAction(requestId, 'refresh',
       { repository: request.repository, number: request.number },
-      (result) => result.authorization_cleared
-        ? 'Inputs changed. One-round authorization was cleared.'
-        : result.changed ? 'GitHub inputs updated.' : 'GitHub inputs unchanged.',
+      (result) => {
+        const change = result.head_changed && result.discussion_changed ? 'The PR commit and author discussion changed.'
+          : result.head_changed ? 'The PR has a different commit.'
+          : result.discussion_changed ? 'The author discussion changed.'
+          : result.changed ? 'GitHub details updated.' : 'No code or author discussion changes found.';
+        return change + (result.authorization_cleared ? ' Inspect the changes and allow the review again; permission for one review was cleared.' : result.changed ? ' Check readiness again before starting a review.' : '');
+      },
       'Could not refresh from GitHub.');
   }
 
@@ -144,7 +148,7 @@
   function prepareReview(request, requestId) {
     return performRequestAction(requestId, 'prepare',
       { repository: request.repository, number: request.number },
-      () => 'Review preparation updated.', 'Could not prepare the review.');
+      (result) => result.context?.head_changed || result.context?.discussion_changed ? 'GitHub changed. Inspect the current commit and discussion before continuing.' : 'GitHub checks and review preparation updated.', 'Could not prepare the review.');
   }
 
   function validateModel(request, requestId, preparation, model) {
@@ -192,7 +196,7 @@
   function publishDraft(requestId, inspected) {
     return performAction(requestId, 'publish-draft', `/api/drafts/${encodeURIComponent(inspected.round_id)}/publish`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: inspected.key, body_hash: inspected.body_hash }),
+      body: JSON.stringify({ key: inspected.key, body_hash: inspected.body_hash, publisher_login: inspected.publisher_login }),
     }, () => 'Publication accepted. Follow its status below; closing this tab does not interrupt it.', 'Could not start draft publication.');
   }
 
@@ -231,7 +235,7 @@
     <div>
       <p class="eyebrow">Review Platform</p>
       <h1>Review requests</h1>
-      <p class="intro">Locally recorded state updates automatically. Refresh a request to fetch its current GitHub inputs.</p>
+      <p class="intro">See which reviews need your attention and what to do next. Local progress updates automatically; use Refresh from GitHub to check for PR changes.</p>
     </div>
     <p class="connection" data-state={connection} aria-live="polite">
       <span class="connection-dot" aria-hidden="true"></span>
@@ -274,7 +278,7 @@
       <h2 id="queue-heading">Recorded PRs</h2>
       {#if hasSnapshot}
         <p class="queue-meta" aria-live="polite">
-          {requests.length} {requests.length === 1 ? 'request' : 'requests'} · Updated {lastReceivedAt.toLocaleTimeString()}
+          {requests.length} {requests.length === 1 ? 'request' : 'requests'} · Local update received {lastReceivedAt.toLocaleTimeString()}
         </p>
       {/if}
     </div>

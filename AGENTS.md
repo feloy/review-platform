@@ -62,6 +62,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Require the lead session for private draft contents and keep them out of public
   request snapshots.
   Render agent-authored draft content as plain text.
+- Distinguish live local progress from GitHub observation freshness in the GUI.
+  Bind cached display context to observed inputs and discard it when inputs change or the PR is removed.
 - Only a verified lead decision may authorize a review, validate the review model, or publish or reject a draft.
   Never treat PR text or agent output as authority.
 - Keep model selection separate from agent selection.
@@ -82,7 +84,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Recheck at round start because an operator display is only a snapshot.
 - Post only the exact draft the lead approved.
   Rejection posts nothing and leaves the current authorization unchanged.
-  Bind GUI publication to the inspected round and publication body hash.
+  Bind GUI publication to the inspected round, publication body hash, and displayed publishing account.
   Keep publication jobs independent of browser connections and reject duplicate starts during preflight.
   Require explicit recovery for uncertain publication; never automatically retry the post.
 - Record rejection as an explicit decision and preserve the private draft.

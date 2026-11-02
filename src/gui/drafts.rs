@@ -14,7 +14,7 @@ use axum::{
 };
 use review_platform::{
     HeadSha, InputRevision, PrKey, RejectOutcome,
-    config::{AgentId, ModelId},
+    config::{AgentId, ModelId, ReviewConfig},
     publication::PublicationHash,
     review::{Freshness, ReviewStatus, RoundId, RoundStateError, RoundStatus},
 };
@@ -28,6 +28,7 @@ pub(super) type Inspect = fn(&Path, &PrKey, &RoundId) -> Result<InspectedDraft, 
 pub(super) struct DraftDecisionRequest {
     key: PrKey,
     body_hash: PublicationHash,
+    publisher_login: Option<String>,
 }
 
 pub(super) async fn publish(
@@ -57,6 +58,7 @@ pub(super) async fn publish(
             request.key,
             id,
             request.body_hash,
+            request.publisher_login,
         )
         .map_err(publication_start_error)?;
     Ok((StatusCode::ACCEPTED, Json(RunResponse { accepted: true })))
@@ -147,6 +149,8 @@ pub(super) struct DraftResponse {
     publication_body_sha256: PublicationHash,
     lead_advice: String,
     receipt: Option<review_platform::publication::PublicationReceipt>,
+    publisher_login: Option<String>,
+    inspected_at: Option<u64>,
 }
 
 pub(super) async fn inspect(
@@ -161,16 +165,24 @@ pub(super) async fn inspect(
             "Sign in again to view private drafts.",
         ));
     }
-    let inspected =
-        tokio::task::spawn_blocking(move || (state.inspect_draft)(&state.state_file, &key, &id))
-            .await
-            .map_err(|_| {
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Could not inspect the private draft.",
-                )
-            })?
-            .map_err(draft_error)?;
+    let (inspected, publisher_login, inspected_at) = tokio::task::spawn_blocking(move || {
+        let inspected_at = super::observation_time();
+        let inspected = (state.inspect_draft)(&state.state_file, &key, &id)?;
+        // Configuration failures must not prevent private inspection or rejection.
+        let publisher_login = std::fs::read(&state.config_file)
+            .ok()
+            .and_then(|bytes| ReviewConfig::from_json(&bytes, &state.config_file).ok())
+            .and_then(|config| config.publisher_login().map(str::to_owned));
+        Ok::<_, DraftError>((inspected, publisher_login, inspected_at))
+    })
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not inspect the private draft.",
+        )
+    })?
+    .map_err(draft_error)?;
     let record = inspected.record();
     Ok(Json(DraftResponse {
         key: record.key().clone(),
@@ -186,6 +198,8 @@ pub(super) async fn inspect(
         publication_body_sha256: inspected.seal().hash().clone(),
         lead_advice: inspected.draft().lead_advice().to_owned(),
         receipt: record.receipt().cloned(),
+        publisher_login,
+        inspected_at,
     }))
 }
 
@@ -281,7 +295,7 @@ mod tests {
                 bootstrap,
                 token: "test-token".into(),
             }),
-            refresh: request_commands::refresh,
+            refresh: super::super::refresh_for_gui,
             prepare: prepare_for_gui,
             runs: Arc::new(Runs::new(
                 Arc::new(AtomicBool::new(false)),
@@ -290,6 +304,7 @@ mod tests {
             inspect_draft,
             publications,
             removing: Mutex::new(Default::default()),
+            contexts: Arc::new(super::super::Contexts::default()),
         }))
     }
 
@@ -390,6 +405,7 @@ mod tests {
         key: &PrKey,
         id: &RoundId,
         hash: &PublicationHash,
+        _publisher_login: Option<&str>,
     ) -> Result<publication_commands::PublicationReport, publication_commands::PublishError> {
         assert_eq!(config, Path::new("unused-config.json"));
         assert_eq!(key, &PrKey::new("owner/repo", 15).unwrap());
@@ -417,6 +433,7 @@ mod tests {
         key: &PrKey,
         id: &RoundId,
         hash: &PublicationHash,
+        _publisher_login: Option<&str>,
     ) -> Result<publication_commands::PublicationReport, publication_commands::PublishError> {
         // Simulate the adapter's confirmed response through the actual domain transitions.
         {
