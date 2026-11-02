@@ -34,12 +34,13 @@ use review_platform::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     convert::Infallible,
     fmt::Write as _,
     io::IsTerminal,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 use subtle::ConstantTimeEq;
@@ -139,6 +140,70 @@ struct AppState {
     runs: Arc<Runs>,
     inspect_draft: drafts::Inspect,
     publications: Arc<publications::Publications>,
+    removing: Mutex<HashSet<PrKey>>,
+}
+
+impl AppState {
+    // Hold only while admitting a job or reserving removal, never during disk I/O.
+    fn job_start_guard(
+        &self,
+        key: &PrKey,
+    ) -> Result<MutexGuard<'_, HashSet<PrKey>>, (StatusCode, Json<ApiError>)> {
+        let removing = self.removing.lock().map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not read GUI management operations.",
+            )
+        })?;
+        if removing.contains(key) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "This PR is being removed from management. Wait for removal to finish.",
+            ));
+        }
+        Ok(removing)
+    }
+
+    fn begin_removal<'a>(
+        &'a self,
+        key: &'a PrKey,
+    ) -> Result<Removal<'a>, (StatusCode, Json<ApiError>)> {
+        let mut removing = self.job_start_guard(key)?;
+        let run_active = self.runs.is_active(key).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not read GUI review jobs.",
+            )
+        })?;
+        let publication_active = self.publications.is_active(key).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not read GUI publication jobs.",
+            )
+        })?;
+        if run_active || publication_active {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "Wait for the active review or publication job to finish before stopping management.",
+            ));
+        }
+        removing.insert(key.clone());
+        Ok(Removal { state: self, key })
+    }
+}
+
+// The blocking removal owns this reservation even if the browser disconnects.
+struct Removal<'a> {
+    state: &'a AppState,
+    key: &'a PrKey,
+}
+
+impl Drop for Removal<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut removing) = self.state.removing.lock() {
+            removing.remove(self.key);
+        }
+    }
 }
 
 struct Session {
@@ -351,6 +416,7 @@ fn router_with_runs(
         runs,
         inspect_draft: crate::draft_commands::inspect,
         publications: Arc::new(publications::Publications::default()),
+        removing: Mutex::new(HashSet::new()),
     }))
 }
 
@@ -584,34 +650,31 @@ async fn unmanage_request(
             "Sign in again to use GUI actions.",
         ));
     }
-    let run_active = state.runs.is_active(&key).map_err(|_| {
+    let changed = tokio::task::spawn_blocking(move || {
+        let _removal = state.begin_removal(&key)?;
+        let changed =
+            request_commands::unmanage(&state.state_file, &key).map_err(unmanagement_error)?;
+        state.runs.forget(&key).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not clear GUI review jobs.",
+            )
+        })?;
+        state.publications.forget(&key).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not clear GUI publication jobs.",
+            )
+        })?;
+        Ok(changed)
+    })
+    .await
+    .map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not read GUI review jobs.",
+            "The management task failed.",
         )
-    })?;
-    let publication_active = state.publications.is_active(&key).map_err(|_| {
-        api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not read GUI publication jobs.",
-        )
-    })?;
-    if run_active || publication_active {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "Wait for the active review or publication job to finish before stopping management.",
-        ));
-    }
-    let changed =
-        tokio::task::spawn_blocking(move || request_commands::unmanage(&state.state_file, &key))
-            .await
-            .map_err(|_| {
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "The management task failed.",
-                )
-            })?
-            .map_err(unmanagement_error)?;
+    })??;
     Ok(Json(AuthorizationResponse { changed }))
 }
 
@@ -659,6 +722,7 @@ async fn run_request(
         ModelSelection::new(request.model, request.head_sha, request.revision),
         request.rules,
     );
+    let _start = state.job_start_guard(&request.key)?;
     state
         .runs
         .start(
@@ -1371,6 +1435,193 @@ mod tests {
                     .contains(r#""run":{"status":"finished""#)
             );
             assert!(!state_file.with_extension("cancelled").exists());
+        });
+    }
+
+    #[test]
+    fn unmanagement_clears_finished_and_failed_runs_before_readding() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let head = HeadSha::new("a".repeat(40)).unwrap();
+        let keys = [15, 17].map(|number| PrKey::new("owner/repo", number).unwrap());
+        let mut state = State::default();
+        for key in &keys {
+            state.record_request(key.clone(), head.clone()).unwrap();
+        }
+        storage::save(&state_file, &state).unwrap();
+        for phase in ["begin", "finish"] {
+            std::fs::write(state_file.with_extension(phase), b"").unwrap();
+        }
+        let runs = Arc::new(Runs::new(
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fake_run,
+        ));
+        let app = router_with_runs(
+            state_file.clone(),
+            state_file.with_extension("config.json"),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+            fake_prepare,
+            runs.clone(),
+        );
+        test_runtime().block_on(async {
+            for (key, status) in keys.iter().zip(["finished", "failed"]) {
+                let mut body = validation_body();
+                body["key"] = serde_json::to_value(key).unwrap();
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/run",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                wait_for_run(&runs, key, status).await;
+            }
+            for key in &keys {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/unmanage",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &serde_json::to_string(key).unwrap(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(runs.summary(key).unwrap().is_none());
+                if key == &keys[0] {
+                    assert!(runs.summary(&keys[1]).unwrap().is_some());
+                }
+                // Re-add through the same locks and transition as the CLI.
+                {
+                    let _pr_lock = storage::pr_lock(&state_file, key).unwrap();
+                    let _lock = storage::lock(&state_file).unwrap();
+                    let mut state = storage::load(&state_file).unwrap();
+                    state.record_request(key.clone(), head.clone()).unwrap();
+                    storage::save(&state_file, &state).unwrap();
+                }
+                let list = read_request_list(
+                    state_file.clone(),
+                    runs.clone(),
+                    Arc::new(publications::Publications::default()),
+                )
+                .await
+                .unwrap();
+                let request = list
+                    .requests
+                    .iter()
+                    .find(|r| r.number == key.number())
+                    .unwrap();
+                assert!(request.run.is_none());
+                assert!(request.publication.is_none());
+                assert!(request.latest_round.is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn unmanagement_rejects_job_starts_until_removal_finishes() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let mut state = State::default();
+        state
+            .record_request(key.clone(), HeadSha::new("a".repeat(40)).unwrap())
+            .unwrap();
+        storage::save(&state_file, &state).unwrap();
+        let state = Arc::new(AppState {
+            state_file: state_file.clone(),
+            config_file: state_file.with_extension("config.json"),
+            session: Mutex::new(Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            }),
+            refresh: fake_refresh,
+            prepare: fake_prepare,
+            runs: Arc::new(Runs::new(
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                fake_run,
+            )),
+            inspect_draft: crate::draft_commands::inspect,
+            publications: Arc::new(publications::Publications::new(|_, _, _, _, _| {
+                Err(crate::publication_commands::PublishError::Stale)
+            })),
+            removing: Mutex::new(HashSet::new()),
+        });
+        let app = router_with_state(state.clone());
+        test_runtime().block_on(async {
+            // Pause disk removal after the GUI has reserved the PR.
+            let pr_lock = storage::pr_lock(&state_file, &key).unwrap();
+            let removal = tokio::spawn(app.clone().oneshot(json_post(
+                "/api/requests/unmanage",
+                Some("http://localhost:8080"),
+                Some("test-token"),
+                &serde_json::to_string(&key).unwrap(),
+            )));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !state.removing.lock().unwrap().contains(&key) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            for (uri, body) in [
+                ("/api/requests/run", validation_body()),
+                (
+                    "/api/drafts/r-gui/publish",
+                    serde_json::json!({
+                        "key": key, "body_hash": "a".repeat(64),
+                    }),
+                ),
+                (
+                    "/api/requests/unmanage",
+                    serde_json::to_value(&key).unwrap(),
+                ),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        uri,
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CONFLICT, "{uri}");
+            }
+            // Removal only reserves this PR; other PRs can still start jobs.
+            let mut other = validation_body();
+            other["key"]["number"] = 17.into();
+            let response = app
+                .oneshot(json_post(
+                    "/api/requests/run",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    &other.to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            drop(pr_lock);
+            assert_eq!(removal.await.unwrap().unwrap().status(), StatusCode::OK);
+            assert!(state.removing.lock().unwrap().is_empty());
+            assert!(state.runs.summary(&key).unwrap().is_none());
+            assert!(state.publications.summary(&key).unwrap().is_none());
+            wait_for_run(
+                &state.runs,
+                &PrKey::new("owner/repo", 17).unwrap(),
+                "failed",
+            )
+            .await;
         });
     }
 

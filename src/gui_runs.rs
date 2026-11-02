@@ -93,6 +93,18 @@ impl Runs {
             .is_some_and(|job| matches!(job.status, RunStatus::Starting | RunStatus::Running)))
     }
 
+    pub fn forget(&self, key: &PrKey) -> Result<(), StartError> {
+        let mut jobs = self.jobs.lock().map_err(|_| StartError::Unavailable)?;
+        if jobs
+            .get(key)
+            .is_some_and(|job| matches!(job.status, RunStatus::Starting | RunStatus::Running))
+        {
+            return Err(StartError::Active);
+        }
+        jobs.remove(key);
+        Ok(())
+    }
+
     pub fn start(
         self: &Arc<Self>,
         state_file: PathBuf,
