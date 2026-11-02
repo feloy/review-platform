@@ -53,6 +53,14 @@ function request(overrides = {}) {
   };
 }
 
+function context(overrides = {}) {
+  return {
+    title: 'Fix login redirect', author: 'alice', state: 'open', draft: false,
+    head_sha: 'a'.repeat(40), revision: 1, checked_at: Math.floor(Date.now() / 1000),
+    checks: null, head_changed: false, discussion_changed: false, ...overrides,
+  };
+}
+
 function round(overrides = {}) {
   return {
     id: 'r-example',
@@ -128,6 +136,139 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('refresh all open PRs', () => {
+  it('places the button above the list and requires sign-in before refreshing', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    expect(button.disabled).toBe(true);
+    expect(button.closest('.queue-toolbar').nextElementSibling).toBe(container.querySelector('.queue'));
+    expect(button.closest('.request-list')).toBeNull();
+    expect(screen.getByText('Sign in to refresh PRs.')).toBeTruthy();
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('waits for the list and disables refreshing when no open or unchecked PRs remain', async () => {
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await screen.findByText('Refresh all open PRs');
+    const button = container.querySelector('.queue-toolbar md-filled-button');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(button.disabled).toBe(true);
+    for (const snapshot of [[], [request({ context: context({ state: 'closed' }) })]]) {
+      await showSnapshot(source, snapshot);
+      expect(button.disabled).toBe(true);
+    }
+    await showSnapshot(source, [request()]);
+    expect(button.disabled).toBe(false);
+  });
+
+  it('refreshes open and unchecked PRs sequentially, prevents duplicate batches, and keeps live snapshots authoritative', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishFirst;
+    let finishSecond;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const initial = [request({ context: context() }), request({ number: 16 }), request({ number: 17, context: context({ state: 'closed' }) })];
+    await showSnapshot(source, initial);
+    await screen.findAllByText('Refresh from GitHub');
+    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    expect(button.disabled).toBe(true);
+    expect(within(container.querySelector('.queue-toolbar')).getByRole('status').textContent).toBe('Refreshing 0 of 2 PRs…');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/refresh');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await showSnapshot(source, [request({ revision: 2 }), ...initial.slice(1), request({ number: 18 })]);
+    await act(() => finishFirst({ ok: true, json: async () => ({ changed: true, authorization_cleared: true }) }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(within(container.querySelector('.queue-toolbar')).getByRole('status').textContent).toBe('Refreshing 1 of 2 PRs…');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ repository: 'owner/repo', number: 16 });
+    await act(() => finishSecond({ ok: true, json: async () => ({ changed: false }) }));
+    expect(await screen.findByText('Refreshed 2 of 2 PRs.')).toBeTruthy();
+    expect(screen.getByText('Revision 2')).toBeTruthy();
+    expect(screen.getByText(/Inspect the changes and allow the review again/)).toBeTruthy();
+    expect(button.disabled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['github', 'offline'])('continues after a %s failure and shows both the summary and individual error', async (failure) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true });
+    if (failure === 'github') fetchMock.mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({ error: 'GitHub is unavailable. Try again later.' }) });
+    else fetchMock.mockRejectedValueOnce(new Error('offline'));
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ changed: false }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request(), request({ number: 16 })]);
+    await screen.findAllByText('Refresh from GitHub');
+    await clickMaterialButton(user, container, 'Refresh all open PRs');
+    expect(await screen.findByText('Refreshed 1 of 2 PRs. 1 could not be refreshed; see the PR rows for details.')).toBeTruthy();
+    const [first, second] = container.querySelectorAll('.request-item');
+    expect(within(first).getByText(failure === 'github' ? 'GitHub is unavailable. Try again later.' : 'Could not connect to the local API. Try again.')).toBeTruthy();
+    expect(within(second).getByText('No code or author discussion changes found.')).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops when the session expires without sending the remaining requests', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, status: 401 });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request(), request({ number: 16 })]);
+    await screen.findAllByText('Refresh from GitHub');
+    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    expect(await screen.findByText(/Refresh stopped because your session ended/)).toBeTruthy();
+    expect(await screen.findByLabelText('One-time code')).toBeTruthy();
+    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(button.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for pending row actions and skips PRs removed or closed during the batch', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishRowRefresh;
+    let finishBatchRefresh;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRowRefresh = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishBatchRefresh = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [request(), request({ number: 16 }), request({ number: 17 })]);
+    await screen.findAllByText('Refresh from GitHub');
+    await clickMaterialButton(user, container.querySelector('.request-item'), 'Refresh from GitHub');
+    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    expect(button.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(() => finishRowRefresh({ ok: true, json: async () => ({ changed: false }) }));
+    await waitFor(() => expect(button.disabled).toBe(false));
+    await clickMaterialButton(user, container, 'Refresh all open PRs');
+    await showSnapshot(source, [request(), request({ number: 17, context: context({ state: 'closed' }) })]);
+    await act(() => finishBatchRefresh({ ok: true, json: async () => ({ changed: false }) }));
+    expect(await screen.findByText('Refreshed 1 of 3 PRs. Skipped 2 busy, removed, or closed PRs.')).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('review requests page', () => {
