@@ -1,7 +1,8 @@
 <script>
   import { preparationOutdated, reviewBlocker } from './request-status.js';
   import TimeAgo from './TimeAgo.svelte';
-  let { request, preparation, invalid, action, onValidate, onRun, onClose, onSelect = () => {} } = $props();
+  import ButtonHelp from './ButtonHelp.svelte';
+  let { request, preparation, invalid, action, onRefresh, onValidate, onRun, onClose, onSelect = () => {} } = $props();
   let selectedModel = $state('');
   $effect(() => { selectedModel = preparation.resolved_model; });
   $effect(() => { onSelect(selectedModel); });
@@ -19,18 +20,20 @@
     awaiting_authorization: 'Give permission for this review before confirming a model.',
     discussion_not_observed: 'Refresh the author discussion from GitHub before confirming a model.',
     pull_closed: 'A model cannot be confirmed for a closed pull request.',
-    checks_pending: 'Wait for GitHub checks to finish, then prepare again.',
-    checks_failing: 'Resolve the failing GitHub checks, then prepare again.',
-    checks_unknown: 'Check the unknown CI results on GitHub, then prepare again.',
-    no_checks: 'GitHub must report passing checks for this commit before a model can be confirmed.',
+    checks_pending: 'Wait for GitHub checks to finish, then use Refresh readiness.',
+    checks_failing: 'Resolve the failing GitHub checks, then use Refresh readiness.',
+    checks_unknown: 'Check the unknown CI results on GitHub, then use Refresh readiness.',
+    no_checks: 'Wait for GitHub to report passing checks for this commit, then use Refresh readiness.',
   };
-  const validationReason = $derived(stale ? 'The PR, permission, or model configuration changed. Prepare again before confirming.'
+  const validationReason = $derived(stale ? 'The PR, permission, or model configuration changed. Refresh readiness before confirming.'
     : !permitsValidation ? readinessReasons[preparation.readiness] ?? 'Check review readiness before confirming a model.'
     : !selected ? 'Choose an available review model first.'
     : modelValidated ? 'This model is already confirmed for the inspected inputs.' : '');
-  const runReason = $derived(stale ? 'Prepare again and inspect the current PR before starting.'
+  const runReason = $derived(stale ? 'Refresh readiness and inspect the current PR before starting.'
     : workflowBlocker || (!modelValidated ? 'Confirm the selected review model before starting.'
-    : !currentModelValidated ? 'Waiting for the saved model choice. Prepare again if it was cleared.' : ''));
+    : !currentModelValidated ? 'Waiting for the saved model choice. Refresh readiness if it was cleared.' : ''));
+  const validationDisabled = $derived(action?.pending || stale || !permitsValidation || !selected || modelValidated);
+  const runDisabled = $derived(action?.pending || !currentModelValidated || Boolean(workflowBlocker));
   const checkLabels = {
     green: 'Green', pending: 'Pending', failing: 'Failing', unknown: 'Unknown', no_results: 'No checks reported',
   };
@@ -72,30 +75,37 @@
     <p>Inspect this head and revision before confirming the model. Validation refreshes GitHub inputs and checks again.</p>
   {/if}
   {#if stale}
-    <p class="action-error" role="alert">This preparation is outdated. Prepare the review again and inspect the current inputs and model.</p>
+    <p class="action-error" role="alert">This preparation is outdated. Use Refresh readiness, then inspect the current inputs and model.</p>
   {/if}
   <div class="authorization-buttons">
-    <div class="action-choice">
+    <ButtonHelp text={validationReason} label="Validate model" disabled={validationDisabled}>
+    {#snippet children(descriptionId)}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <md-filled-button disabled={action?.pending || stale || !permitsValidation || !selected || modelValidated}
+    <md-filled-button disabled={validationDisabled} aria-describedby={descriptionId}
       onclick={() => onValidate(selectedModel)}>
       {action?.pending && action.operation === 'validate-model' ? 'Validating model…' : modelValidated ? 'Model validated' : 'Validate model'}
     </md-filled-button>
-    {#if validationReason}<p class="control-reason">{validationReason}</p>{/if}
-    </div>
-    <div class="action-choice">
+    {/snippet}
+    </ButtonHelp>
+    <ButtonHelp text={runReason} label="Run review" disabled={runDisabled}>
+    {#snippet children(descriptionId)}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <md-filled-button disabled={action?.pending || !currentModelValidated || Boolean(workflowBlocker)}
+    <md-filled-button disabled={runDisabled} aria-describedby={descriptionId}
       onclick={() => onRun(selectedModel)}>
       {action?.pending && action.operation === 'run' ? 'Starting review…' : 'Run review'}
     </md-filled-button>
-    {#if runReason}<p class="control-reason">{runReason}</p>{/if}
-    </div>
+    {/snippet}
+    </ButtonHelp>
+    <!-- Material Web handles keyboard activation inside its button shadow DOM. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <md-text-button disabled={action?.pending} onclick={onRefresh}>
+      {action?.pending && action.operation === 'prepare' ? 'Refreshing readiness…' : 'Refresh readiness'}
+    </md-text-button>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <md-text-button disabled={action?.pending} onclick={onClose}>Close preparation</md-text-button>
   </div>
   <p>Running rechecks GitHub inputs, checks, authorization, configuration, and gateway readiness.</p>
   {#if modelValidated && !currentModelValidated}
-    <p>Waiting for the saved model validation. Prepare again if it was cleared.</p>
+    <p>Waiting for the saved model validation. Refresh readiness if it was cleared.</p>
   {/if}
 </section>

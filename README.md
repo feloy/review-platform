@@ -53,7 +53,9 @@ The list comes from the local state file.
 
 Each PR also shows a plain-language situation and its next useful action,
 such as checking GitHub, granting permission, choosing a model, or reading a draft.
-Review preparation explains the individual requirements and why an action is blocked.
+Review preparation explains the individual requirements.
+Hover over an action or focus it with the keyboard to see its help tooltip,
+including the reason a disabled button is unavailable.
 The situation describes the latest observed state; starting a review still rechecks it.
 
 Open the three-dot menu at the top right of a PR row for **Show details**,
@@ -102,6 +104,10 @@ Use `request` through the CLI to manage it again, then refresh and authorize the
 
 Use **Check review readiness** to refresh the request and inspect CI readiness for its exact head,
 the proposed model, and the configured model choices with their resolved agents.
+Use **Refresh readiness** alongside the preparation panel’s other action buttons to fetch updated checks and readiness,
+including after pending or failing checks change on GitHub.
+The panel keeps its previous results visible while refreshing;
+if refreshing fails, retry before confirming a model or starting a review.
 Select a model and use **Validate model** to confirm it for the prepared head and revision.
 The confirmed selection shows **Model validated**;
 selecting a different model enables **Validate model** again.

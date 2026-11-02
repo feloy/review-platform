@@ -344,16 +344,6 @@ h2 {
   text-decoration: none;
 }
 
-.action-choice {
-  flex: 1 1 210px;
-}
-
-.preparation-panel .control-reason,
-.draft-panel .control-reason {
-  margin: 8px 0;
-  color: #5b5963;
-}
-
 .readiness-checklist {
   display: grid;
   gap: 8px;
