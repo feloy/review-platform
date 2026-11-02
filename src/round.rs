@@ -4,7 +4,7 @@ use crate::archive::{self, ArchiveError};
 use crate::config::{ConfigError, ModelId, ResolvedReviewModel, ReviewConfig};
 use crate::github::checks::CheckSummary;
 use crate::github::discussion::PullObservation;
-use crate::github::{GithubClient, GithubError};
+use crate::github::{GithubClient, GithubError, PullRequest};
 use crate::preparation::{self, Preparation, PreparationError};
 use crate::{
     HeadSha, InputRevision, ModelValidationError, PrKey, RefreshOutcome, State, StateError,
@@ -77,6 +77,7 @@ impl RefreshedRound<'_> {
 #[must_use = "inspect readiness before starting a review round"]
 pub struct RoundPreparation<'a> {
     preparation: Preparation,
+    pull: PullRequest,
     resolved: ResolvedReviewModel<'a>,
     checks: CheckSummary,
     validation_changed: bool,
@@ -99,8 +100,8 @@ impl<'a> RoundPreparation<'a> {
         self.validation_changed
     }
 
-    pub fn into_preparation(self) -> Preparation {
-        self.preparation
+    pub fn into_parts(self) -> (Preparation, PullRequest) {
+        (self.preparation, self.pull)
     }
 }
 
@@ -235,6 +236,7 @@ pub fn prepare<'a>(
         preparation,
         resolved,
         checks: inputs.checks_summary(),
+        pull: inputs.into_pull(),
         validation_changed,
     })
 }

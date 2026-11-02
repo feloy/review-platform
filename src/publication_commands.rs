@@ -47,6 +47,8 @@ pub enum PublishError {
     Body(#[from] PublicationStateError),
     #[error("PR is closed or the draft's reviewed head or author discussion is stale")]
     Stale,
+    #[error("the configured publisher changed since the draft was inspected")]
+    PublisherChanged,
     #[error("reading publication configuration: {0}")]
     ReadConfig(#[source] std::io::Error),
     #[error(transparent)]
@@ -371,6 +373,18 @@ pub fn publish(
     id: &RoundId,
     hash: &PublicationHash,
 ) -> Result<PublicationReport, PublishError> {
+    publish_with_publisher(state_path, config_path, key, id, hash, None)
+}
+
+/// Keep GUI publication tied to the configured account shown during inspection.
+pub fn publish_with_publisher(
+    state_path: &Path,
+    config_path: &Path,
+    key: &PrKey,
+    id: &RoundId,
+    hash: &PublicationHash,
+    expected_publisher: Option<&str>,
+) -> Result<PublicationReport, PublishError> {
     let _pr_lock = storage::pr_lock(state_path, key)?;
     let (record, seal) = {
         let _lock = storage::lock(state_path)?;
@@ -432,6 +446,9 @@ pub fn publish(
 
     let config_bytes = std::fs::read(config_path).map_err(PublishError::ReadConfig)?;
     let config = ReviewConfig::from_json(&config_bytes, config_path)?;
+    if expected_publisher.is_some_and(|expected| config.publisher_login() != Some(expected)) {
+        return Err(PublishError::PublisherChanged);
+    }
     let publisher = GithubPublisher::new(config.publisher_login())?;
     let identity = publisher.verify_identity()?;
     let reader = github::GithubClient::new()?;
@@ -831,5 +848,45 @@ mod tests {
             record_post_result(&path, &id, attempt, Ok(receipt())),
             Err(PublishError::OutcomeUnknown(_))
         ));
+    }
+
+    #[test]
+    fn changed_or_removed_inspected_publisher_is_rejected_before_loading_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, key, id, hash) = fixture(directory.path());
+        let config_path = directory.path().join("config.json");
+        fs::write(
+            directory.path().join("review.md"),
+            "Review the pull request.",
+        )
+        .unwrap();
+        let mut config = serde_json::json!({
+            "schema_version": 6, "publisher_login": "different-publisher",
+            "execution": {"openshell": directory.path().join("openshell"), "gateway":"gateway", "workspace":"default", "driver":"vm", "github_provider":"github-ro"},
+            "models": [{"id":"model-alpha", "coauthors":[]}],
+            "agents": [{"id":"claude", "models":["model-alpha"], "prompt_file":"review.md", "runner": {
+                "kind":"claude", "model_provider":"model-provider", "policy": directory.path().join("policy.yaml"), "policy_sha256":"b".repeat(64), "hold_command":["/bin/sleep","3600"]
+            }}],
+            "repositories": [{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+                "agent":"claude", "vm_archive":{"path": directory.path().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
+            }]}],
+        });
+        let original = fs::read(&path).unwrap();
+        for publisher in [Some("different-publisher"), None] {
+            config["publisher_login"] = serde_json::to_value(publisher).unwrap();
+            fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+            assert!(matches!(
+                publish_with_publisher(
+                    &path,
+                    &config_path,
+                    &key,
+                    &id,
+                    &hash,
+                    Some("inspected-publisher")
+                ),
+                Err(PublishError::PublisherChanged)
+            ));
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
     }
 }

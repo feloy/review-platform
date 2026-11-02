@@ -1,6 +1,6 @@
 //! Stable read-only GitHub observation of a PR head and its author's discussion.
 
-use super::{GithubClient, GithubError, GithubResult, HttpResponse};
+use super::{GithubClient, GithubError, GithubResult, HttpResponse, PullRequest};
 use crate::{CommentFingerprint, CommentHash, CommentSource, HeadSha, ObservedDiscussion, PrKey};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
@@ -16,7 +16,7 @@ const MAX_COLLECTION_BYTES: u64 = 8 * 1024 * 1024;
 /// A complete observation from GitHub; fields cannot be changed by callers.
 pub struct PullObservation {
     key: PrKey,
-    head_sha: HeadSha,
+    pull: PullRequest,
     discussion: ObservedDiscussion,
     confirmed_review_ids: Vec<u64>,
 }
@@ -27,7 +27,11 @@ impl PullObservation {
     }
 
     pub fn head_sha(&self) -> &HeadSha {
-        &self.head_sha
+        self.pull.head_sha()
+    }
+
+    pub fn pull(&self) -> &PullRequest {
+        &self.pull
     }
 
     pub fn author_id(&self) -> u64 {
@@ -170,7 +174,7 @@ impl GithubClient {
         }
         Ok(PullObservation {
             key: key.clone(),
-            head_sha: current.head_sha,
+            pull: current,
             discussion: second,
             confirmed_review_ids: confirmed_review_ids.to_vec(),
         })

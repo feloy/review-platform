@@ -326,6 +326,12 @@ impl RoundRecord {
     pub fn created_at(&self) -> u64 {
         self.created_at
     }
+    pub fn dispatched_at(&self) -> Option<u64> {
+        self.dispatched_at
+    }
+    pub fn finished_at(&self) -> Option<u64> {
+        self.finished_at
+    }
     pub fn publication_freshness(
         &self,
         observed_head: &HeadSha,

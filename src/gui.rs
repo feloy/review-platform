@@ -1,8 +1,10 @@
 //! Loopback HTTP server for the embedded operator UI and local request snapshots.
 
+mod context;
 mod drafts;
 mod publications;
 
+use self::context::{Contexts, RequestContext, observation_time};
 use crate::{
     gui_runs::{RunSummary, Runs, StartError},
     preparation_commands::{self, InspectedRules, PrepareError},
@@ -78,6 +80,7 @@ struct RequestSummary {
     latest_round: Option<RoundSummary>,
     run: Option<RunSummary>,
     publication: Option<publications::PublicationSummary>,
+    context: Option<RequestContext>,
 }
 
 #[derive(Serialize)]
@@ -106,6 +109,9 @@ struct RoundSummary {
     failure: Option<FailureKind>,
     freshness: Option<Freshness>,
     receipt: Option<review_platform::publication::PublicationReceipt>,
+    created_at: u64,
+    dispatched_at: Option<u64>,
+    finished_at: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -122,7 +128,7 @@ struct ApiError {
     error: String,
 }
 
-type Refresh = fn(&Path, &PrKey) -> Result<RefreshOutcome, request_commands::RefreshError>;
+type Refresh = fn(&Path, &PrKey) -> Result<RefreshResponse, request_commands::RefreshError>;
 type Prepare = fn(
     &Path,
     &Path,
@@ -141,6 +147,7 @@ struct AppState {
     inspect_draft: drafts::Inspect,
     publications: Arc<publications::Publications>,
     removing: Mutex<HashSet<PrKey>>,
+    contexts: Arc<Contexts>,
 }
 
 impl AppState {
@@ -228,6 +235,50 @@ struct RefreshResponse {
     head_changed: bool,
     discussion_changed: bool,
     authorization_cleared: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<RequestContext>,
+}
+
+impl RefreshResponse {
+    fn from_outcome(outcome: RefreshOutcome) -> Self {
+        let (changed, head_changed, discussion_changed, authorization_cleared) = match outcome {
+            RefreshOutcome::Unchanged => (false, false, false, false),
+            RefreshOutcome::Updated {
+                head_changed,
+                discussion_changed,
+                authorization_cleared,
+            } => (
+                true,
+                head_changed,
+                discussion_changed,
+                authorization_cleared,
+            ),
+        };
+        Self {
+            changed,
+            head_changed,
+            discussion_changed,
+            authorization_cleared,
+            context: None,
+        }
+    }
+}
+
+fn refresh_for_gui(
+    path: &Path,
+    key: &PrKey,
+) -> Result<RefreshResponse, request_commands::RefreshError> {
+    let checked_at = observation_time();
+    let report = request_commands::refresh_with_details(path, key)?;
+    let mut response = RefreshResponse::from_outcome(report.outcome());
+    response.context = Some(RequestContext::new(
+        report.pull(),
+        report.revision(),
+        checked_at,
+        None,
+        report.outcome(),
+    ));
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -279,6 +330,7 @@ struct PreparationResponse {
     validated_model: Option<ModelId>,
     resolved_model: ModelId,
     models: Vec<ModelOption>,
+    context: Option<RequestContext>,
 }
 
 fn prepare_for_gui(
@@ -288,8 +340,16 @@ fn prepare_for_gui(
     selection: Option<&ModelSelection>,
     rules: Option<&InspectedRules>,
 ) -> Result<PreparationResponse, PrepareError> {
+    let checked_at = observation_time();
     let report = preparation_commands::prepare(state_file, config_file, key, selection, rules)?;
     Ok(PreparationResponse {
+        context: Some(RequestContext::new(
+            report.pull(),
+            report.request().revision(),
+            checked_at,
+            Some(report.checks()),
+            report.changes(),
+        )),
         head_sha: report.request().head_sha().clone(),
         revision: report.request().revision(),
         authorization: report.request().authorization(),
@@ -348,7 +408,7 @@ pub fn run(state_override: Option<PathBuf>, config_override: Option<PathBuf>) ->
                 state_file,
                 config_file,
                 session,
-                request_commands::refresh,
+                refresh_for_gui,
                 prepare_for_gui,
                 Arc::new(Runs::new(
                     cancelled.clone(),
@@ -417,6 +477,7 @@ fn router_with_runs(
         inspect_draft: crate::draft_commands::inspect,
         publications: Arc::new(publications::Publications::default()),
         removing: Mutex::new(HashSet::new()),
+        contexts: Arc::new(Contexts::default()),
     }))
 }
 
@@ -552,35 +613,28 @@ async fn refresh_request(
             "Sign in again to use GUI actions.",
         ));
     }
-    let state_file = state.state_file.clone();
-    let refresh = state.refresh;
-    let outcome = tokio::task::spawn_blocking(move || refresh(&state_file, &key))
-        .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "The refresh task failed.",
-            )
-        })?
-        .map_err(refresh_error)?;
-    let response = match outcome {
-        RefreshOutcome::Unchanged => RefreshResponse {
-            changed: false,
-            head_changed: false,
-            discussion_changed: false,
-            authorization_cleared: false,
-        },
-        RefreshOutcome::Updated {
-            head_changed,
-            discussion_changed,
-            authorization_cleared,
-        } => RefreshResponse {
-            changed: true,
-            head_changed,
-            discussion_changed,
-            authorization_cleared,
-        },
-    };
+    let response = tokio::task::spawn_blocking(move || {
+        let response = (state.refresh)(&state.state_file, &key).map_err(refresh_error)?;
+        if let Some(context) = &response.context {
+            state
+                .contexts
+                .record(&state.state_file, &key, context)
+                .map_err(|_| {
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Could not save the GitHub display context. Refresh again.",
+                    )
+                })?;
+        }
+        Ok(response)
+    })
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The refresh task failed.",
+        )
+    })??;
     Ok(Json(response))
 }
 
@@ -664,6 +718,12 @@ async fn unmanage_request(
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Could not clear GUI publication jobs.",
+            )
+        })?;
+        state.contexts.forget(&key).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not clear GUI display context.",
             )
         })?;
         Ok(changed)
@@ -755,13 +815,17 @@ async fn run_preparation(
     rules: Option<InspectedRules>,
 ) -> Result<Json<PreparationResponse>, (StatusCode, Json<ApiError>)> {
     tokio::task::spawn_blocking(move || {
-        (state.prepare)(
+        let response = (state.prepare)(
             &state.state_file,
             &state.config_file,
             &key,
             selection.as_ref(),
             rules.as_ref(),
-        )
+        )?;
+        if let Some(context) = &response.context {
+            state.contexts.record(&state.state_file, &key, context)?;
+        }
+        Ok(response)
     })
     .await
     .map_err(|_| {
@@ -966,6 +1030,7 @@ async fn requests(
         state.state_file.clone(),
         state.runs.clone(),
         state.publications.clone(),
+        state.contexts.clone(),
     )
     .await
     .map(Json)
@@ -997,6 +1062,7 @@ async fn request_events(
                     state.state_file.clone(),
                     state.runs.clone(),
                     state.publications.clone(),
+                    state.contexts.clone(),
                 )
                 .await
                 .and_then(|list| serde_json::to_string(&list).context("serializing request list"))
@@ -1032,9 +1098,11 @@ async fn read_request_list(
     state_file: PathBuf,
     runs: Arc<Runs>,
     publications: Arc<publications::Publications>,
+    contexts: Arc<Contexts>,
 ) -> Result<RequestList> {
     tokio::task::spawn_blocking(move || {
         let mut list = request_list(&state_file)?;
+        contexts.apply(&mut list)?;
         for request in &mut list.requests {
             request.run = runs.summary(&PrKey::new(&request.repository, request.number)?)?;
             request.publication =
@@ -1061,6 +1129,7 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                 authorization: request.authorization(),
                 run: None,
                 publication: None,
+                context: None,
                 discussion: request.discussion().map(|discussion| DiscussionSummary {
                     issue_comments: discussion.count(CommentSource::IssueComment),
                     review_comments: discussion.count(CommentSource::ReviewComment),
@@ -1087,6 +1156,9 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                             failure: round.failure(),
                             freshness: round.freshness(),
                             receipt: round.receipt().cloned(),
+                            created_at: round.created_at(),
+                            dispatched_at: round.dispatched_at(),
+                            finished_at: round.finished_at(),
                         })
                     })
                     .transpose()?,
@@ -1199,14 +1271,14 @@ mod tests {
                 bootstrap: Some("test-code".into()),
                 token: "test-token".into(),
             },
-            request_commands::refresh,
+            refresh_for_gui,
         )
     }
 
     fn fake_refresh(
         path: &Path,
         key: &PrKey,
-    ) -> Result<RefreshOutcome, request_commands::RefreshError> {
+    ) -> Result<RefreshResponse, request_commands::RefreshError> {
         if key.number() == 16 {
             return Err(GithubError::RateLimited.into());
         }
@@ -1215,7 +1287,7 @@ mod tests {
         let discussion = ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), vec![]).unwrap();
         let outcome = state.refresh(key, &head, &discussion)?;
         storage::save(path, &state).unwrap();
-        Ok(outcome)
+        Ok(RefreshResponse::from_outcome(outcome))
     }
 
     fn json_post(
@@ -1512,6 +1584,7 @@ mod tests {
                     state_file.clone(),
                     runs.clone(),
                     Arc::new(publications::Publications::default()),
+                    Arc::new(Contexts::default()),
                 )
                 .await
                 .unwrap();
@@ -1551,10 +1624,11 @@ mod tests {
                 fake_run,
             )),
             inspect_draft: crate::draft_commands::inspect,
-            publications: Arc::new(publications::Publications::new(|_, _, _, _, _| {
+            publications: Arc::new(publications::Publications::new(|_, _, _, _, _, _| {
                 Err(crate::publication_commands::PublishError::Stale)
             })),
             removing: Mutex::new(HashSet::new()),
+            contexts: Arc::new(Contexts::default()),
         });
         let app = router_with_state(state.clone());
         test_runtime().block_on(async {
@@ -1795,6 +1869,7 @@ mod tests {
             Readiness::ModelValidationRequired
         };
         Ok(PreparationResponse {
+            context: None,
             head_sha: HeadSha::new("a".repeat(40)).unwrap(),
             revision: InputRevision::new(2).unwrap(),
             authorization: Authorization::OneRound,
@@ -3015,7 +3090,10 @@ mod tests {
                 "agent": "claude",
                 "failure": null,
                 "freshness": null,
-                "receipt": null
+                "receipt": null,
+                "created_at": 1,
+                "dispatched_at": 2,
+                "finished_at": null
             })
         );
         assert!(!runner.parent().unwrap().exists());

@@ -8,7 +8,7 @@ use review_platform::{
         AgentId, AgentKind, ConfigError, ModelId, PromptHash, ResolvedReviewModel, ReviewConfig,
         VmArchive,
     },
-    github::{GithubClient, GithubError, checks::CheckSummary},
+    github::{GithubClient, GithubError, PullRequest, checks::CheckSummary},
     preparation::Preparation,
     round::{self, ModelSelection, RoundError},
 };
@@ -118,6 +118,8 @@ impl PreparedModel {
 /// An owned snapshot for display; callers cannot construct or change its evidence.
 pub struct PreparedReview {
     request: ReviewRequest,
+    pull: PullRequest,
+    changes: RefreshOutcome,
     preparation: Preparation,
     checks: CheckSummary,
     models: Vec<PreparedModel>,
@@ -126,6 +128,13 @@ pub struct PreparedReview {
 }
 
 impl PreparedReview {
+    pub fn pull(&self) -> &PullRequest {
+        &self.pull
+    }
+    pub fn changes(&self) -> RefreshOutcome {
+        self.changes
+    }
+
     pub fn request(&self) -> &ReviewRequest {
         &self.request
     }
@@ -205,6 +214,7 @@ pub fn prepare(
     }
     check_rules(request, &configuration_sha256, inspected_rules)?;
     let refreshed = round::refresh_observation(&mut state, &config, observation)?;
+    let changes = refreshed.outcome();
     if refreshed.outcome() != RefreshOutcome::Unchanged {
         storage::save(state_file, &state)?;
     }
@@ -253,9 +263,11 @@ pub fn prepare(
         .clone();
     // Move the library's evidence into the display snapshot without making it forgeable.
     let checks = report.checks();
-    let preparation = report.into_preparation();
+    let (preparation, pull) = report.into_parts();
     Ok(PreparedReview {
         request,
+        pull,
+        changes,
         preparation,
         checks,
         models,

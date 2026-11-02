@@ -2,12 +2,35 @@
   import PreparationPanel from './PreparationPanel.svelte';
   import ReviewProgress from './ReviewProgress.svelte';
   import DraftPanel from './DraftPanel.svelte';
+  import TimeAgo from './TimeAgo.svelte';
+  import { reviewSituation } from './request-status.js';
+  import { tick } from 'svelte';
 
   let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
+  let itemElement;
+  let selectedModel = $state('');
   let inspected = $state(null);
   let preparation = $state(null);
   let preparationInvalid = $state(false);
+  const situation = $derived(reviewSituation(request, preparation, preparationInvalid, selectedModel));
+  const pullUrl = $derived(`https://github.com/${request.repository}/pull/${request.number}`);
+
+  async function nextAction() {
+    if (!signedIn || action?.pending) return;
+    switch (situation.action) {
+      case 'refresh': await onRefresh(); break;
+      case 'authorize': inspected = { ...request }; break;
+      case 'prepare': await prepareReview(); break;
+      case 'draft': await viewDraft(); break;
+      case 'run': await runReview(selectedModel); break;
+      case 'model':
+        await tick();
+        itemElement?.querySelector('.preparation-panel')?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+        itemElement?.querySelector('.model-choice select')?.focus();
+        break;
+    }
+  }
   let draft = $state(null);
   let confirmingRemoval = $state(false);
   const hasDraft = $derived(['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']
@@ -79,12 +102,41 @@
   };
 </script>
 
-<li class="request-item">
-  <div class="request-row">
-    <div class="field">
+<li class="request-item" bind:this={itemElement}>
+  <header class="request-heading">
       <p class="field-label">Pull request</p>
-      <p class="request-name">{request.repository} <span>#{request.number}</span></p>
+      {#if request.context?.title}<p class="pr-title"><a href={pullUrl} target="_blank" rel="noopener noreferrer">{request.context.title}</a></p>{/if}
+      <p class="request-name"><a href={pullUrl} target="_blank" rel="noopener noreferrer">{request.repository} <span>#{request.number}</span></a></p>
+      {#if request.context}<p class="secondary">by @{request.context.author} · {request.context.state === 'closed' ? 'Closed' : request.context.draft ? 'Draft PR' : 'Open'}</p>{/if}
+  </header>
+  <section class="next-step" data-tone={situation.tone} aria-label={`Next step for ${request.repository} #${request.number}`}>
+    <div>
+      <h3>{situation.title}</h3>
+      <p>{situation.message}</p>
+      <p class="github-observation">
+        {#if request.context}
+          GitHub last checked <TimeAgo value={request.context.checked_at} />
+          · <a href={`https://github.com/${request.repository}/commit/${request.context.head_sha}`} target="_blank" rel="noopener noreferrer">commit {request.context.head_sha.slice(0, 7)}</a>
+          {#if request.context.checks} · Checks: {{ green: 'passed', pending: 'pending', failing: 'failing', unknown: 'unknown', no_results: 'none reported' }[request.context.checks]}{/if}
+        {:else}
+          GitHub has not been checked for these inputs during this server session.
+        {/if}
+      </p>
+      {#if request.context?.head_changed || request.context?.discussion_changed}
+        <p class="observed-change">Last GitHub check: {request.context.head_changed && request.context.discussion_changed ? 'the PR commit and author discussion changed' : request.context.head_changed ? 'the PR commit changed' : 'the author discussion changed'}.</p>
+      {/if}
     </div>
+    {#if situation.action === 'github' || situation.action === 'checks' || situation.action === 'receipt'}
+      <a class="primary-link" href={situation.action === 'checks' ? `https://github.com/${request.repository}/commit/${preparation?.head_sha ?? request.head_sha}/checks` : situation.action === 'receipt' ? request.latest_round?.receipt?.url ?? pullUrl : pullUrl} target="_blank" rel="noopener noreferrer">{situation.label}</a>
+    {:else if situation.action && signedIn}
+      <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-filled-button disabled={action?.pending} onclick={nextAction}>{situation.label}</md-filled-button>
+    {:else if situation.action}
+      <a href="#sign-in-heading">Sign in to continue</a>
+    {/if}
+  </section>
+  <div class="request-row">
     <div class="field">
       <p class="field-label">Recorded inputs</p>
       <code class="head-sha">{request.head_sha}</code>
@@ -225,7 +277,7 @@
     {/if}
     {#if preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
-        onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
+        onSelect={(model) => selectedModel = model} onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
     {/if}
     {#if draft}
       <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => draft = null} />

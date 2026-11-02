@@ -3,7 +3,7 @@
 use crate::{review_commands, storage};
 use review_platform::{
     AuthorizationScope, HeadSha, InputRevision, PrKey, RefreshOutcome, StateError,
-    github::{GithubClient, GithubError},
+    github::{GithubClient, GithubError, PullRequest, discussion::PullObservation},
     review::RoundId,
 };
 use std::error::Error;
@@ -156,6 +156,32 @@ fn storage_error(error: anyhow::Error) -> RefreshError {
 
 /// Refresh one existing request using the same process locks for every caller.
 pub fn refresh(state_file: &Path, key: &PrKey) -> Result<RefreshOutcome, RefreshError> {
+    Ok(refresh_with_details(state_file, key)?.outcome())
+}
+
+/// Display context from the same observation that refreshed the recorded inputs.
+pub struct RefreshedRequest {
+    observation: PullObservation,
+    revision: InputRevision,
+    outcome: RefreshOutcome,
+}
+
+impl RefreshedRequest {
+    pub fn pull(&self) -> &PullRequest {
+        self.observation.pull()
+    }
+    pub fn revision(&self) -> InputRevision {
+        self.revision
+    }
+    pub fn outcome(&self) -> RefreshOutcome {
+        self.outcome
+    }
+}
+
+pub fn refresh_with_details(
+    state_file: &Path,
+    key: &PrKey,
+) -> Result<RefreshedRequest, RefreshError> {
     let _pr_lock = storage::pr_lock(state_file, key).map_err(storage_error)?;
     let state = storage::load(state_file).map_err(storage_error)?;
     let prior_revision = state
@@ -185,5 +211,12 @@ pub fn refresh(state_file: &Path, key: &PrKey) -> Result<RefreshOutcome, Refresh
     if outcome != RefreshOutcome::Unchanged {
         storage::save(state_file, &state).map_err(storage_error)?;
     }
-    Ok(outcome)
+    Ok(RefreshedRequest {
+        observation,
+        revision: state
+            .get(key)
+            .ok_or_else(|| StateError::RequestNotFound(key.clone()))?
+            .revision(),
+        outcome,
+    })
 }

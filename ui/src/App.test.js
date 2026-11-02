@@ -84,6 +84,7 @@ function preparedRequest(overrides = {}) {
 function draft(overrides = {}) {
   return {
     key: { repository: 'owner/repo', number: 15 }, round_id: 'r-example', head_sha: 'a'.repeat(40), revision: 1,
+    publisher_login: 'review-bot',
     decision: 'awaiting_decision', model: 'model-alpha', agent: 'claude', verdict: 'ACCEPT_WITH_NITS', freshness: 'fresh',
     publication_body: "# Finding\n<script>alert('draft')</script>\n\n_Agent review via Review Platform (round r-example)._",
     publication_body_sha256: 'd'.repeat(64), lead_advice: '<img src=x onerror=alert(1)> Private advice', ...overrides,
@@ -114,12 +115,69 @@ afterEach(() => {
 });
 
 describe('review requests page', () => {
+  it('shows PR context as text with a GitHub check time distinct from local updates', async () => {
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const title = '<img src=x onerror=alert(1)> Fix login redirect';
+    const context = { title, author: 'alice', state: 'open', draft: false,
+      head_sha: 'a'.repeat(40), revision: 1, checked_at: Math.floor(Date.now() / 1000) - 120,
+      checks: 'green', head_changed: false, discussion_changed: true };
+    await showSnapshot(source, [request({ context })]);
+    expect(screen.getByRole('link', { name: title }).href).toBe('https://github.com/owner/repo/pull/15');
+    expect(screen.getByText('by @alice · Open')).toBeTruthy();
+    expect(screen.getByText('2 minutes ago')).toBeTruthy();
+    expect(screen.getByText(/Local update received/)).toBeTruthy();
+    expect(screen.getByText(/the author discussion changed/)).toBeTruthy();
+    expect(container.querySelector('img')).toBeNull();
+    await showSnapshot(source, [request({ context, latest_round: round() })]);
+    expect(screen.getByText('2 minutes ago')).toBeTruthy();
+    expect(screen.getByText('Review in progress')).toBeTruthy();
+  });
+
+  it('offers the next action and starts only the currently confirmed model', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({ readiness: 'ready', validated_model: 'model-alpha' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ accepted: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
+    await screen.findByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
+    await screen.findByText('Start this review');
+    await user.selectOptions(screen.getByLabelText('Review model for owner/repo #15'), 'model-beta');
+    expect(screen.queryByText('Start this review')).toBeNull();
+    expect(screen.getByText('Confirm the selected review model before starting.')).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText('Review model for owner/repo #15'), 'model-alpha');
+    await screen.findByText('Start this review');
+    await clickMaterialButton(user, container, 'Start this review');
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/run');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body).model).toBe('model-alpha');
+  });
+
+  it('explains that a missing publishing account blocks publication while keeping rejection available', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => draft({ publisher_login: null }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
+    await screen.findByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
+    await screen.findByText(/The publishing account is unavailable/);
+    expect((await clickMaterialButton(user, container, 'Publish draft')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('connects to the request stream, shows an empty list, and closes it on unmount', async () => {
     const { unmount } = render(App);
     const source = FakeEventSource.instances[0];
 
     expect(source.url).toBe('/api/requests/events');
-    expect(screen.getByText('Connecting to local API')).toBeTruthy();
+    expect(screen.getByText('Connecting to Review Platform')).toBeTruthy();
     expect(screen.getByText('Waiting for the local request list…')).toBeTruthy();
 
     await act(() => source.open());
@@ -165,7 +223,7 @@ describe('review requests page', () => {
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer session-token');
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
     await act(() => finishRefresh({ ok: true, json: async () => ({ changed: true, authorization_cleared: true }) }));
-    expect(await screen.findByText('Inputs changed. One-round authorization was cleared.')).toBeTruthy();
+    expect(await screen.findByText('GitHub details updated. Inspect the changes and allow the review again; permission for one review was cleared.')).toBeTruthy();
     expect(screen.getByText('Revision 1')).toBeTruthy();
     await showSnapshot(FakeEventSource.instances[0], [request({ revision: 2 })]);
     expect(screen.getByText('Revision 2')).toBeTruthy();
@@ -496,7 +554,7 @@ describe('review requests page', () => {
     await showSnapshot(source, [preparedRequest()]);
     await screen.findByText('Prepare review');
     await clickMaterialButton(user, container, 'Prepare review');
-    await screen.findByText('Review preparation updated.');
+    await screen.findByText('GitHub checks and review preparation updated.');
     await showSnapshot(source, [preparedRequest(change)]);
     const panel = screen.getByRole('region', { name: 'Review preparation for owner/repo #15' });
     expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
@@ -505,7 +563,7 @@ describe('review requests page', () => {
     expect(validate.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await clickMaterialButton(user, container, 'Prepare review');
-    await screen.findByText('Review preparation updated.');
+    await screen.findByText('GitHub checks and review preparation updated.');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(false);
   });
@@ -521,7 +579,7 @@ describe('review requests page', () => {
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
     await screen.findByText('Prepare review');
     await clickMaterialButton(user, container, 'Prepare review');
-    await screen.findByText('Review preparation updated.');
+    await screen.findByText('GitHub checks and review preparation updated.');
     await clickMaterialButton(user, container, 'Validate model');
     expect(await screen.findByText('Configuration changed. Prepare again.')).toBeTruthy();
     expect(screen.getByText(/This preparation is outdated/)).toBeTruthy();
@@ -721,7 +779,8 @@ describe('review requests page', () => {
     expect(within(panel).getByText('Fresh at inspection')).toBeTruthy();
     expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
     expect(within(panel).getByText('d'.repeat(64))).toBeTruthy();
-    expect(panel.querySelector('script, img, a')).toBeNull();
+    expect(within(panel).getByRole('region', { name: 'Review comments' }).querySelector('script, img, a')).toBeNull();
+    expect(within(panel).getByRole('region', { name: 'Private lead advice' }).querySelector('script, img, a')).toBeNull();
     expect(within(panel).getByText(/This advice stays private/)).toBeTruthy();
     await clickMaterialButton(user, container, 'Close draft');
     expect(screen.queryByRole('region', { name: 'Private draft for owner/repo #15' })).toBeNull();
@@ -854,7 +913,7 @@ describe('review requests page', () => {
     expect(confirm.disabled).toBe(true);
     expect(fetchMock.mock.calls[2][0]).toBe('/api/drafts/r-example/publish');
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
-    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ key: draft().key, body_hash: draft().publication_body_sha256 });
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ key: draft().key, body_hash: draft().publication_body_sha256, publisher_login: draft().publisher_login });
     await clickMaterialButton(user, container, 'Starting publication…');
     expect(fetchMock).toHaveBeenCalledTimes(3);
     await act(() => finishPublication({ ok: true, status: 202, json: async () => ({ accepted: true }) }));
