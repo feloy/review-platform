@@ -56,6 +56,11 @@ such as checking GitHub, granting permission, choosing a model, or reading a dra
 Review preparation explains the individual requirements and why an action is blocked.
 The situation describes the latest observed state; starting a review still rechecks it.
 
+Open the three-dot menu at the top right of a PR row for **Show details**,
+**Refresh from GitHub**, authorization, review preparation, draft access, and removal.
+The suggested next action stays visible in the row.
+Actions that change state or access private drafts require signing in.
+
 Refreshing or preparing a PR adds its title, author, open or closed state,
 the inspected commit, and when GitHub was checked.
 Preparation also shows the check result for that commit.

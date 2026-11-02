@@ -62,6 +62,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Require the lead session for private draft contents and keep them out of public
   request snapshots.
   Render agent-authored draft content as plain text.
+- Handle Material Web menu actions through `close-menu` for mouse and keyboard activation.
+  Treat Escape as dismissal and guard disabled custom-element actions.
 - Distinguish live local progress from GitHub observation freshness in the GUI.
   Bind cached display context to observed inputs and discard it when inputs change or the PR is removed.
 - Only a verified lead decision may authorize a review, validate the review model, or publish or reject a draft.
