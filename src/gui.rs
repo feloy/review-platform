@@ -365,6 +365,7 @@ fn router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/requests/refresh", post(refresh_request))
         .route("/api/requests/authorize", post(authorize_request))
         .route("/api/requests/revoke", post(revoke_request))
+        .route("/api/requests/unmanage", post(unmanage_request))
         .route("/api/requests/prepare", post(prepare_request))
         .route("/api/requests/validate-model", post(validate_model_request))
         .route("/api/requests/run", post(run_request))
@@ -572,6 +573,48 @@ async fn revoke_request(
     Ok(Json(AuthorizationResponse { changed }))
 }
 
+async fn unmanage_request(
+    HttpState(state): HttpState<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(key): Json<PrKey>,
+) -> Result<Json<AuthorizationResponse>, (StatusCode, Json<ApiError>)> {
+    if !has_session(&state, &headers) {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "Sign in again to use GUI actions.",
+        ));
+    }
+    let run_active = state.runs.is_active(&key).map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not read GUI review jobs.",
+        )
+    })?;
+    let publication_active = state.publications.is_active(&key).map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not read GUI publication jobs.",
+        )
+    })?;
+    if run_active || publication_active {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "Wait for the active review or publication job to finish before stopping management.",
+        ));
+    }
+    let changed =
+        tokio::task::spawn_blocking(move || request_commands::unmanage(&state.state_file, &key))
+            .await
+            .map_err(|_| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The management task failed.",
+                )
+            })?
+            .map_err(unmanagement_error)?;
+    Ok(Json(AuthorizationResponse { changed }))
+}
+
 async fn prepare_request(
     HttpState(state): HttpState<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -727,6 +770,28 @@ fn preparation_error(error: PrepareError) -> (StatusCode, Json<ApiError>) {
         PrepareError::Storage(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not update local review state.",
+        ),
+    }
+}
+
+fn unmanagement_error(error: request_commands::UnmanageError) -> (StatusCode, Json<ApiError>) {
+    use request_commands::UnmanageError;
+    match error {
+        UnmanageError::State(StateError::RequestNotFound(_)) => {
+            api_error(StatusCode::NOT_FOUND, "Review request no longer exists.")
+        }
+        UnmanageError::State(StateError::UnmanagementBlocked(_))
+        | UnmanageError::RunnerLock { .. } => api_error(
+            StatusCode::CONFLICT,
+            "Finish or recover the active round, sandbox cleanup, or unresolved publication before stopping management.",
+        ),
+        UnmanageError::Artifacts { .. } => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not delete saved review files. Check local file access and retry removal.",
+        ),
+        UnmanageError::State(_) | UnmanageError::Storage(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not update local review state. Retry removal.",
         ),
     }
 }
@@ -1238,6 +1303,18 @@ mod tests {
             assert_eq!(response.status(), StatusCode::CONFLICT);
             let response = app
                 .clone()
+                .oneshot(json_post(
+                    "/api/requests/unmanage",
+                    Some("http://localhost:8080"),
+                    Some("test-token"),
+                    r#"{"repository":"owner/repo","number":15}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert!(storage::load(&state_file).unwrap().get(&key).is_some());
+            let response = app
+                .clone()
                 .oneshot(
                     Request::builder()
                         .uri("/api/requests/events")
@@ -1686,6 +1763,10 @@ mod tests {
                     r#"{"repository":"owner/repo","number":15}"#,
                 ),
                 (
+                    "/api/requests/unmanage",
+                    r#"{"repository":"owner/repo","number":15}"#,
+                ),
+                (
                     "/api/requests/prepare",
                     r#"{"repository":"owner/repo","number":15}"#,
                 ),
@@ -1741,6 +1822,111 @@ mod tests {
             }
         });
         assert_eq!(std::fs::read(state_file).unwrap(), original);
+    }
+
+    #[test]
+    fn unmanagement_removes_requests_from_snapshots_and_live_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let mut state = State::default();
+        state
+            .record_request(key.clone(), HeadSha::new("a".repeat(40)).unwrap())
+            .unwrap();
+        storage::save(&state_file, &state).unwrap();
+        let app = router(
+            state_file.clone(),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+        );
+        test_runtime().block_on(async {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/requests/events")
+                        .header(header::HOST, "localhost:8080")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut stream = response.into_body().into_data_stream();
+            let initial = stream.next().await.unwrap().unwrap();
+            assert!(
+                String::from_utf8(initial.to_vec())
+                    .unwrap()
+                    .contains("owner/repo")
+            );
+            for (body, expected) in [
+                (
+                    r#"{"repository":"owner/repo","number":0}"#,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                ),
+                (
+                    r#"{"repository":"owner/repo","number":16}"#,
+                    StatusCode::NOT_FOUND,
+                ),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/unmanage",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        body,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected);
+                assert!(storage::load(&state_file).unwrap().get(&key).is_some());
+            }
+            for expected in [StatusCode::OK, StatusCode::NOT_FOUND] {
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/unmanage",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        r#"{"repository":"owner/repo","number":15}"#,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected);
+                let result: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap())
+                        .unwrap();
+                if expected == StatusCode::OK {
+                    assert_eq!(result, serde_json::json!({"changed":true}));
+                }
+            }
+            let update = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8(update.to_vec()).unwrap();
+            assert!(text.contains(r#"{"requests":[]}"#));
+            assert!(!text.contains("unmanaged_requests"));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/requests")
+                        .header(header::HOST, "localhost:8080")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let result: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(result, serde_json::json!({"requests":[]}));
+        });
+        assert!(storage::load(&state_file).unwrap().get(&key).is_none());
     }
 
     #[test]

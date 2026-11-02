@@ -922,7 +922,7 @@ mod tests {
         fs::write(&config_file, &config).unwrap();
         let key = PrKey::new("owner/repo", 15).unwrap();
         let fixture = serde_json::json!({
-            "schema_version":6, "rounds":[],
+            "schema_version":7, "rounds":[],
             "requests":[{
                 "key":key, "head_sha":"a".repeat(40), "revision":2, "authorization":"one_round",
                 "discussion":{"author_id":7, "comments":[]},

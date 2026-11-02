@@ -240,7 +240,7 @@ pub fn load(path: &Path) -> Result<State> {
     let mut state: State = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing state file {}", path.display()))?;
     state
-        .migrate_v5()
+        .migrate_legacy()
         .with_context(|| format!("validating state file {}", path.display()))?;
     Ok(state)
 }

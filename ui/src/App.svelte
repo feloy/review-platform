@@ -134,6 +134,13 @@
       () => 'Authorization revoked.', 'Could not revoke authorization.');
   }
 
+  function unmanage(request, requestId) {
+    return performRequestAction(requestId, 'unmanage',
+      { repository: request.repository, number: request.number },
+      () => 'Management stopped. Local drafts, logs, and review history were deleted.',
+      'Could not stop managing this PR.');
+  }
+
   function prepareReview(request, requestId) {
     return performRequestAction(requestId, 'prepare',
       { repository: request.repository, number: request.number },
@@ -287,6 +294,7 @@
             onRefresh={() => refreshFromGithub(request, requestId)}
             onAuthorize={(inspected, scope) => authorize(inspected, requestId, scope)}
             onRevoke={() => revoke(request, requestId)}
+            onUnmanage={() => unmanage(request, requestId)}
             onPrepare={() => prepareReview(request, requestId)}
             onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)}
             onRun={(preparation, model) => runReview(request, requestId, preparation, model)}

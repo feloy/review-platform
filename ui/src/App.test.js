@@ -130,6 +130,7 @@ describe('review requests page', () => {
     expect(screen.queryByText('Refresh from GitHub')).toBeNull();
     expect(screen.queryByText('Manage authorization')).toBeNull();
     expect(screen.queryByText('Revoke authorization')).toBeNull();
+    expect(screen.queryByText('Stop managing PR')).toBeNull();
 
     unmount();
     expect(source.close).toHaveBeenCalledOnce();
@@ -298,6 +299,88 @@ describe('review requests page', () => {
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
     expect(await screen.findByText('Authorization revoked.')).toBeTruthy();
     expect(screen.getByText('PR cycle')).toBeTruthy();
+  });
+
+  it('stops managing a PR and removes it when the live snapshot updates', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishRemoval;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRemoval = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [request()]);
+    await screen.findByText('Stop managing PR');
+    await clickMaterialButton(user, container, 'Stop managing PR');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(screen.getByText(/This cannot be undone/)).toBeTruthy();
+    await clickMaterialButton(user, container, 'Confirm removal');
+    expect(screen.getByText('Stopping management…')).toBeTruthy();
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/unmanage');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+    await clickMaterialButton(user, container, 'Confirm removal');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(() => finishRemoval({ ok: true, json: async () => ({ changed: true }) }));
+    expect(await screen.findByText(/Management stopped/)).toBeTruthy();
+    expect(screen.getByText('owner/repo')).toBeTruthy();
+    await showSnapshot(source, []);
+    expect(screen.queryByText('owner/repo')).toBeNull();
+    expect(screen.getByText(/No review requests recorded yet/)).toBeTruthy();
+  });
+
+  it.each([
+    { run: { status: 'starting' } },
+    { run: { status: 'running' } },
+    { publication: { status: 'active' } },
+    { latest_round: round({ status: 'starting' }) },
+    { latest_round: round({ status: 'running' }) },
+    { latest_round: round({ status: 'awaiting_decision' }) },
+    { latest_round: round({ status: 'publication_unknown', cleanup_pending: false }) },
+    { latest_round: round({ status: 'publishing', cleanup_pending: false }) },
+  ])('disables management removal while work needs attention: %o', async (overrides) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request(overrides)]);
+    await screen.findByText('Stop managing PR');
+    const button = await clickMaterialButton(user, container, 'Stop managing PR');
+    expect(button.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('cancels removal without sending a deletion request', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    await screen.findByText('Stop managing PR');
+    await clickMaterialButton(user, container, 'Stop managing PR');
+    expect(screen.getByText(/Permanently remove owner\/repo #15/)).toBeTruthy();
+    await clickMaterialButton(user, container, 'Cancel removal');
+    expect(screen.queryByText('Confirm removal')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(screen.getByText('owner/repo')).toBeTruthy();
+  });
+
+  it('keeps the PR visible and reports a management removal conflict', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'Finish cleanup before stopping management.' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    await screen.findByText('Stop managing PR');
+    await clickMaterialButton(user, container, 'Stop managing PR');
+    await clickMaterialButton(user, container, 'Confirm removal');
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Finish cleanup before stopping management.');
+    expect(screen.getByText('owner/repo')).toBeTruthy();
   });
 
   it('reports authorization conflicts and connection errors and clears an expired session', async () => {

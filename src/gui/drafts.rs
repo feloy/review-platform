@@ -324,7 +324,7 @@ mod tests {
         )
         .unwrap();
         let state = serde_json::json!({
-            "schema_version":6,
+            "schema_version":7,
             "requests":[{"key":{"repository":"owner/repo","number":15}, "head_sha":"a".repeat(40),
                 "authorization":"awaiting_lead", "revision":2, "discussion":{"author_id":7,"comments":[]}, "model_validation":null}],
             "rounds":[{"id":"r-draft", "key":{"repository":"owner/repo","number":15}, "status":"awaiting_decision",
@@ -372,6 +372,13 @@ mod tests {
     fn post_publication(body: &serde_json::Value) -> Request<Body> {
         let mut request = post_rejection(body);
         *request.uri_mut() = "/api/drafts/r-draft/publish".parse().unwrap();
+        request
+    }
+
+    fn post_unmanage() -> Request<Body> {
+        let mut request =
+            post_rejection(&serde_json::json!({"repository":"owner/repo","number":15}));
+        *request.uri_mut() = "/api/requests/unmanage".parse().unwrap();
         request
     }
 
@@ -588,7 +595,11 @@ mod tests {
             })
             .await
             .unwrap();
-            for request in [post_publication(&body), post_rejection(&body)] {
+            for request in [
+                post_publication(&body),
+                post_rejection(&body),
+                post_unmanage(),
+            ] {
                 assert_eq!(
                     app.clone().oneshot(request).await.unwrap().status(),
                     StatusCode::CONFLICT
@@ -626,6 +637,123 @@ mod tests {
             drop(app);
         });
         assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn unmanagement_requires_cleanup_and_deletes_private_draft_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let files = [
+            directory.path().join("rounds/r-draft/draft.json"),
+            directory
+                .path()
+                .join("rounds/r-draft/output/review-output.json"),
+        ];
+        let id = RoundId::new("r-draft").unwrap();
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        runtime().block_on(async {
+            let app = app(path.clone(), None, offline_inspect);
+            let saved = fs::read(&path).unwrap();
+            let response = app.clone().oneshot(post_unmanage()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(fs::read(&path).unwrap(), saved);
+            let mut state = storage::load(&path).unwrap();
+            state.mark_round_cleaned(&id).unwrap();
+            storage::save(&path, &state).unwrap();
+            let response = app.clone().oneshot(post_unmanage()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let removed = storage::load(&path).unwrap();
+            assert!(removed.get(&key).is_none());
+            assert!(removed.round(&id).is_none());
+            let response = app.oneshot(get(URI, Some("test-token"))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        });
+        for file in files {
+            assert!(!file.exists());
+        }
+        assert!(!directory.path().join("rounds/r-draft").exists());
+    }
+
+    #[test]
+    fn unmanagement_checks_all_runner_locks_before_deleting_and_can_retry_missing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let mut state = storage::load(&path).unwrap();
+        state
+            .mark_round_cleaned(&RoundId::new("r-draft").unwrap())
+            .unwrap();
+        let mut raw = serde_json::to_value(&state).unwrap();
+        let mut prior = raw["rounds"][0].clone();
+        prior["id"] = "r-prior".into();
+        prior["sandbox"] = "rp-r-prior".into();
+        prior["status"] = "failed".into();
+        prior["failure"] = "preflight".into();
+        prior["sealed_body"] = serde_json::Value::Null;
+        raw["rounds"].as_array_mut().unwrap().push(prior);
+        let mut state: State = serde_json::from_value(raw).unwrap();
+        let other = PrKey::new("other/repo", 16).unwrap();
+        state
+            .record_request(other.clone(), HeadSha::new("b".repeat(40)).unwrap())
+            .unwrap();
+        storage::save(&path, &state).unwrap();
+        let prior_dir = directory.path().join("rounds/r-prior");
+        let guard = storage::try_lock(&prior_dir.join("runner")).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(request_commands::unmanage(&path, &key),
+            Err(request_commands::UnmanageError::RunnerLock { round, .. }) if round.as_str() == "r-prior"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let draft_dir = directory.path().join("rounds/r-draft");
+        assert!(draft_dir.join("draft.json").exists());
+        drop(guard);
+        // An earlier failed attempt may already have removed some round files.
+        fs::remove_dir_all(&prior_dir).unwrap();
+        let other_dir = directory.path().join("rounds/r-other");
+        fs::create_dir(&other_dir).unwrap();
+        fs::write(other_dir.join("keep"), b"other PR files").unwrap();
+        request_commands::unmanage(&path, &key).unwrap();
+        assert!(!draft_dir.exists());
+        let saved = storage::load(&path).unwrap();
+        assert!(saved.get(&key).is_none());
+        assert!(saved.get(&other).is_some());
+        assert!(saved.rounds().is_empty());
+        assert_eq!(fs::read(other_dir.join("keep")).unwrap(), b"other PR files");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unmanagement_never_follows_round_or_output_symlinks_and_rejects_a_linked_root() {
+        use std::os::unix::fs::symlink;
+        for linked in ["rounds", "rounds/r-draft", "rounds/r-draft/output"] {
+            let directory = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let path = fixture(directory.path());
+            let key = PrKey::new("owner/repo", 15).unwrap();
+            let mut state = storage::load(&path).unwrap();
+            state
+                .mark_round_cleaned(&RoundId::new("r-draft").unwrap())
+                .unwrap();
+            storage::save(&path, &state).unwrap();
+            let original = fs::read(&path).unwrap();
+            let source = directory.path().join(linked);
+            let target = outside.path().join("saved");
+            fs::rename(&source, &target).unwrap();
+            fs::write(target.join("keep"), b"outside files").unwrap();
+            symlink(&target, &source).unwrap();
+            let result = request_commands::unmanage(&path, &key);
+            if linked == "rounds" {
+                assert!(matches!(
+                    result,
+                    Err(request_commands::UnmanageError::Artifacts { .. })
+                ));
+                assert_eq!(fs::read(&path).unwrap(), original);
+            } else {
+                result.unwrap();
+                assert!(!directory.path().join("rounds/r-draft").exists());
+                assert!(storage::load(&path).unwrap().get(&key).is_none());
+            }
+            assert_eq!(fs::read(target.join("keep")).unwrap(), b"outside files");
+        }
     }
 
     #[test]

@@ -66,6 +66,8 @@ enum Command {
     },
     /// Withdraw the lead's authorization for a recorded PR.
     Revoke { repository: String, pr: u64 },
+    /// Permanently remove a PR and its saved local review history and files.
+    Unmanage { repository: String, pr: u64 },
     /// Show a recorded PR's current head and authorization.
     Status { repository: String, pr: u64 },
     /// Refresh inputs, check exact-head CI, and propose or validate a review model.
@@ -276,6 +278,12 @@ fn run(cli: Cli) -> Result<()> {
             let key = PrKey::new(repository, pr)?;
             request_commands::revoke(&state_file, &key)?;
             println!("{key}: {}.", Authorization::AwaitingLead);
+        }
+        Command::Unmanage { repository, pr } => {
+            let state_file = storage::resolve_path(state_file)?;
+            let key = PrKey::new(repository, pr)?;
+            request_commands::unmanage(&state_file, &key)?;
+            println!("{key}: management stopped; local review history and files deleted.");
         }
         Command::Status { repository, pr } => {
             let state_file = storage::resolve_path(state_file)?;

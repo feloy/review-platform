@@ -67,6 +67,13 @@ including after inputs change or before discussion is refreshed.
 Changing authorization can clear model validation.
 Authorization alone does not start a review.
 
+Use **Stop managing PR**, then **Confirm removal**, to permanently delete the request,
+its authorization and model validation, round history, publication receipts, private drafts, and logs.
+Published reviews remain on GitHub.
+Wait for active review or publication jobs to finish;
+recover pending sandbox cleanup or uncertain publication outcomes before removing a PR.
+Use `request` through the CLI to manage it again, then refresh and authorize the new inputs.
+
 Use **Prepare review** to refresh the request and inspect CI readiness for its exact head,
 the proposed model, and the configured model choices with their resolved agents.
 Select a model and use **Validate model** to confirm it for the prepared head and revision.
@@ -203,7 +210,7 @@ Private draft contents require the lead session token.
 
 `POST /api/session` exchanges the one-time code for a launch-scoped session token.
 `POST /api/requests/refresh`, `POST /api/requests/authorize`,
-`POST /api/requests/revoke`, `POST /api/requests/prepare`,
+`POST /api/requests/revoke`, `POST /api/requests/unmanage`, `POST /api/requests/prepare`,
 `POST /api/requests/validate-model`, `POST /api/requests/run`,
 `POST /api/drafts/ROUND_ID/reject`, and `POST /api/drafts/ROUND_ID/publish`
 require that token and a same-origin request;
@@ -216,6 +223,16 @@ Both return `changed` to report whether local state changed.
 Authorization conflicts return HTTP 409 and missing requests return HTTP 404.
 These decisions compare local state, using the same rules and locks as the CLI.
 Refresh from GitHub before inspecting the inputs for a decision.
+
+Management removal accepts `repository` and `number` at `POST /api/requests/unmanage`.
+It permanently deletes the request, its rounds, publication receipts, and saved draft and log files,
+then removes the PR from snapshots and SSE updates.
+It returns `changed: true` on removal.
+Missing requests, including ones already removed, return HTTP 404;
+active GUI jobs, active rounds, pending cleanup, and unresolved publication return HTTP 409.
+It requires no inspected head or revision and makes no GitHub calls.
+File deletion precedes the state update so failures leave the request available for retry.
+Some files may already be deleted after a failure; retry removal to finish.
 
 Preparation accepts `repository` and `number` and uses the effective `--config-file`.
 It returns the prepared `head_sha`, `revision`, `authorization`,
@@ -449,6 +466,16 @@ including when loaded from the JSON state file.
   This command records the decision; it does not start or consume a review round.
 - `revoke REPOSITORY PR` returns an existing request to `awaiting lead authorization` without changing its head.
   It reports an error if the request does not exist.
+- `unmanage REPOSITORY PR` removes a PR from `list` and the GUI,
+  permanently deleting its request, authorization, model validation, rounds,
+  publication receipts, private drafts, and logs.
+  Published reviews remain on GitHub.
+  Active rounds, pending sandbox cleanup, and unresolved publications must finish or be recovered first.
+  A missing or already removed PR reports an error.
+  If file deletion fails, retry removal to finish; some files may already be deleted.
+  To manage it again, use `request REPOSITORY PR HEAD_SHA`, then refresh and authorize it.
+  Re-adding advances the input revision and requires a fresh discussion baseline.
+  It starts with empty review history, including no confirmed-publication exclusions.
 - `prepare-review REPOSITORY PR` refreshes a recorded request's head and author discussion,
   reads check runs and commit statuses for that exact head,
   and proposes a configured review model using PR commit co-author trailers as hints.
@@ -605,10 +632,12 @@ An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
 
 The state file and configuration file have separate schema versions.
-The current state schema is version 6.
-Version 5 state is upgraded in memory and saved as version 6 on the next mutation;
+The current state schema is version 7.
+Versions 5 and 6 are upgraded in memory and saved as version 7 on the next mutation;
 older and future versions are rejected.
 Existing private draft artifacts are left unchanged.
+A global `request_revision_floor` prevents reuse of discarded input revisions
+without retaining removed PR identities or review history.
 
 For project-local files, pass both `--state-file .review-platform/state.json`
 and `--config-file .review-platform/config.json`.
@@ -620,7 +649,7 @@ Keep the state file private to the lead operator.
 Create a private JSON configuration before using `prepare-review`,
 `gateway status`, or `run-review`.
 The configuration file has schema version 6;
-the state file uses schema version 6.
+the state file uses schema version 7.
 Earlier configuration schemas are rejected during development;
 update the private file before running review commands.
 
@@ -872,6 +901,7 @@ use that value with `github-pr --since` when inspecting later changes.
 Its state is local and protected by a short exclusive lock for mutations.
 Commands involving one PR also hold a per-PR lock across publication,
 recovery, rejection, the `refresh` command, and round startup.
+Stopping management also uses the per-PR lock.
 Round startup releases that lock after saving the `Starting` round;
 the runner lock stays held through agent execution and sandbox cleanup.
 The round's later pre-dispatch recheck of GitHub inputs uses the short state lock

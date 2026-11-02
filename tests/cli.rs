@@ -96,6 +96,88 @@ fn config_path_uses_platform_config_independently_of_state_override() {
 }
 
 #[test]
+fn unmanage_removes_only_the_selected_pr_and_can_be_reversed_with_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
+    run(&state_file, &["request", "owner/repo", "43", HEAD_B]);
+    observe_empty_discussion(&state_file, HEAD_A);
+    run(
+        &state_file,
+        &[
+            "authorize",
+            "owner/repo",
+            "42",
+            "--scope",
+            "pr-cycle",
+            "--head",
+            HEAD_A,
+            "--revision",
+            "2",
+        ],
+    );
+    let output = run(&state_file, &["unmanage", "owner/repo", "42"]);
+    assert!(output.contains("management stopped"));
+    let before_repeat = std::fs::read(&state_file).unwrap();
+    assert!(
+        run_failing(&state_file, &["unmanage", "Owner/Repo", "42"])
+            .contains("review request not found")
+    );
+    assert_eq!(std::fs::read(&state_file).unwrap(), before_repeat);
+    let list = run(&state_file, &["list"]);
+    assert!(!list.contains("owner/repo#42"));
+    assert!(list.contains("owner/repo#43"));
+    assert!(
+        run_failing(&state_file, &["status", "owner/repo", "42"])
+            .contains("review request not found")
+    );
+    for args in [
+        vec!["unmanage", "owner/repo", "44"],
+        vec!["unmanage", "owner/repo", "0"],
+        vec!["unmanage", "invalid", "42"],
+    ] {
+        run_failing(&state_file, &args);
+        assert_eq!(std::fs::read(&state_file).unwrap(), before_repeat);
+    }
+    run(&state_file, &["unmanage", "owner/repo", "43"]);
+    assert!(run(&state_file, &["list"]).contains("No review requests"));
+    run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
+    let status = run(&state_file, &["status", "owner/repo", "42"]);
+    assert!(status.contains("revision: 3"));
+    assert!(status.contains("awaiting lead authorization"));
+    assert!(status.contains("not yet observed"));
+}
+
+#[test]
+fn unmanage_upgrades_supported_state_without_losing_existing_requests() {
+    for schema in [5, 6] {
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("state.json");
+        run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        legacy["schema_version"] = schema.into();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("request_revision_floor");
+        std::fs::write(&state_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        run(&state_file, &["unmanage", "owner/repo", "42"]);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"], 7);
+        assert_eq!(saved["requests"], serde_json::json!([]));
+        assert_eq!(saved["rounds"], serde_json::json!([]));
+        assert!(saved.get("unmanaged_requests").is_none());
+        assert!(
+            !serde_json::to_string(&saved)
+                .unwrap()
+                .contains("owner/repo")
+        );
+    }
+}
+
+#[test]
 fn local_authorization_survives_process_restart_and_new_head_clears_one_round() {
     let dir = tempfile::tempdir().unwrap();
     let state_file = dir.path().join("state.json");
@@ -825,7 +907,7 @@ fn new_state_uses_current_schema_and_older_schema_is_rejected() {
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 6);
+    assert_eq!(saved["schema_version"], 7);
     assert_eq!(saved["requests"][0]["revision"], 1);
     assert!(saved["requests"][0]["discussion"].is_null());
     assert!(saved["requests"][0]["model_validation"].is_null());
