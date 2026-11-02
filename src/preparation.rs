@@ -287,15 +287,15 @@ mod tests {
     fn config_json() -> serde_json::Value {
         let archive = |name: &str| std::env::temp_dir().join(name).to_str().unwrap().to_owned();
         serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "execution": crate::config::test_execution_json(),
             "models": [
                 {"id":"model-alpha", "coauthors":[{"name":"Model Alpha", "email":"model@example.com"}]},
                 {"id":"model-beta", "coauthors":[{"name":"Model Beta", "email":"model@example.com"}]}
             ],
             "agents": [
-                {"id":"claude", "models":["model-alpha", "model-beta"], "prompt":"Review.", "runner": crate::config::test_runner_json()},
-                {"id":"codex", "models":["model-beta"], "prompt":"Review carefully.", "runner": crate::config::test_runner_json()}
+                {"id":"claude", "models":["model-alpha", "model-beta"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner": crate::config::test_runner_json()},
+                {"id":"codex", "models":["model-beta"], "prompt_file": crate::config::test_prompt_file("careful.md"), "runner": crate::config::test_runner_json()}
             ],
             "repositories": [{
                 "name":"owner/repo",
@@ -309,7 +309,11 @@ mod tests {
     }
 
     fn config() -> ReviewConfig {
-        ReviewConfig::from_json(&serde_json::to_vec(&config_json()).unwrap()).unwrap()
+        ReviewConfig::from_json(
+            &serde_json::to_vec(&config_json()).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap()
     }
 
     fn authorized_state() -> (State, PrKey, HeadSha, InputRevision) {
@@ -439,7 +443,11 @@ mod tests {
         let mut other = raw["repositories"][0].clone();
         other["name"] = "other/repo".into();
         raw["repositories"].as_array_mut().unwrap().push(other);
-        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&raw).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let other_key = PrKey::new("other/repo", 42).unwrap();
         let other_models = config.review_models_for(&other_key).unwrap();
         assert!(matches!(
@@ -515,8 +523,13 @@ mod tests {
             );
         }
         let mut changed = config_json();
-        changed["agents"][0]["prompt"] = "A changed prompt.".into();
-        let changed = ReviewConfig::from_json(&serde_json::to_vec(&changed).unwrap()).unwrap();
+        changed["agents"][0]["prompt_file"] =
+            serde_json::json!(crate::config::test_prompt_file("changed.md"));
+        let changed = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let changed_review_models = changed.review_models_for(&key).unwrap();
         assert_eq!(
             prepare_for_head(
@@ -534,8 +547,11 @@ mod tests {
         let mut changed_archive = config_json();
         changed_archive["repositories"][0]["runners"][1]["vm_archive"]["sha256"] =
             "c".repeat(64).into();
-        let changed_archive =
-            ReviewConfig::from_json(&serde_json::to_vec(&changed_archive).unwrap()).unwrap();
+        let changed_archive = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed_archive).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let changed_review_models = changed_archive.review_models_for(&key).unwrap();
         assert_eq!(
             prepare_for_head(
@@ -552,8 +568,11 @@ mod tests {
         );
         let mut changed_runner = config_json();
         changed_runner["agents"][1]["models"] = serde_json::json!(["model-alpha", "model-beta"]);
-        let changed_runner =
-            ReviewConfig::from_json(&serde_json::to_vec(&changed_runner).unwrap()).unwrap();
+        let changed_runner = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed_runner).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let changed_review_models = changed_runner.review_models_for(&key).unwrap();
         assert_eq!(changed_review_models[0].agent().id().as_str(), "codex");
         assert_eq!(
@@ -571,8 +590,11 @@ mod tests {
         );
         let mut changed_execution = config_json();
         changed_execution["execution"]["cpu"] = "3".into();
-        let changed_execution =
-            ReviewConfig::from_json(&serde_json::to_vec(&changed_execution).unwrap()).unwrap();
+        let changed_execution = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed_execution).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         assert_eq!(
             prepare_for_head(
                 state.get(&key).unwrap(),

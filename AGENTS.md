@@ -72,6 +72,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Keep inspected inputs fixed in GUI decision forms;
   live updates must not silently retarget a pending lead decision.
   Bind GUI model validation to the inspected configuration and authorization too.
+  Include referenced prompt contents in configuration fingerprints and rechecks.
   Recheck persisted state even when the model choice appears unchanged.
 - A round requires green checks for the exact PR head being reviewed.
   Bind each draft to that head and the author comments seen; mark it stale on change.

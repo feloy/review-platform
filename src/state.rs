@@ -1411,12 +1411,12 @@ mod tests {
     #[test]
     fn model_validation_tracks_exact_inputs_and_is_cleared_by_changes() {
         let raw = serde_json::json!({
-            "schema_version":5,
+            "schema_version":6,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha", "coauthors":[]}],
             "agents":[
-                {"id":"claude", "models":["model-alpha"], "prompt":"Review.", "runner":crate::config::test_runner_json()},
-                {"id":"another-agent", "models":["model-alpha"], "prompt":"Review separately.", "runner":crate::config::test_runner_json()}
+                {"id":"claude", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()},
+                {"id":"another-agent", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("careful.md"), "runner":crate::config::test_runner_json()}
             ],
             "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
                 "agent":"claude",
@@ -1427,7 +1427,11 @@ mod tests {
                 }
             }]}]
         });
-        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&raw).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let review_models = config.review_models_for(&key()).unwrap();
         let current_head = head(HEAD_A);
         let verified = VerifiedArchive::for_test(review_models[0].archive());
@@ -1518,9 +1522,13 @@ mod tests {
             Err(ModelValidationError::ArchiveNotVerified)
         ));
         let mut changed_config = raw.clone();
-        changed_config["agents"][0]["prompt"] = "Review differently.".into();
-        let changed_config =
-            ReviewConfig::from_json(&serde_json::to_vec(&changed_config).unwrap()).unwrap();
+        changed_config["agents"][0]["prompt_file"] =
+            serde_json::json!(crate::config::test_prompt_file("changed.md"));
+        let changed_config = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed_config).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let changed_models = changed_config.review_models_for(&key()).unwrap();
         let changed_verification = VerifiedArchive::for_test(changed_models[0].archive());
         assert!(matches!(
@@ -1558,8 +1566,11 @@ mod tests {
         );
         let mut changed_runner = raw.clone();
         changed_runner["agents"][0]["runner"]["max_turns"] = 17.into();
-        let changed_runner =
-            ReviewConfig::from_json(&serde_json::to_vec(&changed_runner).unwrap()).unwrap();
+        let changed_runner = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed_runner).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         assert!(
             !state
                 .get(&key())
@@ -1570,8 +1581,11 @@ mod tests {
         );
         let mut changed_other_agent = raw.clone();
         changed_other_agent["agents"][1]["runner"]["max_turns"] = 17.into();
-        let changed_other_agent =
-            ReviewConfig::from_json(&serde_json::to_vec(&changed_other_agent).unwrap()).unwrap();
+        let changed_other_agent = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed_other_agent).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         assert!(
             state
                 .get(&key())
@@ -1583,8 +1597,11 @@ mod tests {
         let mut changed_metadata = raw.clone();
         changed_metadata["repositories"][0]["runners"][0]["vm_archive"]["config_sha256"] =
             "d".repeat(64).into();
-        let changed_metadata =
-            ReviewConfig::from_json(&serde_json::to_vec(&changed_metadata).unwrap()).unwrap();
+        let changed_metadata = ReviewConfig::from_json(
+            &serde_json::to_vec(&changed_metadata).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         assert!(
             !state
                 .get(&key())
@@ -1677,15 +1694,19 @@ mod tests {
     #[test]
     fn rejection_preserves_authorization_and_only_clears_matching_model_validation() {
         let raw = serde_json::json!({
-            "schema_version":5,
+            "schema_version":6,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha", "coauthors":[]}],
-            "agents":[{"id":"claude", "models":["model-alpha"], "prompt":"Review.", "runner":crate::config::test_runner_json()}],
+            "agents":[{"id":"claude", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()}],
             "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
                 "agent":"claude", "vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
             }]}]
         });
-        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&raw).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let choices = config.review_models_for(&key()).unwrap();
         let choice = &choices[0];
         let head = head(HEAD_A);
@@ -2123,15 +2144,19 @@ mod tests {
     #[test]
     fn revocation_between_creation_and_dispatch_prevents_consumption() {
         let raw = serde_json::json!({
-            "schema_version":5,
+            "schema_version":6,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha", "coauthors":[]}],
-            "agents":[{"id":"claude", "models":["model-alpha"], "prompt":"Review.", "runner":crate::config::test_runner_json()}],
+            "agents":[{"id":"claude", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()}],
             "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
                 "agent":"claude", "vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
             }]}]
         });
-        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&raw).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let choices = config.review_models_for(&key()).unwrap();
         let choice = &choices[0];
         let head = head(HEAD_A);

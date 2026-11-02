@@ -19,8 +19,12 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let config_path = std::env::var("REVIEW_PLATFORM_LIVE_VM_CONFIG")
-        .expect("set REVIEW_PLATFORM_LIVE_VM_CONFIG to a private schema 5 config");
-    let config = ReviewConfig::from_json(&fs::read(config_path).unwrap()).unwrap();
+        .expect("set REVIEW_PLATFORM_LIVE_VM_CONFIG to a private schema 6 config");
+    let config = ReviewConfig::from_json(
+        &fs::read(&config_path).unwrap(),
+        std::path::Path::new(&config_path),
+    )
+    .unwrap();
     let repository = std::env::var("REVIEW_PLATFORM_LIVE_VM_REPOSITORY")
         .unwrap_or_else(|_| "owner/repo".to_owned());
     let key = PrKey::new(repository, 1).unwrap();

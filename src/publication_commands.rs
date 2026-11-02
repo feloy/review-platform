@@ -431,7 +431,7 @@ pub fn publish(
     };
 
     let config_bytes = std::fs::read(config_path).map_err(PublishError::ReadConfig)?;
-    let config = ReviewConfig::from_json(&config_bytes)?;
+    let config = ReviewConfig::from_json(&config_bytes, config_path)?;
     let publisher = GithubPublisher::new(config.publisher_login())?;
     let identity = publisher.verify_identity()?;
     let reader = github::GithubClient::new()?;

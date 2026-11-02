@@ -1781,10 +1781,10 @@ mod tests {
             };
             let config = ReviewConfig::from_json(
                 &serde_json::to_vec(&serde_json::json!({
-                    "schema_version": 5,
+                    "schema_version": 6,
                     "execution": crate::config::test_execution_json(),
                     "models": [{"id": "model-alpha", "coauthors": []}],
-                    "agents": [{"id": "claude", "models": ["model-alpha"], "prompt": "Review", "runner":crate::config::test_runner_json()}],
+                    "agents": [{"id": "claude", "models": ["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()}],
                     "repositories": [{
                         "name": "owner/repo",
                         "review_models": ["model-alpha"],
@@ -1795,6 +1795,7 @@ mod tests {
                     }]
                 }))
                 .unwrap(),
+                std::path::Path::new("config.json"),
             )
             .unwrap();
             let mut state = State::default();

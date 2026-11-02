@@ -1,15 +1,12 @@
 //! Shared review execution, sandbox recovery, and private draft presentation.
 
-use crate::{
-    preparation_commands::{InspectedRules, configuration_hash},
-    storage,
-};
+use crate::{preparation_commands::InspectedRules, storage};
 use anyhow::{Context, Result};
 use review_platform::{
     Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome, State, StateError,
     agent::{self, AgentRunError},
     archive, checkout,
-    config::ReviewConfig,
+    config::{PromptHash, ReviewConfig},
     github::{self, PullRequestState},
     openshell::{OpenShell, OpenShellError, SandboxMounts},
     preparation::Readiness,
@@ -54,7 +51,7 @@ impl InspectedRun {
         &self,
         state: &State,
         key: &PrKey,
-        config_bytes: &[u8],
+        configuration_sha256: &PromptHash,
     ) -> Result<(), InspectionError> {
         let request = state
             .get(key)
@@ -62,7 +59,7 @@ impl InspectedRun {
         request.ensure_inspected(self.selection.head(), self.selection.revision())?;
         if request.authorization() == Authorization::AwaitingLead
             || request.authorization() != self.rules().authorization()
-            || &configuration_hash(config_bytes)? != self.rules().configuration_sha256()
+            || configuration_sha256 != self.rules().configuration_sha256()
         {
             return Err(InspectionError::RulesChanged);
         }
@@ -139,19 +136,12 @@ impl Drop for Cancellation {
 }
 
 fn load_config(override_path: Option<PathBuf>) -> Result<(PathBuf, ReviewConfig)> {
-    let (path, _, config) = load_config_snapshot(override_path)?;
-    Ok((path, config))
-}
-
-fn load_config_snapshot(
-    override_path: Option<PathBuf>,
-) -> Result<(PathBuf, Vec<u8>, ReviewConfig)> {
     let path = storage::resolve_config_path(override_path)?;
     let bytes = fs::read(&path)
         .with_context(|| format!("reading review configuration {}", path.display()))?;
-    let config = ReviewConfig::from_json(&bytes)
+    let config = ReviewConfig::from_json(&bytes, &path)
         .with_context(|| format!("validating review configuration {}", path.display()))?;
-    Ok((path, bytes, config))
+    Ok((path, config))
 }
 
 pub fn gateway_status(config_override: Option<PathBuf>) -> Result<()> {
@@ -264,9 +254,9 @@ struct RunInputs<'a> {
 }
 
 impl RunInputs<'_> {
-    fn check(&self, state: &State, config_bytes: &[u8]) -> Result<()> {
+    fn check(&self, state: &State, configuration_sha256: &PromptHash) -> Result<()> {
         if let Some(inspection) = self.inspection {
-            inspection.check(state, self.key, config_bytes)?;
+            inspection.check(state, self.key, configuration_sha256)?;
         }
         Ok(())
     }
@@ -291,12 +281,12 @@ fn execute_review(
     } else {
         storage::pr_lock(state_path, key)?
     };
-    let (_, config_bytes, config) = load_config_snapshot(Some(config_path.to_owned()))?;
+    let (_, config) = load_config(Some(config_path.to_owned()))?;
     let shell = OpenShell::new(config.execution());
     {
         let _lock = storage::lock(state_path)?;
         let state = storage::load(state_path)?;
-        inputs.check(&state, &config_bytes)?;
+        inputs.check(&state, config.hash())?;
         let request = state
             .get(key)
             .with_context(|| format!("review request not found: {key}"))?;
@@ -320,7 +310,7 @@ fn execute_review(
     let mut state = {
         let _lock = storage::lock(state_path)?;
         let mut state = storage::load(state_path)?;
-        inputs.check(&state, &fs::read(config_path)?)?;
+        inputs.check(&state, load_config(Some(config_path.to_owned()))?.1.hash())?;
         state
             .get(key)
             .with_context(|| format!("review request not found: {key}"))?
@@ -380,7 +370,10 @@ fn execute_review(
     {
         let _lock = storage::lock(state_path)?;
         let mut current = storage::load(state_path)?;
-        inputs.check(&current, &fs::read(config_path)?)?;
+        inputs.check(
+            &current,
+            load_config(Some(config_path.to_owned()))?.1.hash(),
+        )?;
         anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "review interrupted");
         current.begin_round(record.clone(), choice)?;
         storage::save(state_path, &current)?;
@@ -515,7 +508,7 @@ fn execute_review(
         {
             let _lock = storage::lock(state_path)?;
             let mut current = storage::load(state_path)?;
-            inputs.check(&current, &fs::read(config_path)?)?;
+            inputs.check(&current, load_config(Some(config_path.to_owned()))?.1.hash())?;
             current.dispatch_round(&id, now()?)?;
             storage::save(state_path, &current)?;
         }
@@ -896,7 +889,7 @@ fn now() -> Result<u64> {
 mod tests {
     use super::*;
 
-    fn inspected_run(config_bytes: &[u8]) -> InspectedRun {
+    fn inspected_run(configuration_sha256: &PromptHash) -> InspectedRun {
         InspectedRun::new(
             ModelSelection::new(
                 review_platform::config::ModelId::new("model-alpha").unwrap(),
@@ -905,7 +898,7 @@ mod tests {
             ),
             serde_json::from_value(serde_json::json!({
                 "authorization": "one_round",
-                "configuration_sha256": configuration_hash(config_bytes).unwrap(),
+                "configuration_sha256": configuration_sha256,
             }))
             .unwrap(),
         )
@@ -917,10 +910,15 @@ mod tests {
         let state_file = dir.path().join("state.json");
         let config_file = dir.path().join("config.json");
         let config = serde_json::to_vec(&serde_json::json!({
-            "schema_version":5,
+            "schema_version":6,
             "execution":{"openshell":dir.path().join("missing-openshell"), "gateway":"gateway", "workspace":"default", "driver":"vm", "github_provider":"github-ro"},
-            "models":[], "agents":[], "repositories":[],
+            "models":[{"id":"model-alpha", "coauthors":[]}],
+            "agents":[{"id":"claude", "models":["model-alpha"], "prompt_file":"review.md", "runner":{
+                "kind":"claude", "model_provider":"model-provider", "policy":dir.path().join("policy.yaml"), "policy_sha256":"b".repeat(64), "hold_command":["/bin/sleep","3600"]
+            }}],
+            "repositories":[],
         })).unwrap();
+        fs::write(dir.path().join("review.md"), "Original prompt.\n").unwrap();
         fs::write(&config_file, &config).unwrap();
         let key = PrKey::new("owner/repo", 15).unwrap();
         let fixture = serde_json::json!({
@@ -938,8 +936,15 @@ mod tests {
         });
         let state: State = serde_json::from_value(fixture.clone()).unwrap();
         state.validate().unwrap();
-        let inspected = inspected_run(&config);
-        inspected.check(&state, &key, &config).unwrap();
+        let configuration_sha256 = load_config(Some(config_file.clone()))
+            .unwrap()
+            .1
+            .hash()
+            .clone();
+        let inspected = inspected_run(&configuration_sha256);
+        inspected
+            .check(&state, &key, &configuration_sha256)
+            .unwrap();
         // These changes invalidate the same displayed model even when its name is unchanged.
         for field in [
             "head_sha",
@@ -947,12 +952,14 @@ mod tests {
             "authorization",
             "model_validation",
             "configuration",
+            "prompt_file",
             "selected_model",
             "missing_request",
         ] {
             let mut saved = fixture.clone();
-            let mut decision = inspected_run(&config);
+            let mut decision = inspected_run(&configuration_sha256);
             let mut current_config = config.clone();
+            fs::write(dir.path().join("review.md"), "Original prompt.\n").unwrap();
             match field {
                 "head_sha" => {
                     saved["requests"][0]["head_sha"] = "b".repeat(40).into();
@@ -970,6 +977,9 @@ mod tests {
                     saved["requests"][0]["model_validation"] = serde_json::Value::Null
                 }
                 "configuration" => current_config.push(b'\n'),
+                "prompt_file" => {
+                    fs::write(dir.path().join("review.md"), "Changed prompt.\n").unwrap();
+                }
                 "selected_model" => {
                     decision.selection = ModelSelection::new(
                         review_platform::config::ModelId::new("model-beta").unwrap(),
@@ -1008,7 +1018,7 @@ mod tests {
                     error,
                     InspectionError::State(StateError::RequestNotFound(_))
                 )),
-                "configuration" | "authorization" => {
+                "configuration" | "prompt_file" | "authorization" => {
                     assert!(matches!(error, InspectionError::RulesChanged))
                 }
                 "model_validation" | "selected_model" => {
@@ -1068,7 +1078,7 @@ mod tests {
         let config_path = dir.path().join("config.json");
         let id = RoundId::new("r-test").unwrap();
         let config = serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "execution": {
                 "openshell": dir.path().join("openshell"),
                 "gateway": "test-gateway",
@@ -1177,7 +1187,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let config = ReviewConfig::from_json(
             &serde_json::to_vec(&serde_json::json!({
-                "schema_version": 5,
+                "schema_version": 6,
                 "execution": {
                     "openshell": executable,
                     "gateway": "test-gateway",
@@ -1190,6 +1200,7 @@ mod tests {
                 "repositories": []
             }))
             .unwrap(),
+            &dir.path().join("config.json"),
         )
         .unwrap();
         let state = serde_json::json!({
