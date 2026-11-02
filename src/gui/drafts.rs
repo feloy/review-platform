@@ -48,6 +48,7 @@ pub(super) async fn publish(
             "The GUI server is shutting down.",
         ));
     }
+    let _start = state.job_start_guard(&request.key)?;
     state
         .publications
         .start(
@@ -288,6 +289,7 @@ mod tests {
             )),
             inspect_draft,
             publications,
+            removing: Mutex::new(Default::default()),
         }))
     }
 
@@ -637,6 +639,80 @@ mod tests {
             drop(app);
         });
         assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn unmanagement_clears_publication_jobs_before_readding_and_preserves_them_on_failure() {
+        let cases: [(publications::Publish, &str); 2] = [
+            (confirmed_publication, "published"),
+            (blocked_publication, "failed"),
+        ];
+        for (publish, status) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let path = fixture(directory.path());
+            let key = PrKey::new("owner/repo", 15).unwrap();
+            fs::write(path.with_extension("release"), b"").unwrap();
+            let jobs = Arc::new(publications::Publications::new(publish));
+            let app = app_with_publications(path.clone(), None, offline_inspect, jobs.clone());
+            runtime().block_on(async {
+                let response = app
+                    .clone()
+                    .oneshot(post_publication(&rejection_body(&path)))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                let summary = tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let summary = serde_json::to_value(jobs.summary(&key).unwrap()).unwrap();
+                        if summary["status"] == status {
+                            break summary;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                if status == "failed" {
+                    // Pending cleanup refuses removal without discarding the job.
+                    let response = app.clone().oneshot(post_unmanage()).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                    assert_eq!(
+                        serde_json::to_value(jobs.summary(&key).unwrap()).unwrap(),
+                        summary
+                    );
+                    let mut state = storage::load(&path).unwrap();
+                    state
+                        .mark_round_cleaned(&RoundId::new("r-draft").unwrap())
+                        .unwrap();
+                    storage::save(&path, &state).unwrap();
+                }
+                let response = app.clone().oneshot(post_unmanage()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(jobs.summary(&key).unwrap().is_none());
+                {
+                    let _pr_lock = storage::pr_lock(&path, &key).unwrap();
+                    let _lock = storage::lock(&path).unwrap();
+                    let mut state = storage::load(&path).unwrap();
+                    state
+                        .record_request(key.clone(), HeadSha::new("a".repeat(40)).unwrap())
+                        .unwrap();
+                    storage::save(&path, &state).unwrap();
+                }
+                let response = app
+                    .clone()
+                    .oneshot(get("/api/requests", None))
+                    .await
+                    .unwrap();
+                let snapshot: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap())
+                        .unwrap();
+                assert_eq!(snapshot["requests"].as_array().unwrap().len(), 1);
+                let request = &snapshot["requests"][0];
+                assert!(request["run"].is_null());
+                assert!(request["publication"].is_null());
+                assert!(request["latest_round"].is_null());
+            });
+        }
     }
 
     #[test]

@@ -227,6 +227,8 @@ Refresh from GitHub before inspecting the inputs for a decision.
 Management removal accepts `repository` and `number` at `POST /api/requests/unmanage`.
 It permanently deletes the request, its rounds, publication receipts, and saved draft and log files,
 then removes the PR from snapshots and SSE updates.
+Successful GUI removal also clears its in-memory review and publication job summaries.
+GUI job starts for that PR are rejected while removal is in progress.
 It returns `changed: true` on removal.
 Missing requests, including ones already removed, return HTTP 404;
 active GUI jobs, active rounds, pending cleanup, and unresolved publication return HTTP 409.
