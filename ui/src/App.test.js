@@ -131,6 +131,34 @@ afterEach(() => {
 });
 
 describe('review requests page', () => {
+  it.each([
+    [preparedRequest(), 'Check review readiness'],
+    [request({ latest_round: round({ status: 'awaiting_decision' }) }), 'Read private draft'],
+  ])('uses the same action label in the menu and next step for %o', async (snapshot, label) => {
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [snapshot]);
+    await screen.findAllByText(label);
+    await waitFor(() => expect(container.querySelector('.next-step md-filled-button')?.textContent.trim()).toBe(label));
+    const menu = container.querySelector('md-menu');
+    const item = within(menu).getByText(label).closest('md-menu-item');
+    expect(item.ariaLabel.startsWith(label)).toBe(true);
+  });
+
+  it('shows the sign-in link only when its target is available after session checking', async () => {
+    sessionStorage.setItem('review-platform-session', 'expired-token');
+    let finishSessionCheck;
+    vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finishSessionCheck = resolve; })));
+    render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    expect(screen.queryByRole('link', { name: 'Sign in to continue' })).toBeNull();
+    expect(document.getElementById('sign-in-heading')).toBeNull();
+    await act(() => finishSessionCheck({ ok: false, status: 401 }));
+    const link = await screen.findByRole('link', { name: 'Sign in to continue' });
+    expect(document.querySelector(link.getAttribute('href'))).toBe(screen.getByRole('heading', { name: 'Sign in for actions' }));
+  });
+
   it('offers public details in the row menu and closes it after selection or outside clicks', async () => {
     const user = userEvent.setup();
     const { container } = render(App);
@@ -193,7 +221,7 @@ describe('review requests page', () => {
     await waitFor(() => expect(trigger.ariaExpanded).toBe('true'));
     await waitFor(() => expect(document.activeElement).toBe(items[0]));
     await user.keyboard('{ArrowDown}{ArrowDown}');
-    expect(document.activeElement).toBe(items.find((item) => item.textContent.trim() === 'Prepare review'));
+    expect(document.activeElement).toBe(items.find((item) => item.textContent.trim() === 'Check review readiness'));
     await user.keyboard('{Escape}');
     await waitFor(() => expect(menu.open).toBe(false));
     expect(document.activeElement).toBe(trigger);
@@ -242,8 +270,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
-    await screen.findByText('Check review readiness');
-    await clickMaterialButton(user, container, 'Check review readiness');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Check review readiness');
     await screen.findByText('Start this review');
     await user.selectOptions(screen.getByLabelText('Review model for owner/repo #15'), 'model-beta');
     expect(screen.queryByText('Start this review')).toBeNull();
@@ -263,7 +291,7 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
-    await screen.findByText('Read private draft');
+    await screen.findAllByText('Read private draft');
     await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(/The publishing account is unavailable/);
     expect((await clickMaterialButton(user, container, 'Publish draft')).disabled).toBe(true);
@@ -573,8 +601,8 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findByText('Prepare review');
-    const prepare = await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    const prepare = await clickMaterialButton(user, container, 'Check review readiness');
     expect(prepare.disabled).toBe(true);
     expect(screen.getByText('Preparing…')).toBeTruthy();
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/prepare');
@@ -627,8 +655,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText(readiness_message)).toBeTruthy();
     expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(true);
     const button = await clickMaterialButton(user, container, 'Validate model');
@@ -649,8 +677,8 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('GitHub checks and review preparation updated.');
     await showSnapshot(source, [preparedRequest(change)]);
     const panel = screen.getByRole('region', { name: 'Review preparation for owner/repo #15' });
@@ -659,7 +687,7 @@ describe('review requests page', () => {
     const validate = await clickMaterialButton(user, container, 'Validate model');
     expect(validate.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await clickMaterialButton(user, container, 'Prepare review');
+    await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('GitHub checks and review preparation updated.');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(false);
@@ -674,8 +702,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('GitHub checks and review preparation updated.');
     await clickMaterialButton(user, container, 'Validate model');
     expect(await screen.findByText('Configuration changed. Prepare again.')).toBeTruthy();
@@ -696,8 +724,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText(/The proposed model matches a PR co-author hint/)).toBeTruthy();
     const model = screen.getByLabelText('Review model for owner/repo #15');
     expect(model.value).toBe('model-beta');
@@ -723,15 +751,15 @@ describe('review requests page', () => {
       .mockResolvedValueOnce({ ok: false, status: 401 }));
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText('Check review configuration.')).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'Review preparation for owner/repo #15' })).toBeNull();
-    await clickMaterialButton(user, container, 'Prepare review');
+    await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
-    await clickMaterialButton(user, container, 'Prepare review');
+    await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
-    expect(screen.queryByText('Prepare review')).toBeNull();
+    expect(screen.queryByText('Check review readiness')).toBeNull();
     expect(sessionStorage.getItem('review-platform-session')).toBeNull();
   });
 
@@ -747,8 +775,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-beta', agent: 'claude-alt' } })]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('ready to run');
     const model = screen.getByLabelText('Review model for owner/repo #15');
     await user.selectOptions(model, 'model-alpha');
@@ -777,6 +805,7 @@ describe('review requests page', () => {
     { validated_model: { model: 'model-beta', agent: 'claude-alt' } },
     { validated_model: null },
     { run: { status: 'starting' } }, { run: { status: 'running', round_id: 'r-example' } },
+    { publication: { status: 'active' } },
     { latest_round: round() },
     { latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) },
     { latest_round: round({ status: 'failed', cleanup_status: 'needs_attention' }) },
@@ -792,12 +821,15 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
     const original = preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } });
     await showSnapshot(source, [original]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('ready to run');
     expect(screen.getByText('Run review').disabled).toBe(false);
     await showSnapshot(source, [{ ...original, ...change }]);
     expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
+    if (change.publication?.status === 'active') {
+      expect(screen.getByText('Wait for publication to finish before starting another review.')).toBeTruthy();
+    }
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -812,8 +844,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
-    await screen.findByText('Prepare review');
-    await clickMaterialButton(user, container, 'Prepare review');
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('ready to run');
     await clickMaterialButton(user, container, 'Run review');
     expect(await screen.findByText('A review is already starting or running for this PR.')).toBeTruthy();
@@ -860,9 +892,9 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
-    await screen.findByText('View draft');
+    await screen.findAllByText('Read private draft');
     expect(screen.queryByText(draft().lead_advice)).toBeNull();
-    const view = await clickMaterialButton(user, container, 'View draft');
+    const view = await clickMaterialButton(user, container, 'Read private draft');
     expect(view.disabled).toBe(true);
     expect(fetchMock.mock.calls[1][0]).toBe('/api/drafts/r-example?repository=owner%2Frepo&number=15');
     expect(fetchMock.mock.calls[1][1]).toEqual({ method: 'GET', cache: 'no-store', headers: { Authorization: 'Bearer saved-token' } });
@@ -894,8 +926,8 @@ describe('review requests page', () => {
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness, lead_advice: '' }) }));
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     const panel = await screen.findByRole('region', { name: 'Private draft for owner/repo #15' });
     expect(within(panel).getByText(message)).toBeTruthy();
     expect(within(panel).getByText('No private lead advice.')).toBeTruthy();
@@ -913,8 +945,8 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     const updated = request({ head_sha: 'b'.repeat(40), revision: 2,
       latest_round: round({ id: 'r-new', head_sha: 'b'.repeat(40), revision: 2, status: 'awaiting_decision' }) });
     await showSnapshot(source, [updated]);
@@ -925,7 +957,7 @@ describe('review requests page', () => {
     expect(within(panel).getByRole('region', { name: 'Review comments' }).textContent).toBe(draft().publication_body);
     expect(within(panel).getByText(/This view keeps the draft you opened/)).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await clickMaterialButton(user, container, 'View draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await waitFor(() => expect(screen.getByRole('region', { name: 'Review comments' }).textContent).toBe('New draft'));
     expect(fetchMock.mock.calls[2][0]).toContain('/api/drafts/r-new?');
     expect(screen.queryByText(/This view keeps the draft you opened/)).toBeNull();
@@ -943,8 +975,8 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
     const readyRound = round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' });
     await showSnapshot(source, [request({ authorization: 'pr_cycle', latest_round: readyRound })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     await clickMaterialButton(user, container, 'Reject draft');
     const confirmation = screen.getByRole('region', { name: 'Confirm draft rejection' });
@@ -994,8 +1026,8 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
     const readyRound = round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' });
     await showSnapshot(source, [request({ latest_round: readyRound })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     await clickMaterialButton(user, container, 'Publish draft');
     const confirmation = screen.getByRole('region', { name: 'Confirm draft publication' });
@@ -1027,6 +1059,9 @@ describe('review requests page', () => {
     } }, publication: { round_id: 'r-example', status: 'published', freshness: 'stale' } })]);
     const link = screen.getByRole('link', { name: 'GitHub review 71' });
     expect(link.getAttribute('href')).toBe('https://github.com/owner/repo/pull/15#pullrequestreview-71');
+    const receiptNotes = [...container.querySelectorAll('.action-note')].filter((note) => note.textContent.includes('@publisher'));
+    expect(receiptNotes).toHaveLength(1);
+    expect(receiptNotes[0].textContent).toContain('tied to commit');
     expect(screen.getByText(/PR inputs changed after publication/)).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -1039,8 +1074,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     expect((await clickMaterialButton(user, container, 'Publish draft')).disabled).toBe(true);
     expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(false);
@@ -1060,8 +1095,8 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
     const initial = request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) });
     await showSnapshot(source, [initial]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     await clickMaterialButton(user, container, 'Publish draft');
     await showSnapshot(source, [{ ...initial, ...change }]);
@@ -1080,10 +1115,10 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status, cleanup_pending: false, cleanup_status: 'complete' }) })]);
-    await screen.findByText('View draft');
+    await screen.findAllByText('Read private draft');
     expect(screen.getByText(/Publication needs recovery/)).toBeTruthy();
     expect(screen.getByText(/review-platform recover-publication owner\/repo 15 --round r-example/)).toBeTruthy();
-    await clickMaterialButton(user, container, 'View draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     expect(screen.queryByText('Publish draft')).toBeNull();
     expect(screen.queryByText('Reject draft')).toBeNull();
@@ -1116,8 +1151,8 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending, cleanup_status }) })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     expect((await clickMaterialButton(user, container, 'Publish draft')).disabled).toBe(true);
     expect((await clickMaterialButton(user, container, 'Reject draft')).disabled).toBe(true);
@@ -1140,8 +1175,8 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
     const readyRound = round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' });
     await showSnapshot(source, [request({ latest_round: readyRound })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     await clickMaterialButton(user, container, 'Reject draft');
     await showSnapshot(source, [request({ latest_round: { ...readyRound, ...change } })]);
@@ -1167,8 +1202,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     await clickMaterialButton(user, container, 'Reject draft');
     await clickMaterialButton(user, container, 'Confirm rejection');
@@ -1194,14 +1229,14 @@ describe('review requests page', () => {
       .mockRejectedValueOnce(new Error('offline')));
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
-    await clickMaterialButton(user, container, 'View draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     expect(await screen.findByText('Could not verify the private draft.')).toBeTruthy();
     expect(screen.queryByText(draft().lead_advice)).toBeNull();
     expect(screen.queryByRole('region', { name: 'Private draft for owner/repo #15' })).toBeNull();
-    await clickMaterialButton(user, container, 'View draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
   });
 
@@ -1213,21 +1248,21 @@ describe('review requests page', () => {
       .mockResolvedValueOnce({ ok: false, status: 401 }));
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
-    await screen.findByText('View draft');
-    await clickMaterialButton(user, container, 'View draft');
+    await screen.findAllByText('Read private draft');
+    await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     await clickMaterialButton(user, container, 'Refresh from GitHub');
     await screen.findByText(/Your session ended/);
     expect(screen.queryByRole('region', { name: 'Private draft for owner/repo #15' })).toBeNull();
     expect(screen.queryByText(draft().lead_advice)).toBeNull();
-    expect(screen.queryByText('View draft')).toBeNull();
+    expect(screen.queryByText('Read private draft')).toBeNull();
     expect(sessionStorage.getItem('review-platform-session')).toBeNull();
   });
 
   it('offers draft inspection only to signed-in leads and only for completed drafts', async () => {
     const { unmount } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
-    expect(screen.queryByText('View draft')).toBeNull();
+    expect(screen.queryByText('Read private draft')).toBeNull();
     unmount();
     sessionStorage.setItem('review-platform-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
@@ -1236,11 +1271,11 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[1];
     for (const status of ['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']) {
       await showSnapshot(source, [request({ latest_round: round({ status }) })]);
-      expect(await screen.findByText('View draft')).toBeTruthy();
+      expect(await screen.findAllByText('Read private draft')).toBeTruthy();
     }
     for (const status of ['starting', 'running', 'failed', 'interrupted']) {
       await showSnapshot(source, [request({ latest_round: round({ status }) })]);
-      expect(screen.queryByText('View draft')).toBeNull();
+      expect(screen.queryByText('Read private draft')).toBeNull();
     }
     expect(fetchMock).toHaveBeenCalledOnce();
   });

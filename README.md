@@ -67,6 +67,8 @@ Preparation also shows the check result for that commit.
 The page's local update time describes browser updates, separately from GitHub checks.
 GitHub display context lasts for the current server launch, survives browser reloads,
 and is discarded when recorded inputs change or the PR is removed.
+If caching that context fails, the successful refresh or preparation still completes;
+the server logs a local diagnostic and omits the unavailable display context.
 After restarting the GUI, refresh or prepare a PR to load its display context again.
 Review start and finish times and confirmed publication times come from saved records.
 
@@ -93,7 +95,7 @@ Wait for active review or publication jobs to finish;
 recover pending sandbox cleanup or uncertain publication outcomes before removing a PR.
 Use `request` through the CLI to manage it again, then refresh and authorize the new inputs.
 
-Use **Prepare review** to refresh the request and inspect CI readiness for its exact head,
+Use **Check review readiness** to refresh the request and inspect CI readiness for its exact head,
 the proposed model, and the configured model choices with their resolved agents.
 Select a model and use **Validate model** to confirm it for the prepared head and revision.
 The confirmed selection shows **Model validated**;
@@ -116,7 +118,7 @@ Live updates show startup, the running round, private draft readiness, failures,
 Startup failures also appear when no round has been recorded yet.
 Duplicate GUI runs for the same PR are rejected while a job is active.
 
-Use **View draft** to inspect the latest completed draft after signing in.
+Use **Read private draft** to inspect the latest completed draft after signing in.
 It shows the exact GitHub publication body and its hash, private lead advice,
 the reviewed head and revision, model, agent, verdict, and decision status.
 Draft contents are fetched only when requested and rendered as plain text.
@@ -143,6 +145,7 @@ Use **Publish draft** after cleanup when the opened draft has verified fresh inp
 The draft shows its destination PR and commit and the configured publishing account.
 If that account is unavailable, configure `publisher_login` and reopen the draft.
 Publication rejects a changed publishing account rather than posting under a different one.
+The publication API requires the inspected account; account comparison ignores letter case.
 Inspect the fixed round and publication body hash, then choose **Confirm publication**.
 The server re-verifies the exact saved body, configured publisher identity,
 live PR head, open state, and author discussion before posting one comment review
@@ -314,7 +317,8 @@ failed draft verification returns HTTP 422.
 Watch request snapshots or SSE for the recorded decision.
 
 `POST /api/drafts/ROUND_ID/publish` accepts the same `key` and inspected `body_hash`.
-The GUI also supplies the inspected `publisher_login` so startup can reject account changes.
+It also requires the inspected `publisher_login` so startup can reject account changes.
+Missing or null accounts return HTTP 422; account comparison ignores letter case.
 It returns HTTP 202 with `accepted: true` when the server owns the publication job,
 or HTTP 409 when a GUI publication for the PR is already active.
 Acceptance acknowledges scheduling; watch request snapshots or SSE for the outcome.

@@ -614,18 +614,10 @@ async fn refresh_request(
         ));
     }
     let response = tokio::task::spawn_blocking(move || {
-        let response = (state.refresh)(&state.state_file, &key).map_err(refresh_error)?;
-        if let Some(context) = &response.context {
-            state
-                .contexts
-                .record(&state.state_file, &key, context)
-                .map_err(|_| {
-                    api_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Could not save the GitHub display context. Refresh again.",
-                    )
-                })?;
-        }
+        let mut response = (state.refresh)(&state.state_file, &key).map_err(refresh_error)?;
+        response.context = response
+            .context
+            .and_then(|context| state.contexts.record(&state.state_file, &key, context));
         Ok(response)
     })
     .await
@@ -815,16 +807,16 @@ async fn run_preparation(
     rules: Option<InspectedRules>,
 ) -> Result<Json<PreparationResponse>, (StatusCode, Json<ApiError>)> {
     tokio::task::spawn_blocking(move || {
-        let response = (state.prepare)(
+        let mut response = (state.prepare)(
             &state.state_file,
             &state.config_file,
             &key,
             selection.as_ref(),
             rules.as_ref(),
         )?;
-        if let Some(context) = &response.context {
-            state.contexts.record(&state.state_file, &key, context)?;
-        }
+        response.context = response
+            .context
+            .and_then(|context| state.contexts.record(&state.state_file, &key, context));
         Ok(response)
     })
     .await
@@ -1652,7 +1644,7 @@ mod tests {
                 (
                     "/api/drafts/r-gui/publish",
                     serde_json::json!({
-                        "key": key, "body_hash": "a".repeat(64),
+                        "key": key, "body_hash": "a".repeat(64), "publisher_login": "publisher",
                     }),
                 ),
                 (
