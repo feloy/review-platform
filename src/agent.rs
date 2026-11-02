@@ -411,10 +411,10 @@ mod tests {
 
     fn test_config_json() -> serde_json::Value {
         serde_json::json!({
-            "schema_version":5,
+            "schema_version":6,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha","coauthors":[]}],
-            "agents":[{"id":"claude","models":["model-alpha"],"prompt":"Review.","runner":crate::config::test_runner_json()}],
+            "agents":[{"id":"claude","models":["model-alpha"],"prompt_file": crate::config::test_prompt_file("review.md"),"runner":crate::config::test_runner_json()}],
             "repositories":[{"name":"owner/repo","review_models":["model-alpha"],"runners":[{
                 "agent":"claude","vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"),"sha256":"a".repeat(64),"config_sha256":"c".repeat(64)}
             }]}]
@@ -442,8 +442,11 @@ mod tests {
 
     #[test]
     fn claude_permissions_match_trusted_tool_guidance() {
-        let config =
-            ReviewConfig::from_json(&serde_json::to_vec(&test_config_json()).unwrap()).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&test_config_json()).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let round = test_round(&config);
         let command = claude_command(
             "/usr/bin/claude",
@@ -539,7 +542,11 @@ mod tests {
         let mut raw = test_config_json();
         raw["execution"]["openshell"] = executable.to_str().unwrap().into();
         raw["execution"]["timeout_seconds"] = 1.into();
-        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&raw).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let record = test_round(&config);
         let key = record.key();
         let choice = config.review_models_for(key).unwrap();

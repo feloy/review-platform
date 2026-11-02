@@ -13,7 +13,6 @@ use review_platform::{
     round::{self, ModelSelection, RoundError},
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     error::Error,
     fs,
@@ -148,15 +147,12 @@ impl PreparedReview {
     }
 }
 
-fn read_config(path: &Path) -> Result<Vec<u8>, PrepareError> {
-    fs::read(path).map_err(|source| PrepareError::ReadConfig {
+fn read_config(path: &Path) -> Result<ReviewConfig, PrepareError> {
+    let bytes = fs::read(path).map_err(|source| PrepareError::ReadConfig {
         path: path.to_owned(),
         source,
-    })
-}
-
-pub(crate) fn configuration_hash(bytes: &[u8]) -> Result<PromptHash, ConfigError> {
-    PromptHash::new(format!("{:x}", Sha256::digest(bytes)))
+    })?;
+    Ok(ReviewConfig::from_json(&bytes, path)?)
 }
 
 fn check_rules(
@@ -182,9 +178,8 @@ pub fn prepare(
     inspected_rules: Option<&InspectedRules>,
 ) -> Result<PreparedReview, PrepareError> {
     let _pr_lock = storage::pr_lock(state_file, key)?;
-    let config_bytes = read_config(config_file)?;
-    let config = ReviewConfig::from_json(&config_bytes)?;
-    let configuration_sha256 = configuration_hash(&config_bytes)?;
+    let config = read_config(config_file)?;
+    let configuration_sha256 = config.hash().clone();
     let initial = storage::load(state_file)?;
     let initial_request = initial
         .get(key)
@@ -215,7 +210,7 @@ pub fn prepare(
     }
     drop(lock);
     let report = round::prepare(&client, &mut state, refreshed, selection)?;
-    if read_config(config_file)? != config_bytes {
+    if read_config(config_file)?.hash() != config.hash() {
         return Err(PrepareError::StaleRules);
     }
     if let Some(selected) = selection {
@@ -229,7 +224,7 @@ pub fn prepare(
             &configuration_sha256,
             inspected_rules,
         )?;
-        if read_config(config_file)? != config_bytes {
+        if read_config(config_file)?.hash() != config.hash() {
             return Err(PrepareError::StaleRules);
         }
         if current.validate_model(
@@ -299,20 +294,21 @@ mod tests {
             .unwrap();
         storage::save(&state_file, &state).unwrap();
         let config = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 5,
+            "schema_version": 6,
             "execution": {"openshell": directory.join("openshell"), "gateway":"gateway", "workspace":"default", "driver":"vm", "github_provider":"github-ro"},
             "models": [{"id":"model-alpha", "coauthors":[]}],
-            "agents": [{"id":"claude", "models":["model-alpha"], "prompt":"Review", "runner": {
+            "agents": [{"id":"claude", "models":["model-alpha"], "prompt_file":"review.md", "runner": {
                 "kind":"claude", "model_provider":"model-provider", "policy": directory.join("policy.yaml"), "policy_sha256":"b".repeat(64), "hold_command":["/bin/sleep","3600"]
             }}],
             "repositories": [{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
                 "agent":"claude", "vm_archive":{"path": directory.join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
             }]}],
         })).unwrap();
+        fs::write(directory.join("review.md"), "Review the pull request.\n").unwrap();
         fs::write(&config_file, &config).unwrap();
         let rules = InspectedRules {
             authorization: Authorization::OneRound,
-            configuration_sha256: configuration_hash(&config).unwrap(),
+            configuration_sha256: read_config(&config_file).unwrap().hash().clone(),
         };
         (state_file, config_file, key, head, rules)
     }
@@ -379,6 +375,36 @@ mod tests {
             assert!(matches!(error, PrepareError::StaleRules));
         }
         assert_eq!(fs::read(state_file).unwrap(), original);
+    }
+
+    #[test]
+    fn gui_validation_rejects_prompt_edits_before_fetching_github() {
+        let directory = tempfile::tempdir().unwrap();
+        let (state_file, config_file, key, head, rules) = fixture(directory.path());
+        let original_state = fs::read(&state_file).unwrap();
+        let original_config = fs::read(&config_file).unwrap();
+        fs::write(
+            directory.path().join("review.md"),
+            "Changed instructions.\n",
+        )
+        .unwrap();
+        let selection = ModelSelection::new(
+            ModelId::new("model-alpha").unwrap(),
+            head,
+            InputRevision::new(2).unwrap(),
+        );
+        let error = prepare(
+            &state_file,
+            &config_file,
+            &key,
+            Some(&selection),
+            Some(&rules),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(error, PrepareError::StaleRules));
+        assert_eq!(fs::read(&state_file).unwrap(), original_state);
+        assert_eq!(fs::read(&config_file).unwrap(), original_config);
     }
 
     #[test]

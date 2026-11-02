@@ -646,10 +646,10 @@ mod tests {
         let policy = dir.path().join("policy.yaml");
         fs::write(&policy, b"policy: test\n").unwrap();
         let mut raw = serde_json::json!({
-            "schema_version":5,
+            "schema_version":6,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha","coauthors":[]}],
-            "agents":[{"id":"claude","models":["model-alpha"],"prompt":"Review.","runner":crate::config::test_runner_json()}],
+            "agents":[{"id":"claude","models":["model-alpha"],"prompt_file": crate::config::test_prompt_file("review.md"),"runner":crate::config::test_runner_json()}],
             "repositories":[{"name":"owner/repo","review_models":["model-alpha"],"runners":[{
                 "agent":"claude","vm_archive":{"path":"/tmp/reviewer.tar","sha256":"a".repeat(64),"config_sha256":"c".repeat(64)}
             }]}]
@@ -658,7 +658,11 @@ mod tests {
         raw["agents"][0]["runner"]["policy"] = policy.to_str().unwrap().into();
         raw["agents"][0]["runner"]["policy_sha256"] =
             format!("{:x}", Sha256::digest(b"policy: test\n")).into();
-        let config = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let config = ReviewConfig::from_json(
+            &serde_json::to_vec(&raw).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let shell = OpenShell::new(config.execution());
         shell.preflight_gateway().unwrap();
         shell.preflight_runner(config.agents()[0].runner()).unwrap();
@@ -757,8 +761,11 @@ mod tests {
         );
         let mut conflicting = raw.clone();
         conflicting["agents"][0]["runner"]["environment"] = serde_json::json!({"PATH":"/bin"});
-        let conflicting =
-            ReviewConfig::from_json(&serde_json::to_vec(&conflicting).unwrap()).unwrap();
+        let conflicting = ReviewConfig::from_json(
+            &serde_json::to_vec(&conflicting).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let conflicting_choice = conflicting.review_models_for(record.key()).unwrap();
         assert!(matches!(
             OpenShell::new(conflicting.execution()).create_args(
@@ -782,7 +789,11 @@ mod tests {
             assert!(line.contains("--gateway test-gateway --workspace default"));
         }
         raw["execution"]["driver"] = "podman".into();
-        let podman = ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let podman = ReviewConfig::from_json(
+            &serde_json::to_vec(&raw).unwrap(),
+            std::path::Path::new("config.json"),
+        )
+        .unwrap();
         let before = fs::read(dir.path().join("calls.txt")).unwrap();
         assert!(matches!(
             OpenShell::new(podman.execution()).preflight_gateway(),
@@ -790,6 +801,12 @@ mod tests {
         ));
         assert_eq!(fs::read(dir.path().join("calls.txt")).unwrap(), before);
         raw["execution"]["driver"] = "unknown".into();
-        assert!(ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap()).is_err());
+        assert!(
+            ReviewConfig::from_json(
+                &serde_json::to_vec(&raw).unwrap(),
+                std::path::Path::new("config.json")
+            )
+            .is_err()
+        );
     }
 }
