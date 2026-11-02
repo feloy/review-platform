@@ -19,6 +19,9 @@
   let signingIn = $state(false);
   let signInError = $state('');
   let requestActions = $state({});
+  let bulkRefresh = $state({ pending: false, message: '', error: false });
+  const refreshableRequests = $derived(requests.filter((request) => request.context?.state !== 'closed'));
+  const requestActionPending = $derived(Object.values(requestActions).some((action) => action.pending));
 
   const sessionKey = 'review-platform-session';
 
@@ -120,6 +123,34 @@
         return change + (result.authorization_cleared ? ' Inspect the changes and allow the review again; permission for one review was cleared.' : result.changed ? ' Check readiness again before starting a review.' : '');
       },
       'Could not refresh from GitHub.');
+  }
+
+  async function refreshAllFromGithub() {
+    if (!sessionToken || !hasSnapshot || bulkRefresh.pending || requestActionPending || !refreshableRequests.length) return;
+    const queued = refreshableRequests.map(({ repository, number }) => ({ repository, number }));
+    let refreshed = 0;
+    let failed = 0;
+    let skipped = 0;
+    bulkRefresh = { pending: true, message: `Refreshing 0 of ${queued.length} PRs…`, error: false };
+    try {
+      for (const key of queued) {
+        if (!sessionToken) break;
+        const requestId = key.repository + '#' + key.number;
+        const current = requests.find((request) => request.repository === key.repository && request.number === key.number);
+        if (!current || current.context?.state === 'closed' || requestActions[requestId]?.pending) skipped += 1;
+        else if (await refreshFromGithub(current, requestId)) refreshed += 1;
+        else failed += 1;
+        bulkRefresh.message = `Refreshing ${refreshed + failed + skipped} of ${queued.length} PRs…`;
+      }
+      const count = queued.length === 1 ? 'PR' : 'PRs';
+      bulkRefresh.message = `Refreshed ${refreshed} of ${queued.length} ${count}.`
+        + (failed ? ` ${failed} could not be refreshed; see the PR rows for details.` : '')
+        + (skipped ? ` Skipped ${skipped} busy, removed, or closed ${skipped === 1 ? 'PR' : 'PRs'}.` : '')
+        + (!sessionToken ? ' Refresh stopped because your session ended. Sign in to continue.' : '');
+      bulkRefresh.error = failed > 0 || !sessionToken;
+    } finally {
+      bulkRefresh.pending = false;
+    }
   }
 
   function authorize(request, requestId, scope) {
@@ -272,6 +303,23 @@
       {#if signInError}<p class="action-error" role="alert">{signInError}</p>{/if}
     </section>
   {/if}
+
+  <div class="queue-toolbar">
+    <div class="refresh-all-feedback">
+      <p class="secondary">Refresh recorded PRs that are open or haven’t been checked yet.</p>
+      {#if bulkRefresh.message}
+        <p class="bulk-refresh-status" class:action-error={bulkRefresh.error} role={bulkRefresh.error ? 'alert' : 'status'}>{bulkRefresh.message}</p>
+      {:else if !checkingSession && !sessionToken}
+        <p class="secondary">Sign in to refresh PRs.</p>
+      {/if}
+    </div>
+    <!-- Material Web handles keyboard activation inside its button shadow DOM. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <md-filled-button type="button" disabled={!sessionToken || !hasSnapshot || bulkRefresh.pending || requestActionPending || !refreshableRequests.length}
+      onclick={refreshAllFromGithub}>
+      {bulkRefresh.pending ? 'Refreshing PRs…' : 'Refresh all open PRs'}
+    </md-filled-button>
+  </div>
 
   <section class="queue" aria-labelledby="queue-heading">
     <div class="queue-heading">

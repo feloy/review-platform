@@ -75,6 +75,11 @@ Review start and finish times and confirmed publication times come from saved re
 After signing in, use **Refresh from GitHub** on a request to fetch its current head
 and author discussion, using the same rules as the `refresh` command.
 Changed inputs may clear one-round authorization and model validation.
+Use **Refresh all open PRs** above the list to refresh all recorded PRs that are open
+or whose GitHub state has not been loaded yet.
+It skips known closed PRs and refreshes one request at a time, showing progress and a summary.
+Individual failures appear beside their PR and do not prevent the remaining refreshes;
+an expired session stops the batch until you sign in again.
 
 Use **Manage authorization** to authorize one round or the PR cycle
 after inspecting the PR on GitHub and the displayed head and input revision.
