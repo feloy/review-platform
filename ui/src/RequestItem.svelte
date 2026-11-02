@@ -3,21 +3,31 @@
   import ReviewProgress from './ReviewProgress.svelte';
   import DraftPanel from './DraftPanel.svelte';
 
-  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
+  let { request, signedIn, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
   let inspected = $state(null);
   let preparation = $state(null);
   let preparationInvalid = $state(false);
   let draft = $state(null);
+  let confirmingRemoval = $state(false);
   const hasDraft = $derived(['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']
     .includes(request.latest_round?.status));
-  $effect(() => { if (!signedIn) draft = null; });
+  const managementBlocked = $derived(
+    ['starting', 'running'].includes(request.run?.status) || request.publication?.status === 'active' ||
+    request.latest_round?.cleanup_pending ||
+    ['starting', 'running', 'publishing', 'publication_unknown'].includes(request.latest_round?.status));
+  $effect(() => { if (!signedIn) { draft = null; confirmingRemoval = false; } });
   const inputsChanged = $derived(inspected &&
     (inspected.head_sha !== request.head_sha || inspected.revision !== request.revision));
 
   async function authorize(scope) {
     if (!inspected || inputsChanged || action?.pending) return;
     if (await onAuthorize(inspected, scope)) inspected = null;
+  }
+
+  async function removeRequest() {
+    if (action?.pending || managementBlocked) return;
+    if (await onUnmanage()) confirmingRemoval = false;
   }
 
   async function prepareReview() {
@@ -153,9 +163,31 @@
           {action?.pending && action.operation === 'revoke' ? 'Revoking…' : 'Revoke authorization'}
         </md-text-button>
       {/if}
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-text-button disabled={action?.pending || managementBlocked}
+        aria-label={`Stop managing ${request.repository} #${request.number}`}
+        title={managementBlocked
+          ? 'Finish or recover the active review, cleanup, or publication before stopping management.'
+          : 'Permanently delete this PR and its local drafts, logs, and review history.'}
+        onclick={() => confirmingRemoval = true}>
+        {action?.pending && action.operation === 'unmanage' ? 'Stopping management…' : 'Stop managing PR'}
+      </md-text-button>
     {/if}
   </div>
   {#if signedIn}
+    {#if confirmingRemoval}
+      <section class="authorization-panel" aria-label={`Stop managing ${request.repository} #${request.number}`}>
+        <h3>Stop managing PR</h3>
+        <p>Permanently remove {request.repository} #{request.number} and all its local drafts, logs, and review history.</p>
+        <p>This cannot be undone. Published reviews remain on GitHub.</p>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-filled-button disabled={action?.pending || managementBlocked} onclick={removeRequest}>
+          Confirm removal
+        </md-filled-button>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-text-button disabled={action?.pending} onclick={() => confirmingRemoval = false}>Cancel removal</md-text-button>
+      </section>
+    {/if}
     <p class="action-note">Changed inputs can clear one-round authorization and model validation.</p>
     {#if !request.discussion}
       <p class="action-note">Refresh from GitHub before authorizing this request.</p>

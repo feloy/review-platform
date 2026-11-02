@@ -87,6 +87,12 @@ impl Runs {
             .cloned())
     }
 
+    pub fn is_active(&self, key: &PrKey) -> Result<bool, StartError> {
+        Ok(self
+            .summary(key)?
+            .is_some_and(|job| matches!(job.status, RunStatus::Starting | RunStatus::Running)))
+    }
+
     pub fn start(
         self: &Arc<Self>,
         state_file: PathBuf,

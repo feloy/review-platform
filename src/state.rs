@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Error)]
 pub enum ModelValidationError {
@@ -192,6 +192,8 @@ impl ReviewRequest {
 pub struct State {
     schema_version: u32,
     requests: Vec<ReviewRequest>,
+    #[serde(default)]
+    request_revision_floor: u64,
     rounds: Vec<RoundRecord>,
 }
 
@@ -200,15 +202,16 @@ impl Default for State {
         Self {
             schema_version: SCHEMA_VERSION,
             requests: Vec::new(),
+            request_revision_floor: 0,
             rounds: Vec::new(),
         }
     }
 }
 
 impl State {
-    /// Upgrade the immediately preceding state format; draft artifacts are untouched.
-    pub fn migrate_v5(&mut self) -> Result<bool, StateError> {
-        if self.schema_version == 5 {
+    /// Retain existing requests and drafts when upgrading supported local state.
+    pub fn migrate_legacy(&mut self) -> Result<bool, StateError> {
+        if matches!(self.schema_version, 5 | 6) {
             self.schema_version = SCHEMA_VERSION;
             self.validate()?;
             return Ok(true);
@@ -260,7 +263,7 @@ impl State {
             if !round_ids.insert(round.id()) {
                 return Err(StateError::InvalidRound(round.id().to_string()));
             }
-            if self.get(round.key()).is_none() {
+            if !seen.contains(round.key()) {
                 return Err(StateError::InvalidRound(round.id().to_string()));
             }
             if round.blocks_new_round() && !blocking_keys.insert(round.key()) {
@@ -275,6 +278,7 @@ impl State {
         Ok(())
     }
 
+    /// Requests currently managed by the operator.
     pub fn requests(&self) -> &[ReviewRequest] {
         &self.requests
     }
@@ -680,6 +684,7 @@ impl State {
             .ok_or_else(|| RoundStateError::NotFound(id.clone()))
     }
 
+    /// Look up a managed request, so removed PRs cannot authorize further work.
     pub fn get(&self, key: &PrKey) -> Option<&ReviewRequest> {
         self.requests.iter().find(|request| request.key == *key)
     }
@@ -715,7 +720,11 @@ impl State {
             key,
             head_sha,
             authorization: Authorization::AwaitingLead,
-            revision: InputRevision::new(1)?,
+            revision: InputRevision::new(
+                self.request_revision_floor
+                    .checked_add(1)
+                    .ok_or(StateError::RevisionOverflow)?,
+            )?,
             discussion: None,
             model_validation: None,
         });
@@ -822,12 +831,57 @@ impl State {
         Ok(changed || validation_cleared)
     }
 
+    /// Forget a PR and its rounds, returning the round IDs whose files must be deleted.
+    pub fn unmanage(&mut self, key: &PrKey) -> Result<Vec<RoundId>, StateError> {
+        let index = self
+            .requests
+            .iter()
+            .position(|request| request.key == *key)
+            .ok_or_else(|| StateError::RequestNotFound(key.clone()))?;
+        if let Some(round) = self
+            .rounds
+            .iter()
+            .find(|round| round.key() == key && round_prevents_unmanagement(round))
+        {
+            return Err(StateError::UnmanagementBlocked(round.id().clone()));
+        }
+        let request = self.requests.remove(index);
+        // A global floor prevents old inspected inputs from matching a re-added PR
+        // without retaining a tombstone containing its identity or review history.
+        self.request_revision_floor = self.request_revision_floor.max(request.revision.get());
+        let mut removed = Vec::new();
+        self.rounds.retain(|round| {
+            if round.key() != key {
+                return true;
+            }
+            self.request_revision_floor = self.request_revision_floor.max(round.revision().get());
+            removed.push(round.id().clone());
+            false
+        });
+        Ok(removed)
+    }
+
     fn request_mut(&mut self, key: &PrKey) -> Result<&mut ReviewRequest, StateError> {
         self.requests
             .iter_mut()
             .find(|request| request.key == *key)
             .ok_or_else(|| StateError::RequestNotFound(key.clone()))
     }
+}
+
+fn round_prevents_unmanagement(round: &RoundRecord) -> bool {
+    round.cleanup_pending()
+        || match round.status() {
+            RoundStatus::Starting
+            | RoundStatus::Running
+            | RoundStatus::Publishing
+            | RoundStatus::PublicationUnknown => true,
+            RoundStatus::AwaitingDecision
+            | RoundStatus::Published
+            | RoundStatus::Rejected
+            | RoundStatus::Failed
+            | RoundStatus::Interrupted => false,
+        }
 }
 
 fn ensure_body_hash(
@@ -1011,7 +1065,7 @@ mod tests {
             ),
         ] {
             let invalid_state = serde_json::json!({
-                "schema_version": 6,
+                "schema_version": 7,
                 "rounds": [],
                 "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}]
             });
@@ -1019,7 +1073,7 @@ mod tests {
             assert!(error.to_string().contains(expected_error), "{error}");
         }
         let invalid_head = serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}
@@ -1066,7 +1120,7 @@ mod tests {
     #[test]
     fn state_json_keeps_its_shape_and_normalizes_identifiers() {
         let raw = serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "rounds": [],
             "requests": [
                 {
@@ -1088,7 +1142,7 @@ mod tests {
         assert_eq!(serialized["requests"][0]["key"]["number"], 42);
         assert_eq!(serialized["requests"][0]["head_sha"], HEAD_A);
         assert_eq!(serialized["requests"][0]["authorization"], "awaiting_lead");
-        assert_eq!(serialized["schema_version"], 6);
+        assert_eq!(serialized["schema_version"], 7);
         assert_eq!(serialized["rounds"], serde_json::json!([]));
         assert_eq!(serialized["requests"][0]["revision"], 1);
         assert!(serialized["requests"][0]["discussion"].is_null());
@@ -1098,7 +1152,7 @@ mod tests {
     #[test]
     fn corrupt_or_future_state_is_rejected() {
         let duplicate = serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": HEAD_A, "authorization": "one_round", "revision": 1, "discussion": {"author_id": 7, "comments": []}, "model_validation": null},
@@ -1109,8 +1163,8 @@ mod tests {
         assert_eq!(state.validate(), Err(StateError::DuplicateRequest(key())));
 
         let future: State =
-            serde_json::from_str(r#"{"schema_version":7,"requests":[],"rounds":[]}"#).unwrap();
-        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(7)));
+            serde_json::from_str(r#"{"schema_version":8,"requests":[],"rounds":[]}"#).unwrap();
+        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(8)));
     }
 
     #[test]
@@ -1211,7 +1265,7 @@ mod tests {
     #[test]
     fn current_state_rejects_one_round_authorization_without_observed_discussion() {
         let state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
@@ -1351,7 +1405,7 @@ mod tests {
     #[test]
     fn malformed_observations_and_revision_overflow_are_rejected() {
         let base = serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
@@ -1564,6 +1618,14 @@ mod tests {
                 )
                 .unwrap()
         );
+        let mut unmanaged = state.clone();
+        unmanaged.unmanage(&key()).unwrap();
+        unmanaged.validate().unwrap();
+        assert!(unmanaged.requests().is_empty());
+        unmanaged
+            .record_request(key(), current_head.clone())
+            .unwrap();
+        assert!(unmanaged.get(&key()).unwrap().model_validation().is_none());
         let mut changed_runner = raw.clone();
         changed_runner["agents"][0]["runner"]["max_turns"] = 17.into();
         let changed_runner = ReviewConfig::from_json(
@@ -1988,11 +2050,9 @@ mod tests {
         state.begin_round(third, choice).unwrap();
     }
 
-    #[test]
-    fn publication_attempts_require_explicit_recovery_and_exclude_only_confirmed_review_ids() {
-        let id = RoundId::new("r-publish").unwrap();
-        let mut state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 6,
+    fn state_with_saved_draft() -> State {
+        let state: State = serde_json::from_value(serde_json::json!({
+            "schema_version": 7,
             "requests": [{
                 "key": {"repository":"owner/repo","number":42},
                 "head_sha": HEAD_A,
@@ -2033,6 +2093,179 @@ mod tests {
         }))
         .unwrap();
         state.validate().unwrap();
+        state
+    }
+
+    #[test]
+    fn unmanagement_revokes_access_and_readding_requires_fresh_inputs() {
+        let mut state = State::default();
+        let other = PrKey::new("owner/repo", 43).unwrap();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        state.record_request(other.clone(), head(HEAD_B)).unwrap();
+        state
+            .refresh(&key(), &head(HEAD_A), &discussion(&[]))
+            .unwrap();
+        state
+            .authorize(
+                &key(),
+                &head(HEAD_A),
+                revision(2),
+                AuthorizationScope::PrCycle,
+            )
+            .unwrap();
+        let other_before = state.get(&other).unwrap().clone();
+
+        state.unmanage(&key()).unwrap();
+        let saved = serde_json::to_vec(&state).unwrap();
+        assert_eq!(
+            state.unmanage(&key()),
+            Err(StateError::RequestNotFound(key()))
+        );
+        assert_eq!(serde_json::to_vec(&state).unwrap(), saved);
+        assert!(state.get(&key()).is_none());
+        assert_eq!(state.requests().len(), 1);
+        assert_eq!(state.get(&other), Some(&other_before));
+        assert_eq!(
+            state.revoke(&key()),
+            Err(StateError::RequestNotFound(key()))
+        );
+        assert_eq!(
+            state.refresh(&key(), &head(HEAD_A), &discussion(&[])),
+            Err(StateError::RequestNotFound(key()))
+        );
+        assert_eq!(
+            state.authorize(
+                &key(),
+                &head(HEAD_A),
+                revision(2),
+                AuthorizationScope::PrCycle
+            ),
+            Err(StateError::RequestNotFound(key()))
+        );
+        let missing = PrKey::new("owner/repo", 44).unwrap();
+        assert_eq!(
+            state.unmanage(&missing),
+            Err(StateError::RequestNotFound(missing))
+        );
+
+        let mut reloaded: State = serde_json::from_slice(&saved).unwrap();
+        reloaded.validate().unwrap();
+        assert_eq!(
+            reloaded.record_request(key(), head(HEAD_A)).unwrap(),
+            RecordOutcome::New
+        );
+        let request = reloaded.get(&key()).unwrap();
+        assert_eq!(request.authorization(), Authorization::AwaitingLead);
+        assert!(request.model_validation().is_none());
+        assert!(request.discussion().is_none());
+        assert_eq!(request.revision(), revision(3));
+        reloaded
+            .refresh(&key(), &head(HEAD_A), &discussion(&[]))
+            .unwrap();
+        assert!(matches!(
+            reloaded.authorize(
+                &key(),
+                &head(HEAD_A),
+                revision(2),
+                AuthorizationScope::PrCycle
+            ),
+            Err(StateError::RevisionMismatch { .. })
+        ));
+        reloaded.validate().unwrap();
+    }
+
+    #[test]
+    fn unmanagement_deletes_rounds_and_blocks_active_work_or_cleanup() {
+        let id = RoundId::new("r-publish").unwrap();
+        let mut state = state_with_saved_draft();
+        state.seal_round(&id, test_seal(&id)).unwrap();
+        assert_eq!(state.unmanage(&key()).unwrap(), vec![id.clone()]);
+        state.validate().unwrap();
+        assert!(state.requests().is_empty());
+        assert!(state.rounds().is_empty());
+        let saved = serde_json::to_vec(&state).unwrap();
+        assert!(
+            !String::from_utf8(saved.clone())
+                .unwrap()
+                .contains("owner/repo")
+        );
+        let mut reloaded: State = serde_json::from_slice(&saved).unwrap();
+        reloaded.validate().unwrap();
+        reloaded.record_request(key(), head(HEAD_B)).unwrap();
+        assert!(reloaded.round(&id).is_none());
+        assert_eq!(reloaded.get(&key()).unwrap().revision(), revision(3));
+
+        for (status, cleanup) in [
+            ("starting", false),
+            ("running", false),
+            ("awaiting_decision", true),
+            ("failed", true),
+            ("interrupted", true),
+        ] {
+            let mut raw = serde_json::to_value(state_with_saved_draft()).unwrap();
+            let round = &mut raw["rounds"][0];
+            round["status"] = status.into();
+            round["cleanup_pending"] = cleanup.into();
+            if matches!(status, "starting" | "running") {
+                round["finished_at"] = serde_json::Value::Null;
+                round["freshness"] = serde_json::Value::Null;
+            }
+            if status == "starting" {
+                round["dispatched_at"] = serde_json::Value::Null;
+            }
+            if matches!(status, "failed" | "interrupted") {
+                round["failure"] = "recovery".into();
+            }
+            let mut state: State = serde_json::from_value(raw).unwrap();
+            state.validate().unwrap();
+            let before = serde_json::to_vec(&state).unwrap();
+            assert_eq!(
+                state.unmanage(&key()),
+                Err(StateError::UnmanagementBlocked(id.clone())),
+                "{status}"
+            );
+            assert_eq!(serde_json::to_vec(&state).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn revision_floor_survives_removal_without_pr_records_and_overflow_is_rejected() {
+        let mut state = State::default();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        state
+            .refresh(&key(), &head(HEAD_A), &discussion(&[]))
+            .unwrap();
+        state.unmanage(&key()).unwrap();
+        let other = PrKey::new("other/repo", 12).unwrap();
+        state.record_request(other.clone(), head(HEAD_B)).unwrap();
+        state
+            .refresh(&other, &head(HEAD_B), &discussion(&[]))
+            .unwrap();
+        state.unmanage(&other).unwrap();
+        let saved = serde_json::to_value(&state).unwrap();
+        assert_eq!(saved["requests"], serde_json::json!([]));
+        assert_eq!(saved["rounds"], serde_json::json!([]));
+        assert!(saved.get("unmanaged_requests").is_none());
+        let mut reloaded: State = serde_json::from_value(saved).unwrap();
+        reloaded.record_request(key(), head(HEAD_A)).unwrap();
+        assert_eq!(reloaded.get(&key()).unwrap().revision(), revision(5));
+        let mut overflow: State = serde_json::from_value(serde_json::json!({
+            "schema_version":7, "requests":[], "rounds":[], "request_revision_floor":u64::MAX,
+        }))
+        .unwrap();
+        let before = serde_json::to_vec(&overflow).unwrap();
+        assert_eq!(
+            overflow.record_request(key(), head(HEAD_A)),
+            Err(StateError::RevisionOverflow)
+        );
+        assert_eq!(serde_json::to_vec(&overflow).unwrap(), before);
+    }
+
+    #[test]
+    fn publication_attempts_require_explicit_recovery_and_exclude_only_confirmed_review_ids() {
+        let id = RoundId::new("r-publish").unwrap();
+        let mut state = state_with_saved_draft();
+        state.validate().unwrap();
         let seal = test_seal(&id);
         let hash = seal.hash().clone();
         state.seal_round(&id, seal).unwrap();
@@ -2050,6 +2283,10 @@ mod tests {
             .unwrap();
         assert_eq!(attempt, 1);
         assert_eq!(state.round(&id).unwrap().status(), RoundStatus::Publishing);
+        assert_eq!(
+            state.unmanage(&key()),
+            Err(StateError::UnmanagementBlocked(id.clone()))
+        );
         assert!(matches!(
             state.reject_round(&key(), &id, &hash, "uid:1".into(), 5),
             Err(RoundStateError::WrongStatus(_))
@@ -2079,6 +2316,10 @@ mod tests {
         assert_eq!(
             state.round(&id).unwrap().status(),
             RoundStatus::PublicationUnknown
+        );
+        assert_eq!(
+            state.unmanage(&key()),
+            Err(StateError::UnmanagementBlocked(id.clone()))
         );
         assert_eq!(
             state.refresh(&key(), &head(HEAD_A), &discussion(&[])),
@@ -2139,6 +2380,12 @@ mod tests {
         state.validate().unwrap();
         let reloaded: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         reloaded.validate().unwrap();
+        state.unmanage(&key()).unwrap();
+        state.validate().unwrap();
+        assert!(state.confirmed_review_ids(&key()).is_empty());
+        assert!(state.round(&id).is_none());
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        assert!(state.confirmed_review_ids(&key()).is_empty());
     }
 
     #[test]

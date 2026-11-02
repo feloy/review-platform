@@ -47,6 +47,10 @@ pub enum StateError {
     #[error("review request not found: {0}")]
     RequestNotFound(PrKey),
     #[error(
+        "cannot stop managing this PR while round {0} is active, needs cleanup, or has an unresolved publication; finish or recover it first"
+    )]
+    UnmanagementBlocked(crate::review::RoundId),
+    #[error(
         "{0} is awaiting lead authorization; authorize the current inputs before validating a model"
     )]
     AwaitingAuthorization(PrKey),
