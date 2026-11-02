@@ -424,6 +424,41 @@ describe('review requests page', () => {
     expect(JSON.parse(fetchMock.mock.calls[2][1].body).model).toBe('model-alpha');
   });
 
+  it('shows button help on hover and keyboard focus, including for disabled actions', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation() });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Check review readiness');
+    const panel = await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
+    const button = within(panel).getByText('Run review');
+    const trigger = within(panel).getByRole('group', { name: 'Run review' });
+    const tooltip = document.getElementById(trigger.getAttribute('aria-describedby'));
+    expect(tooltip.getAttribute('role')).toBe('tooltip');
+    expect(tooltip.textContent).toBe('Confirm the selected review model before starting.');
+    expect(panel.querySelector('.control-reason')).toBeNull();
+    expect(trigger.tabIndex).toBe(0);
+    expect(trigger.getAttribute('aria-disabled')).toBe('true');
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
+    await user.hover(button);
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
+    await act(() => window.dispatchEvent(new Event('scroll')));
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
+    await user.keyboard('{Escape}');
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
+    await user.unhover(button);
+    await act(() => trigger.focus());
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
+    await user.keyboard('{Escape}');
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
+    expect(button.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('explains that a missing publishing account blocks publication while keeping rejection available', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
@@ -804,6 +839,75 @@ describe('review requests page', () => {
     expect(button.disabled).toBe(true);
     expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['checks_pending', 'pending'], ['checks_failing', 'failing'],
+    ['checks_unknown', 'unknown'], ['no_checks', 'no_results'],
+  ])('refreshes %s from the visible preparation panel without reopening the row menu', async (readiness, checks) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishRefresh;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({ readiness, checks }) })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Check review readiness');
+    const panel = await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
+    const originalChecks = within(panel).getByText('Checks for this head').nextElementSibling.textContent;
+    expect(screen.getByRole('link', { name: 'View checks on GitHub' }).href).toBe(`https://github.com/owner/repo/commit/${'a'.repeat(40)}/checks`);
+    expect(container.querySelector('md-menu').open).toBe(false);
+    const refresh = await clickMaterialButton(user, panel, 'Refresh readiness');
+    expect(refresh.closest('.authorization-buttons')).toBeTruthy();
+    expect(refresh.disabled).toBe(true);
+    expect(within(panel).getByText('Refreshing readiness…')).toBeTruthy();
+    expect(within(panel).getByText('Checks for this head').nextElementSibling.textContent).toBe(originalChecks);
+    expect(within(panel).getByLabelText('Review model for owner/repo #15').disabled).toBe(true);
+    refresh.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/prepare');
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+    await act(() => finishRefresh({ ok: true, json: async () => preparation() }));
+    await waitFor(() => expect(within(panel).getByText('Checks for this head').nextElementSibling.textContent).toBe('Green'));
+    expect(screen.getByRole('region', { name: 'Review preparation for owner/repo #15' })).toBe(panel);
+    expect(within(panel).getByLabelText('Review model for owner/repo #15').disabled).toBe(false);
+    expect(within(panel).getByText('Validate model').disabled).toBe(false);
+    expect(within(panel).getByText('Run review').disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['github', 'offline'])('keeps failed %s readiness refreshes visible and requires a successful retry before running', async (failure) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    const ready = preparation({ readiness: 'ready', validated_model: 'model-alpha' });
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => ready });
+    if (failure === 'github') fetchMock.mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({ error: 'GitHub is unavailable. Try again later.' }) });
+    else fetchMock.mockRejectedValueOnce(new Error('offline'));
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ready });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
+    await screen.findAllByText('Check review readiness');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Check review readiness');
+    const panel = await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
+    expect(within(panel).getByText('Run review').disabled).toBe(false);
+    await clickMaterialButton(user, panel, 'Refresh readiness');
+    await screen.findByText(failure === 'github' ? 'GitHub is unavailable. Try again later.' : 'Could not connect to the local API. Try again.');
+    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
+    expect(within(panel).getByText(/This preparation is outdated/)).toBeTruthy();
+    expect((await clickMaterialButton(user, panel, 'Run review')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, panel, 'Validate model')).disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await clickMaterialButton(user, panel, 'Refresh readiness');
+    await waitFor(() => expect(within(panel).queryByText(/This preparation is outdated/)).toBeNull());
+    expect(within(panel).getByText('Run review').disabled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls.slice(1).every(([url]) => url === '/api/requests/prepare')).toBe(true);
   });
 
   it.each([

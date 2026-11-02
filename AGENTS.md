@@ -64,6 +64,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Render agent-authored draft content as plain text.
 - Handle Material Web menu actions through `close-menu` for mouse and keyboard activation.
   Treat Escape as dismissal and guard disabled custom-element actions.
+- Show button explanations in tooltips available on hover and keyboard focus,
+  including for disabled buttons; keep them within the viewport and outside clipping containers.
 - Distinguish live local progress from GitHub observation freshness in the GUI.
   Bind cached display context to observed inputs and discard it when inputs change or the PR is removed.
   Display-cache failures must not turn a completed refresh or preparation into an action failure.

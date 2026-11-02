@@ -1,5 +1,6 @@
 <script>
   import TimeAgo from './TimeAgo.svelte';
+  import ButtonHelp from './ButtonHelp.svelte';
   let { request, draft, action, onReject, onPublish, onClose } = $props();
   let confirmation = $state(null);
   let confirmationInvalid = $state(false);
@@ -12,6 +13,16 @@
   const changed = $derived(draft.head_sha !== request.head_sha || draft.revision !== request.revision ||
     draft.round_id !== request.latest_round?.id || draft.decision !== request.latest_round?.status);
   const fresh = $derived(draft.freshness === 'fresh' && !changed);
+  const decisionReason = $derived(!cleanupComplete ? 'Sandbox cleanup must finish before deciding on this draft.'
+    : confirmationInvalid ? 'Reopen the draft before making another decision.'
+    : publishing ? 'Wait for the current publication to finish before making another decision.' : '');
+  const publishReason = $derived(decisionReason || (!fresh
+    ? draft.freshness === 'stale' || changed
+      ? 'Publication is blocked because the PR changed or closed. You can reject this draft and prepare a new review.'
+      : 'Publication is blocked until GitHub freshness is verified. Reopen the draft to check again.'
+    : !draft.publisher_login ? 'Configure the publishing account and reopen the draft before publishing.' : ''));
+  const publishDisabled = $derived(action?.pending || !cleanupComplete || confirmationInvalid || publishing || !fresh || !draft.publisher_login);
+  const rejectDisabled = $derived(action?.pending || !cleanupComplete || confirmationInvalid || publishing);
   $effect(() => {
     if (confirmation && (!awaitingDecision || !cleanupComplete || publishing ||
       (confirmation.kind === 'publish' && (!fresh || !draft.publisher_login)))) confirmationInvalid = true;
@@ -87,18 +98,21 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="draft-text" role="region" aria-label="Private lead advice" tabindex="0"><pre>{draft.lead_advice || 'No private lead advice.'}</pre></div>
   {#if awaitingDecision && !decisionSubmitted && !confirmation}
-    {#if !cleanupComplete}
-      <p class="action-note">Sandbox cleanup must finish before deciding on this draft.</p>
-    {/if}
-    {#if !fresh}<p class="control-reason">{draft.freshness === 'stale' || changed ? 'Publication is blocked because the PR changed or closed. You can reject this draft and prepare a new review.' : 'Publication is blocked until GitHub freshness is verified. Reopen the draft to check again.'}</p>{/if}
-    {#if publishing}<p class="control-reason">Wait for the current publication to finish before making another decision.</p>{/if}
     <div class="authorization-buttons">
+      <ButtonHelp text={publishReason} label="Publish draft" disabled={publishDisabled}>
+      {#snippet children(descriptionId)}
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-filled-button disabled={action?.pending || !cleanupComplete || confirmationInvalid || publishing || !fresh || !draft.publisher_login}
+      <md-filled-button disabled={publishDisabled} aria-describedby={descriptionId}
         onclick={() => confirmDecision('publish')}>Publish draft</md-filled-button>
+      {/snippet}
+      </ButtonHelp>
+      <ButtonHelp text={decisionReason} label="Reject draft" disabled={rejectDisabled}>
+      {#snippet children(descriptionId)}
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-text-button disabled={action?.pending || !cleanupComplete || confirmationInvalid || publishing}
+      <md-text-button disabled={rejectDisabled} aria-describedby={descriptionId}
         onclick={() => confirmDecision('reject')}>Reject draft</md-text-button>
+      {/snippet}
+      </ButtonHelp>
     </div>
   {/if}
   {#if confirmationInvalid && !action?.pending}

@@ -15,6 +15,12 @@ if (!window.ElementInternals.prototype.setFormValue) {
   window.ElementInternals.prototype.setFormValue = () => {};
 }
 
+// jsdom has no top layer; track tooltip opening and dismissal without simulating layout.
+if (!window.HTMLElement.prototype.showPopover) {
+  window.HTMLElement.prototype.showPopover = function () { this.setAttribute('data-test-popover-open', ''); };
+  window.HTMLElement.prototype.hidePopover = function () { this.removeAttribute('data-test-popover-open'); };
+}
+
 // Material Web ripples and menus use Web Animations, which jsdom lacks.
 if (!window.Element.prototype.animate) {
   window.Element.prototype.animate = () => {

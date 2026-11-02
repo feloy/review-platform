@@ -79,10 +79,11 @@
 
   async function prepareReview() {
     if (action?.pending) return;
-    preparation = null;
-    preparationInvalid = false;
     const result = await onPrepare();
-    if (result) preparation = result;
+    if (result) {
+      preparation = result;
+      preparationInvalid = false;
+    } else if (preparation) preparationInvalid = true;
   }
 
   async function validateModel(model) {
@@ -310,7 +311,7 @@
     {/if}
     {#if preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
-        onSelect={(model) => selectedModel = model} onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
+        onRefresh={prepareReview} onSelect={(model) => selectedModel = model} onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
     {/if}
     {#if draft}
       <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => draft = null} />
