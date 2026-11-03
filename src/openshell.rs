@@ -1,7 +1,8 @@
 //! Synchronous OpenShell 0.1.5 adapter for an operator-managed gateway.
 
+use crate::agent::{self, AgentPreparationError};
 use crate::archive::StagedArchive;
-use crate::config::{AgentKind, AgentRunnerConfig, Driver, ExecutionConfig};
+use crate::config::{AgentRunnerConfig, Driver, ExecutionConfig};
 use crate::review::RoundRecord;
 use crate::sandbox_layout;
 use serde_json::Value;
@@ -15,6 +16,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum OpenShellError {
+    #[error(transparent)]
+    AgentImage(#[from] AgentPreparationError),
     #[error("local VM review execution is unsupported on this platform")]
     PlatformUnsupported,
     #[error("podman review execution is unsupported; configure the vm driver")]
@@ -381,12 +384,10 @@ impl<'a> OpenShell<'a> {
                 return Err(OpenShellError::EnvironmentCollision(key.clone()));
             }
         }
-        match runner.kind() {
-            AgentKind::Claude => {
-                let key = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
-                if environment.insert(key.into(), "1".into()).is_some() {
-                    return Err(OpenShellError::EnvironmentCollision(key.into()));
-                }
+        let prepared = agent::adapter(runner.kind()).prepare(image, runner)?;
+        for (key, value) in prepared.environment() {
+            if environment.insert(key.clone(), value.clone()).is_some() {
+                return Err(OpenShellError::EnvironmentCollision(key.clone()));
             }
         }
         if environment

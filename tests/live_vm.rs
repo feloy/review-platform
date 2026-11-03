@@ -5,8 +5,8 @@
 #[ignore = "requires REVIEW_PLATFORM_LIVE_VM_CONFIG and an existing VM gateway"]
 fn local_vm_mounts_draft_retrieval_and_cleanup() {
     use review_platform::{
-        HeadSha, InputRevision, ObservedDiscussion, PrKey, archive,
-        config::ReviewConfig,
+        HeadSha, InputRevision, ObservedDiscussion, PrKey, agent, archive,
+        config::{AgentKind, ReviewConfig},
         openshell::{OpenShell, SandboxMounts},
         review::{OUTPUT_MARKER, RoundId, RoundRecord, read_agent_output},
         sandbox_layout,
@@ -38,6 +38,15 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
     let root = tempfile::tempdir_in(test_dir).unwrap();
     let staged_archive =
         archive::stage_archive(choices[0].archive(), &root.path().join("archives")).unwrap();
+    let kind = choices[0].agent().runner().kind();
+    let prepared = agent::adapter(kind)
+        .prepare(&staged_archive, choices[0].agent().runner())
+        .unwrap();
+    let executable = prepared.executable();
+    let executable_variable = match kind {
+        AgentKind::Claude => "CLAUDE_CODE_EXECUTABLE",
+        AgentKind::Codex => "CODEX_PATH",
+    };
     let checkout = root.path().join("checkout");
     let instructions = root.path().join("instructions");
     let output = root.path().join("output");
@@ -111,9 +120,9 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
             &[
                 OsString::from("/bin/sh"),
                 OsString::from("-c"),
-                OsString::from("test \"$CLAUDE_CODE_EXECUTABLE\" = \"$1\""),
+                OsString::from(format!("test \"${executable_variable}\" = \"$1\"")),
                 OsString::from("image-env-check"),
-                OsString::from(staged_archive.claude_executable().unwrap()),
+                OsString::from(executable),
             ],
         )
         .output()
@@ -122,30 +131,38 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
         image_environment.status.success(),
         "image Env was not applied"
     );
-    let help = shell
-        .exec_command(
-            &round,
+    let mut help_command = vec![OsString::from(executable)];
+    let flags: &[&str] = match kind {
+        AgentKind::Claude => &[
+            "--bare",
+            "--safe-mode",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "--no-session-persistence",
+            "--permission-mode",
+            "--allowedTools",
+            "--include-partial-messages",
+        ],
+        AgentKind::Codex => {
+            help_command.push("exec".into());
             &[
-                OsString::from(staged_archive.claude_executable().unwrap()),
-                OsString::from("--help"),
-            ],
-        )
-        .output()
-        .unwrap();
-    assert!(help.status.success(), "Claude CLI help failed in the VM");
+                "--json",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--strict-config",
+                "--output-schema",
+                "--output-last-message",
+            ]
+        }
+    };
+    help_command.push("--help".into());
+    let help = shell.exec_command(&round, &help_command).output().unwrap();
+    assert!(help.status.success(), "agent CLI help failed in the VM");
     let help = String::from_utf8(help.stdout).unwrap();
-    for flag in [
-        "--bare",
-        "--safe-mode",
-        "--disable-slash-commands",
-        "--strict-mcp-config",
-        "--setting-sources",
-        "--no-session-persistence",
-        "--permission-mode",
-        "--allowedTools",
-        "--include-partial-messages",
-    ] {
-        assert!(help.contains(flag), "Claude CLI does not report {flag}");
+    for flag in flags {
+        assert!(help.contains(flag), "agent CLI does not report {flag}");
     }
     let workdir = shell
         .exec_review_agent(&round, &[OsString::from("/bin/pwd")])
