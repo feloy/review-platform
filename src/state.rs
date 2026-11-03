@@ -8,9 +8,7 @@ use crate::model::{
 };
 use crate::preparation::{Preparation, Readiness};
 use crate::publication::{AttemptOutcome, PublicationHash, PublicationReceipt, SealedBody};
-use crate::review::{
-    FailureKind, Freshness, REVIEW_RULES, RoundId, RoundRecord, RoundStateError, RoundStatus,
-};
+use crate::review::{FailureKind, Freshness, RoundId, RoundRecord, RoundStateError, RoundStatus};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
@@ -90,7 +88,7 @@ pub struct ModelValidation {
     head_sha: HeadSha,
     revision: InputRevision,
     prompt_sha256: PromptHash,
-    // Serialized name predates tool guidance; this hashes all trusted REVIEW_RULES.
+    // Serialized name predates adapters; this hashes common rules and selected tool guidance.
     format_sha256: PromptHash,
     execution_sha256: PromptHash,
     runner_sha256: PromptHash,
@@ -118,7 +116,7 @@ impl ModelValidation {
         self.model == *choice.model().id()
             && self.agent == *choice.agent().id()
             && self.prompt_sha256 == *choice.agent().prompt_hash()
-            && self.format_sha256 == PromptHash::of(REVIEW_RULES)
+            && self.format_sha256 == crate::agent::rules_hash(choice.agent().runner().kind())
             && self.execution_sha256 == *choice.execution().hash()
             && self.runner_sha256 == *choice.agent().runner().hash()
             && self.vm_archive == *choice.archive()
@@ -333,7 +331,7 @@ impl State {
             || round.model() != choice.model().id()
             || round.agent() != choice.agent().id()
             || round.prompt_hash() != choice.agent().prompt_hash()
-            || round.format_hash() != &PromptHash::of(REVIEW_RULES)
+            || round.format_hash() != &crate::agent::rules_hash(choice.agent().runner().kind())
             || round.execution_hash() != choice.execution().hash()
             || round.runner_hash() != choice.agent().runner().hash()
             || round.archive_hash() != choice.archive().checksum()
@@ -813,7 +811,7 @@ impl State {
             head_sha: inspected_head.clone(),
             revision: inspected_revision,
             prompt_sha256: choice.agent().prompt_hash().clone(),
-            format_sha256: PromptHash::of(REVIEW_RULES),
+            format_sha256: crate::agent::rules_hash(choice.agent().runner().kind()),
             execution_sha256: choice.execution().hash().clone(),
             runner_sha256: choice.agent().runner().hash().clone(),
             vm_archive: choice.archive().clone(),
@@ -1627,6 +1625,41 @@ mod tests {
             .unwrap();
         assert!(unmanaged.get(&key()).unwrap().model_validation().is_none());
         let mut changed_runner = raw.clone();
+        let mut outdated_rules = state.clone();
+        outdated_rules.requests[0]
+            .model_validation
+            .as_mut()
+            .unwrap()
+            .format_sha256 = crate::agent::rules_hash(crate::config::AgentKind::Codex);
+        assert!(
+            !outdated_rules
+                .get(&key())
+                .unwrap()
+                .model_validation()
+                .unwrap()
+                .matches(&review_models[0])
+        );
+        let persisted = serde_json::to_vec(&outdated_rules).unwrap();
+        let mut outdated_rules: State = serde_json::from_slice(&persisted).unwrap();
+        assert!(
+            outdated_rules
+                .validate_model(
+                    &prepared,
+                    &current_head,
+                    revision(2),
+                    &review_models[0],
+                    &verified
+                )
+                .unwrap()
+        );
+        assert!(
+            outdated_rules
+                .get(&key())
+                .unwrap()
+                .model_validation()
+                .unwrap()
+                .matches(&review_models[0])
+        );
         changed_runner["agents"][0]["runner"]["max_turns"] = 17.into();
         let changed_runner = ReviewConfig::from_json(
             &serde_json::to_vec(&changed_runner).unwrap(),

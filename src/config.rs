@@ -100,7 +100,7 @@ pub enum ConfigError {
     InvalidExecution(String),
     #[error("invalid agent runner configuration: {0}")]
     InvalidRunner(String),
-    #[error("agent runner kind {0:?} is unsupported; expected claude")]
+    #[error("agent runner kind {0:?} is unsupported; expected claude or codex")]
     InvalidRunnerKind(String),
     #[error("driver {0:?} is invalid; expected vm or podman")]
     InvalidDriver(String),
@@ -398,7 +398,7 @@ pub struct ReviewConfig {
     hash: PromptHash,
 }
 
-/// Trusted, non-secret OpenShell and Claude execution settings.
+/// Trusted, non-secret OpenShell execution settings.
 #[derive(Debug)]
 pub struct ExecutionConfig {
     openshell: PathBuf,
@@ -608,12 +608,14 @@ impl ExecutionConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKind {
     Claude,
+    Codex,
 }
 
 impl AgentKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 }
@@ -656,6 +658,7 @@ impl TryFrom<RawAgentRunner> for AgentRunnerConfig {
         let hash = PromptHash::of(&serde_json::to_string(&raw)?);
         let kind = match raw.kind.as_str() {
             "claude" => AgentKind::Claude,
+            "codex" => AgentKind::Codex,
             _ => return Err(ConfigError::InvalidRunnerKind(raw.kind)),
         };
         if !valid_name(&raw.model_provider) {
@@ -694,13 +697,13 @@ impl TryFrom<RawAgentRunner> for AgentRunnerConfig {
                 .environment
                 .iter()
                 .any(|(key, value)| !valid_environment_entry(key, value))
-            || raw.environment.contains_key("CLAUDE_CODE_EXECUTABLE")
             || raw
                 .environment
-                .contains_key("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY")
+                .keys()
+                .any(|key| crate::agent::reserved_environment_key(key))
         {
             return Err(ConfigError::InvalidRunner(
-                "environment must contain bounded, non-secret values and cannot replace image or mandatory Claude settings".into(),
+                "environment must contain bounded, non-secret values and cannot replace image executable or mandatory agent settings".into(),
             ));
         }
         if raw.max_turns == 0 || raw.max_turns > 1000 {
@@ -960,12 +963,14 @@ impl ReviewConfig {
                 }
                 supported_models.push(model);
             }
+            let runner = AgentRunnerConfig::try_from(raw_agent.runner)?;
+            hash.update(crate::agent::rules_hash(runner.kind()).as_str().as_bytes());
             agents.push(Agent {
                 id,
                 models: supported_models,
                 prompt_hash,
                 prompt,
-                runner: AgentRunnerConfig::try_from(raw_agent.runner)?,
+                runner,
             });
         }
         let mut seen_repositories = HashSet::new();
@@ -1359,6 +1364,7 @@ mod tests {
     #[test]
     fn resolves_models_to_the_first_compatible_agent_runner() {
         let mut raw = config_json();
+        raw["agents"][1]["runner"]["kind"] = "codex".into();
         raw["agents"][1]["runner"]["model_provider"] = "second-model-provider".into();
         let config = ReviewConfig::from_json(
             &serde_json::to_vec(&raw).unwrap(),
@@ -1373,7 +1379,7 @@ mod tests {
         assert_eq!(review_models[0].agent().id().as_str(), "claude");
         assert_eq!(review_models[1].model().id().as_str(), "model-beta");
         assert_eq!(review_models[1].agent().id().as_str(), "codex");
-        assert_eq!(review_models[1].agent().runner().kind(), AgentKind::Claude);
+        assert_eq!(review_models[1].agent().runner().kind(), AgentKind::Codex);
         assert_eq!(
             review_models[1].agent().runner().model_provider(),
             "second-model-provider"
@@ -1394,6 +1400,30 @@ mod tests {
         assert!(!review_models[1].model().matches_coauthor(&HashSet::from([
             CoauthorIdentity::new("Model Alpha", "model@example.com").unwrap()
         ])));
+    }
+
+    #[test]
+    fn rejects_operator_overrides_of_adapter_owned_environment() {
+        for kind in ["claude", "codex"] {
+            for variable in [
+                "CLAUDE_CODE_EXECUTABLE",
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "CODEX_PATH",
+                "CODEX_HOME",
+            ] {
+                let mut raw = config_json();
+                raw["agents"][0]["runner"]["kind"] = kind.into();
+                raw["agents"][0]["runner"]["environment"] =
+                    serde_json::json!({variable: "/tmp/replacement"});
+                assert!(matches!(
+                    ReviewConfig::from_json(
+                        &serde_json::to_vec(&raw).unwrap(),
+                        Path::new("config.json")
+                    ),
+                    Err(ConfigError::InvalidRunner(_))
+                ));
+            }
+        }
     }
 
     #[test]

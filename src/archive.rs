@@ -1,6 +1,6 @@
 //! Verify and stage a VM rootfs tar together with its separate OCI configuration.
 
-use crate::config::{ArchiveHash, VmArchive, valid_environment_entry, valid_vm_absolute_path};
+use crate::config::{ArchiveHash, VmArchive, valid_environment_entry};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -39,8 +39,6 @@ pub enum ArchiveError {
     InvalidEnvironment(usize),
     #[error("VM image environment exceeds 64 KiB")]
     EnvironmentTooLarge,
-    #[error("VM image configuration lacks an absolute CLAUDE_CODE_EXECUTABLE path")]
-    MissingClaudeExecutable,
 }
 
 const CONFIG_LIMIT: u64 = 1024 * 1024;
@@ -79,17 +77,6 @@ impl StagedArchive {
 
     pub fn environment(&self) -> &BTreeMap<String, String> {
         &self.environment
-    }
-
-    pub fn claude_executable(&self) -> Result<&str, ArchiveError> {
-        let value = self
-            .environment
-            .get("CLAUDE_CODE_EXECUTABLE")
-            .ok_or(ArchiveError::MissingClaudeExecutable)?;
-        if !valid_vm_absolute_path(value) {
-            return Err(ArchiveError::MissingClaudeExecutable);
-        }
-        Ok(value)
     }
 }
 
@@ -451,7 +438,10 @@ mod tests {
             Some(&"/usr/bin/claude".to_owned())
         );
         let staged = stage_archive(&archive, &dir.path().join("private")).unwrap();
-        assert_eq!(staged.claude_executable().unwrap(), "/usr/bin/claude");
+        assert_eq!(
+            staged.environment().get("CLAUDE_CODE_EXECUTABLE").unwrap(),
+            "/usr/bin/claude"
+        );
         assert_eq!(fs::read(staged.path()).unwrap(), b"archive bytes");
         verified.actual_sha256 = "0".repeat(64);
         assert!(!verified.matches(&archive));
@@ -495,19 +485,6 @@ mod tests {
         assert!(matches!(
             parse_environment(secret),
             Err(ArchiveError::InvalidEnvironment(_))
-        ));
-        let missing = StagedArchive::for_test(PathBuf::from("/tmp/image.tar"), BTreeMap::new());
-        assert!(matches!(
-            missing.claude_executable(),
-            Err(ArchiveError::MissingClaudeExecutable)
-        ));
-        let relative = StagedArchive::for_test(
-            PathBuf::from("/tmp/image.tar"),
-            BTreeMap::from([("CLAUDE_CODE_EXECUTABLE".into(), "bin/claude".into())]),
-        );
-        assert!(matches!(
-            relative.claude_executable(),
-            Err(ArchiveError::MissingClaudeExecutable)
         ));
     }
 
