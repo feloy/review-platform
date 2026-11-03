@@ -599,7 +599,7 @@ including when loaded from the JSON state file.
   and each configured agent's model provider and policy checksum
   without changing gateway resources.
 - `run-review REPOSITORY PR --head HEAD_SHA --revision REVISION` runs the validated
-  Claude model in a foreground VM review round.
+  model through its selected Claude Code or Codex adapter in a foreground VM review round.
   It requires the current inspected inputs, active authorization,
   green checks on the exact head, and an unchanged model validation.
   It copies and verifies the configured rootfs tar and OCI metadata,
@@ -732,13 +732,27 @@ For example:
   "agents": [
     {
       "id": "claude",
-      "models": ["model-alpha", "model-beta"],
+      "models": ["model-alpha"],
       "prompt_file": "prompts/claude/review.md",
       "runner": {
         "kind": "claude",
         "model_provider": "operator-model-provider",
         "environment": {},
         "policy": "/absolute/path/to/review-policy.yaml",
+        "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "hold_command": ["/bin/sleep", "3600"],
+        "max_turns": 100
+      }
+    },
+    {
+      "id": "codex",
+      "models": ["model-beta"],
+      "prompt_file": "prompts/codex/review.md",
+      "runner": {
+        "kind": "codex",
+        "model_provider": "operator-openai-responses-provider",
+        "environment": {"OPENAI_BASE_URL": "https://model-gateway.example/v1"},
+        "policy": "/absolute/path/to/codex-review-policy.yaml",
         "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "hold_command": ["/bin/sleep", "3600"],
         "max_turns": 100
@@ -754,6 +768,14 @@ For example:
           "agent": "claude",
           "vm_archive": {
             "path": "/absolute/path/to/osi-claude-1.tar",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "config_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          }
+        },
+        {
+          "agent": "codex",
+          "vm_archive": {
+            "path": "/absolute/path/to/osi-codex-1.tar",
             "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "config_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
           }
@@ -782,7 +804,9 @@ Commit trailers are author-controlled hints; only the lead's explicit model choi
 `prompt_file` names a local UTF-8 text or Markdown file containing the agent's review instructions.
 Relative paths resolve from the configuration file's directory, independently of the working directory;
 absolute paths are also accepted.
-For the example above, create `prompts/claude/review.md` under the directory containing `config.json`:
+For the example above, create `prompts/claude/review.md` under the directory containing `config.json`.
+Create `prompts/codex/review.md` there too;
+the same initial instructions work for both agents:
 
 ```text
 Review correctness, security, and the PR's changes.
@@ -795,6 +819,8 @@ Its exact contents, including line breaks, are loaded with the configuration.
 Prompt edits change the configuration fingerprint and invalidate a matching model validation;
 prepare and inspect the review again after editing a prompt.
 Prompt contents are not printed by `prepare-review`.
+The common review rules and selected adapter's tool guidance also participate in freshness fingerprints.
+Updating those rules requires fresh preparation and model validation, even for an unchanged model choice.
 Earlier configurations using inline `prompt` must move that text into a file,
 replace the field with `prompt_file`, and set `schema_version` to 6.
 
@@ -815,12 +841,15 @@ Review Platform extracts `config.Env` from the verified metadata
 and declares those non-secret values with OpenShell `--env` arguments.
 The combined sandbox environment is limited to 64 KiB.
 The Claude image must define an absolute `CLAUDE_CODE_EXECUTABLE` path there.
+The Codex image must define `CODEX_PATH` with an absolute executable path instead.
+Executable selection and mandatory environment values belong to the selected adapter;
+`runner.environment` cannot override either agent's executable, Claude's gateway discovery flag, or `CODEX_HOME`.
 Operator-specific non-secret values such as `ANTHROPIC_BASE_URL`
 may be set in that agent's `runner.environment`.
 Duplicate environment names are rejected.
 
-The `hold_command` keeps a newly created sandbox alive without starting Claude;
-the runner then rechecks every gate before executing Claude separately.
+The `hold_command` keeps a newly created sandbox alive without starting an agent;
+the runner then rechecks every gate before executing the selected agent separately.
 The sandbox mounts only the checkout and trusted instructions read-only,
 plus the round's output directory writable.
 Their fixed sandbox paths are `/sandbox/src`, `/sandbox/instructions`,
@@ -830,10 +859,13 @@ The runner always disables TTY and restarts and prevents automatic provider crea
 The shared `timeout_seconds`, `cpu`, `memory`, and `log_limit_bytes`
 default to 1800 seconds, two CPUs, 4 GiB, and 8 MiB.
 Each agent's `max_turns` defaults to 100.
+For Claude it counts distinct main-assistant message IDs.
+For Codex it counts completed agent messages and tool actions, deduplicated by item ID;
+reasoning items do not consume a separate step.
 
 The runner rejects `podman` as unsupported and unknown driver names as invalid
 before creating a sandbox or consuming authorization.
-Only runner kind `claude` has an execution adapter in this milestone;
+Runner kinds `claude` and `codex` have execution adapters;
 the agent ID is a separate configured identifier.
 Do not put provider credentials or publishing credentials in this configuration.
 
@@ -859,8 +891,9 @@ It retains the `output/review-output.json` agent artifact,
 stores the assembled private `draft.json`,
 and keeps an incomplete log file if an agent run fails after emitting dialogue.
 
-The runner seeds the output file with an invalid marker and grants Claude's `Edit` tool permission for it.
-It starts Claude in `/sandbox`.
+Both adapters start in `/sandbox` and share the same draft validation and publication rules.
+The runner seeds the output file with an invalid marker.
+For Claude, it grants the `Edit` tool permission to replace that marker.
 Relative `Read` permissions cover the checkout and instructions.
 `Edit(./output/review-output.json)` matches the output file.
 An unchanged marker cannot become a draft.
@@ -872,9 +905,32 @@ Claude Code may still allow some reads and simple shell commands outside the exp
 The wildcard Git and GitHub Bash grants do not restrict every read or write option.
 This is a known limitation tracked in [issue #13](https://github.com/feloy/review-platform/issues/13).
 
+The Codex adapter requires Codex CLI 0.166.0 or newer with the documented permission-profile support.
+It uses `codex exec --json --ephemeral --ignore-user-config --ignore-rules --strict-config`.
+An explicit permission profile extends `:read-only` and enables network access for GitHub reads;
+the operator's OpenShell policy still controls network destinations and read-only GitHub access.
+Approval prompts, repository instruction loading, hooks, automatic skill instructions,
+MCP servers, plugins, multi-agent delegation, memories, and web search are disabled.
+The trusted system prompt is supplied through `model_instructions_file`.
+Codex receives the required JSON Schema through `--output-schema`,
+and `--output-last-message` saves its final response to the draft artifact.
+Its tools receive no writable repository or output directory grant.
+The CLI itself writes the final artifact outside its tool sandbox.
+The adapter uses the existing private round output directory as `CODEX_HOME`;
+any CLI runtime files remain private beside that round's draft.
+Use an OpenShell model provider that supplies OpenAI Responses API access and an `OPENAI_API_KEY` credential.
+Set its non-secret `OPENAI_BASE_URL` in the verified image metadata or `runner.environment`.
+The adapter requires an explicit absolute HTTP(S) endpoint without embedded credentials, query, or fragment.
+It configures a custom Codex provider for that endpoint with HTTP(S) streaming rather than WebSockets;
+missing endpoint configuration fails before sandbox creation, with no public-service fallback.
+The filesystem policy blocks writes; it does not restrict shell execution to a command allowlist.
+The trusted instructions prohibit executing repository code, installing dependencies, or running tests.
+See the official [Codex CLI reference](https://developers.openai.com/codex/cli/reference/)
+and [configuration reference](https://developers.openai.com/codex/config-reference/).
+
 The agent artifact must be regular UTF-8 JSON of at most 1 MiB
 with exactly `status`, `comments`, and `lead_advice`.
-The runner adds `review_log` from the captured Claude dialogue.
+The runner adds `review_log` from the selected adapter's captured dialogue.
 Only `comments` becomes the GitHub review body, followed by the visible footer;
 `lead_advice` and `review_log` remain private.
 
@@ -891,7 +947,7 @@ the saved draft remains available for `show-draft` while cleanup is pending.
 After a stop failure, the runner still tries to delete the sandbox.
 A successful delete completes cleanup and leaves the draft available for inspection.
 Recovery refuses to stop a sandbox while its review runner is active.
-Recovery stops and deletes the recorded sandbox without replaying Claude.
+Recovery stops and deletes the recorded sandbox without replaying the agent.
 
 One-round authorization is never restored after an uncertain dispatch.
 A failed PR-cycle round may be retried explicitly after all live gates pass again.
@@ -917,6 +973,8 @@ Set `REVIEW_PLATFORM_LIVE_VM_DIR` when the gateway requires test paths
 on a particular host directory.
 Set `REVIEW_PLATFORM_LIVE_VM_REPOSITORY` when the configuration does not
 include the test's default `owner/repo` repository.
+The test checks the executable and CLI flags for the first resolved agent,
+so a configuration selecting Codex exercises its VM image as well.
 
 `github-pr`, `refresh`, and `prepare-review` read public GitHub pull requests without a token.
 For private repositories or a higher GitHub API rate limit,
@@ -1152,7 +1210,7 @@ named providers, then creates, monitors, and removes its own sandbox.
 The trusted configuration names the driver and supplies the verified VM image,
 provider names, non-secret environment, policy, and resource limits.
 Review Platform fixes the mount targets, TTY and restart behavior,
-and Claude command rules in code.
+and each agent adapter's command rules in code.
 The runner accepts only a configured `vm` driver for now and checks that the gateway supports it.
 It reports `podman` as unsupported or an unknown driver as invalid
 before any sandbox is created.

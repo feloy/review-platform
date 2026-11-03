@@ -79,7 +79,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Keep inspected inputs fixed in GUI decision forms;
   live updates must not silently retarget a pending lead decision.
   Bind GUI model validation to the inspected configuration and authorization too.
-  Include referenced prompt contents in configuration fingerprints and rechecks.
+  Include referenced prompt contents, selected adapter guidance, and output schemas
+  in configuration fingerprints and rechecks.
   Recheck persisted state even when the model choice appears unchanged.
 - A round requires green checks for the exact PR head being reviewed.
   Bind each draft to that head and the author comments seen; mark it stale on change.
@@ -114,6 +115,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Connect to an already-running, operator-managed OpenShell gateway selected explicitly.
   Require its expected model and read-only GitHub providers before starting a round;
   attach only those providers and disable automatic provider creation.
+  Pin each agent's model endpoint explicitly and verify its CLI routing;
+  do not assume a base-URL environment variable controls the destination.
   Build sandbox arguments from validated trusted configuration and round inputs.
   Keep review mount targets, access modes, and mandatory lifecycle restrictions fixed in code.
   Read the driver type from configuration; support only `vm` for now

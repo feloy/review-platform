@@ -11,7 +11,7 @@ use review_platform::{
     openshell::{OpenShell, OpenShellError, SandboxMounts},
     preparation::Readiness,
     review::{
-        DraftOutput, FailureKind, Freshness, OUTPUT_MARKER, REVIEW_RULES, RoundId, RoundRecord,
+        DraftOutput, FailureKind, Freshness, OUTPUT_MARKER, OUTPUT_SCHEMA, RoundId, RoundRecord,
         RoundStatus,
     },
     round::{self, ModelSelection},
@@ -396,7 +396,9 @@ fn execute_review(
             choice.archive(),
             &private_parent(state_path).join("archives"),
         )?;
-        let executable = staged_image.claude_executable()?;
+        let adapter = agent::adapter(choice.agent().runner().kind());
+        let prepared_agent = adapter.prepare(&staged_image, choice.agent().runner())?;
+        let executable = prepared_agent.executable();
         if cancelled.load(Ordering::Relaxed) {
             failure = FailureKind::Recovery;
             anyhow::bail!("review interrupted");
@@ -421,11 +423,12 @@ fn execute_review(
             choice.agent().prompt().as_bytes(),
         )?;
         write_new(
-            &instructions.join("review-rules-v1.txt"),
-            REVIEW_RULES.as_bytes(),
+            &instructions.join("review-rules.txt"),
+            agent::review_rules(choice.agent().runner().kind()).as_bytes(),
         )?;
-        let composed = agent::compose_system_prompt(choice.agent().prompt());
+        let composed = agent::compose_system_prompt(choice.agent().runner().kind(), choice.agent().prompt());
         write_new(&instructions.join("system-prompt.txt"), composed.as_bytes())?;
+        write_new(&instructions.join(sandbox_layout::OUTPUT_SCHEMA_FILE_NAME), OUTPUT_SCHEMA.as_bytes())?;
         failure = FailureKind::SandboxCreate;
         let private_policy = round_dir.join("sandbox-policy.yaml");
         shell.stage_policy(choice.agent().runner(), &private_policy)?;
@@ -512,15 +515,15 @@ fn execute_review(
             current.dispatch_round(&id, now()?)?;
             storage::save(state_path, &current)?;
         }
-        println!("Round {id}: running Claude.");
+        println!("Round {id}: running {}.", choice.agent().runner().kind().as_str());
         let prompt_path = sandbox_layout::system_prompt_file();
         let result_path = sandbox_layout::review_output_file();
-        let run = agent::run_claude(
+        let run = agent::run(
             &shell,
             config.execution(),
             choice.agent().runner(),
-            &agent::ClaudeInvocation::new(
-                executable,
+            &agent::AgentInvocation::new(
+                &prepared_agent,
                 &record,
                 &prompt_path,
                 pull.base_sha().as_str(),
