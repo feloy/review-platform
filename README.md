@@ -15,6 +15,9 @@ the lead can also reject it.
 Rejecting a draft keeps the current authorization.
 Another round still needs a valid lead model choice.
 
+Contributor architecture and development guidance are in
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Run the Rust prototype
 
 The runnable prototype is a local operator command for recording PR review requests,
@@ -341,18 +344,9 @@ completed cleanup, publisher identity, and live freshness before recording dispa
 A matching completed publication returns its saved receipt without another post.
 Unknown outcomes and an uncompleted publication require CLI recovery before another decision.
 
-Keep the compiled UI in `ui/dist` under version control
+The compiled UI in `ui/dist` is kept under version control
 so Rust installation does not need to run the frontend build.
-To change the UI, use Node 24 and rebuild the assets before compiling Rust:
-
-```sh
-cd ui
-npm ci
-npm test
-npm run build
-cd ..
-cargo install --path . --locked --force
-```
+See [ARCHITECTURE.md](ARCHITECTURE.md) for contributor UI build instructions.
 
 ### Start a review for a new PR
 
@@ -963,23 +957,8 @@ A retry with the rejected round's exact model choice needs fresh validation.
 If one-round authorization was consumed at dispatch, authorize again.
 Publication and rejection use local state and GitHub without contacting OpenShell.
 
-An opt-in synthetic VM integration test exercises the gateway, provider attachment,
-image environment, read-only mounts, private output retrieval,
-and sandbox cleanup without calling a model:
-
-```sh
-REVIEW_PLATFORM_LIVE_VM_CONFIG=/absolute/path/to/private-config.json \
-  cargo test --test live_vm -- --ignored
-```
-
-The config must point to an existing VM tar, its `.config.json` metadata,
-and a policy with correct checksums.
-Set `REVIEW_PLATFORM_LIVE_VM_DIR` when the gateway requires test paths
-on a particular host directory.
-Set `REVIEW_PLATFORM_LIVE_VM_REPOSITORY` when the configuration does not
-include the test's default `owner/repo` repository.
-The test checks the executable and CLI flags for the first resolved agent,
-so a configuration selecting Codex exercises its VM image as well.
+An opt-in synthetic VM integration test is available to contributors.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for its configuration and command.
 
 `github-pr`, `refresh`, and `prepare-review` read public GitHub pull requests without a token.
 For private repositories or a higher GitHub API rate limit,

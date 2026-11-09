@@ -1,7 +1,8 @@
 # Working in Review Platform
 
-Read `README.md` before changing behavior.
-It defines the review workflow and security boundaries.
+Read `README.md` and `ARCHITECTURE.md` before changing behavior.
+The README defines the user workflow.
+The architecture document defines the system design and security boundaries.
 Keep the implementation small and runnable as it grows;
 add a dependency or abstraction when a current feature needs it.
 
@@ -140,7 +141,9 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 
 ## Changes and commits
 
-- Document runnable commands and current limitations in `README.md` as features land.
+- Document user runnable commands and current limitations in `README.md`.
+  Document contributor architecture, development commands, and security boundaries
+  in `ARCHITECTURE.md`.
   Prefer a small working vertical slice over placeholder integrations.
 - During development, reject unsupported state and config schemas;
   add migration only when compatibility becomes a current requirement.

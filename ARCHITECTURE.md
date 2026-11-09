@@ -182,11 +182,18 @@ A human maintainer decides whether to approve and merge the PR.
 
 ## Source layout
 
+- `src/lib.rs` exposes the library boundary.
 - `src/model.rs` and `src/state.rs` define typed request, authorization, and round state transitions.
+- `src/round.rs` defines round records and transitions.
 - `src/preparation.rs` contains pure readiness and model-proposal decisions.
 - `src/review.rs` and `src/publication.rs` persist rounds, private drafts, and lead decisions.
-- `src/github/` adapts read-only GitHub observations, checks, commits, and publication.
-- `src/agent/`, `src/openshell.rs`, `src/archive.rs`, and `src/sandbox_layout.rs` form the agent and sandbox boundary.
+- `src/config.rs` loads and validates trusted configuration.
+- `src/storage.rs` coordinates locked persistence.
+- `src/github.rs` and `src/github/` adapt read-only GitHub observations,
+  checks, commits, discussion, preparation, and publication.
+- `src/agent.rs` and `src/agent/` implement agent adapters.
+- `src/checkout.rs`, `src/openshell.rs`, `src/archive.rs`,
+  and `src/sandbox_layout.rs` form the sandbox input, output, and lifecycle boundary.
 - `src/gui.rs`, `src/gui/`, `src/gui_runs.rs`, and `src/gui_diagnostics.rs` implement the loopback GUI and its jobs.
 - `src/main.rs` and the `src/*_commands.rs` modules implement the operator CLI.
 - `ui/` contains the Svelte and Material Web interface.
@@ -198,3 +205,34 @@ For development, run `cargo fmt --all -- --check`,
 `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked`.
 The same checks run in GitHub Actions on Ubuntu 26.04, macOS 26, and Windows Server 2025.
 CI also checks all targets with Rust 1.85 on each of these platforms.
+
+Keep the compiled UI in `ui/dist` under version control
+so Rust installation does not need to run the frontend build.
+To change the UI, use Node 24 and rebuild the assets before compiling Rust:
+
+```sh
+cd ui
+npm ci
+npm test
+npm run build
+cd ..
+cargo install --path . --locked --force
+```
+
+An opt-in synthetic VM integration test exercises the gateway, provider attachment,
+image environment, read-only mounts, private output retrieval,
+and sandbox cleanup without calling a model:
+
+```sh
+REVIEW_PLATFORM_LIVE_VM_CONFIG=/absolute/path/to/private-config.json \
+  cargo test --test live_vm -- --ignored
+```
+
+The config must point to an existing VM tar, its `.config.json` metadata,
+and a policy with correct checksums.
+Set `REVIEW_PLATFORM_LIVE_VM_DIR` when the gateway requires test paths
+on a particular host directory.
+Set `REVIEW_PLATFORM_LIVE_VM_REPOSITORY` when the configuration does not
+include the test's default `owner/repo` repository.
+The test checks the executable and CLI flags for the first resolved agent,
+so a configuration selecting Codex exercises its VM image as well.
