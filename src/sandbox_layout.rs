@@ -11,10 +11,6 @@ pub fn system_prompt_file() -> String {
     format!("{INSTRUCTIONS_TARGET}/system-prompt.txt")
 }
 
-pub fn review_output_file() -> String {
-    format!("{OUTPUT_TARGET}/{OUTPUT_FILE_NAME}")
-}
-
 pub fn review_output_schema_file() -> String {
     format!("{INSTRUCTIONS_TARGET}/{OUTPUT_SCHEMA_FILE_NAME}")
 }

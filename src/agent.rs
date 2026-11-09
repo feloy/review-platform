@@ -133,6 +133,7 @@ pub enum AgentRunError {
 pub struct AgentRun {
     pub log: String,
     pub result: Result<(), AgentRunError>,
+    pub final_response: Option<String>,
 }
 
 /// Trusted command inputs for one selected review round.
@@ -141,7 +142,6 @@ pub struct AgentInvocation<'a> {
     round: &'a RoundRecord,
     prompt_path: &'a str,
     base_sha: &'a str,
-    output_file: &'a str,
 }
 
 impl<'a> AgentInvocation<'a> {
@@ -150,14 +150,12 @@ impl<'a> AgentInvocation<'a> {
         round: &'a RoundRecord,
         prompt_path: &'a str,
         base_sha: &'a str,
-        output_file: &'a str,
     ) -> Self {
         Self {
             prepared,
             round,
             prompt_path,
             base_sha,
-            output_file,
         }
     }
 }
@@ -182,6 +180,7 @@ pub fn run(
             return AgentRun {
                 log: String::new(),
                 result: Err(AgentRunError::Launch),
+                final_response: None,
             };
         }
     };
@@ -191,6 +190,7 @@ pub fn run(
         return AgentRun {
             log: String::new(),
             result: Err(AgentRunError::Launch),
+            final_response: None,
         };
     };
     let (sender, receiver) = mpsc::channel();
@@ -239,10 +239,17 @@ pub fn run(
     let capture = capture.unwrap_or_else(|| AgentRun {
         log: String::new(),
         result: Err(AgentRunError::ReadLog),
+        final_response: None,
     });
+    let result = process_result.and(capture.result);
     AgentRun {
         log: capture.log,
-        result: process_result.and(capture.result),
+        final_response: if result.is_ok() {
+            capture.final_response
+        } else {
+            None
+        },
+        result,
     }
 }
 
@@ -279,6 +286,7 @@ fn capture_lines(
                 return AgentRun {
                     log: log.text,
                     result: Err(AgentRunError::ReadLog),
+                    final_response: None,
                 };
             }
         };
@@ -294,6 +302,7 @@ fn capture_lines(
                     return AgentRun {
                         log: log.text,
                         result: Err(AgentRunError::InvalidUtf8),
+                        final_response: None,
                     };
                 }
             };
@@ -301,6 +310,7 @@ fn capture_lines(
                 return AgentRun {
                     log: log.text,
                     result: Err(error),
+                    final_response: None,
                 };
             }
         }
@@ -308,6 +318,7 @@ fn capture_lines(
             return AgentRun {
                 log: log.text,
                 result: Err(AgentRunError::LogTooLarge),
+                final_response: None,
             };
         }
     }
@@ -318,6 +329,7 @@ fn capture_lines(
                 return AgentRun {
                     log: log.text,
                     result: Err(AgentRunError::InvalidUtf8),
+                    final_response: None,
                 };
             }
         };
@@ -325,12 +337,14 @@ fn capture_lines(
             return AgentRun {
                 log: log.text,
                 result: Err(error),
+                final_response: None,
             };
         }
     }
     AgentRun {
         log: log.text,
         result: Ok(()),
+        final_response: None,
     }
 }
 

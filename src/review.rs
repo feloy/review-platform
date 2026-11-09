@@ -9,9 +9,10 @@ use crate::publication::{
 use crate::{HeadSha, InputRevision, ObservedDiscussion, PrKey};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 pub const REVIEW_RULES: &str = concat!(
@@ -658,6 +659,12 @@ pub enum ArtifactError {
         #[source]
         source: std::io::Error,
     },
+    #[error("writing private agent output {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("agent output must be a regular file, not a link")]
     NotRegular,
     #[error("agent output exceeds 1 MiB")]
@@ -676,6 +683,42 @@ pub enum ArtifactError {
 
 pub fn read_agent_output(path: &Path, review_log: String) -> Result<DraftOutput, ArtifactError> {
     read_agent_output_with_hash(path, review_log).map(|(draft, _)| draft)
+}
+
+/// Replace the runner-owned artifact with the exact final response captured from the agent stream.
+pub fn write_agent_output(path: &Path, response: &str) -> Result<(), ArtifactError> {
+    let bytes = response.as_bytes();
+    if bytes.len() as u64 > AGENT_OUTPUT_LIMIT {
+        return Err(ArtifactError::TooLarge);
+    }
+    let parent = path.parent().ok_or(ArtifactError::Write {
+        path: path.to_owned(),
+        source: std::io::Error::other("artifact path has no parent"),
+    })?;
+    let mut temporary = NamedTempFile::new_in(parent).map_err(|source| ArtifactError::Write {
+        path: path.to_owned(),
+        source,
+    })?;
+    temporary
+        .write_all(bytes)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|source| ArtifactError::Write {
+            path: path.to_owned(),
+            source,
+        })?;
+    temporary
+        .persist(path)
+        .map_err(|source| ArtifactError::Write {
+            path: path.to_owned(),
+            source: source.error,
+        })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| ArtifactError::Write {
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok(())
 }
 
 /// Validate the original agent file and hash the bytes read from that opened file.
@@ -848,6 +891,43 @@ mod tests {
             read_agent_output(&path, String::new()),
             Err(ArtifactError::EmptyComments)
         ));
+    }
+
+    #[test]
+    fn writes_the_exact_final_response_as_the_agent_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.json");
+        let response = "{\"status\":\"ACCEPT\",\"comments\":\"ok\",\"lead_advice\":\"private\"}";
+        fs::write(&path, OUTPUT_MARKER).unwrap();
+        write_agent_output(&path, response).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), response.as_bytes());
+        let output = read_agent_output(&path, String::new()).unwrap();
+        assert_eq!(output.publication_body(), "ok");
+        assert_eq!(output.lead_advice(), "private");
+        assert!(matches!(
+            write_agent_output(&path, &"x".repeat(AGENT_OUTPUT_LIMIT as usize + 1)),
+            Err(ArtifactError::TooLarge)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), response.as_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writing_an_artifact_replaces_a_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        let linked = dir.path().join("agent.json");
+        fs::write(&target, b"private target").unwrap();
+        symlink(&target, &linked).unwrap();
+        write_agent_output(
+            &linked,
+            "{\"status\":\"ACCEPT\",\"comments\":\"ok\",\"lead_advice\":\"\"}",
+        )
+        .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"private target");
+        assert!(fs::symlink_metadata(&linked).unwrap().file_type().is_file());
     }
 
     #[test]

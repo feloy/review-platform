@@ -517,7 +517,6 @@ fn execute_review(
         }
         println!("Round {id}: running {}.", choice.agent().runner().kind().as_str());
         let prompt_path = sandbox_layout::system_prompt_file();
-        let result_path = sandbox_layout::review_output_file();
         let run = agent::run(
             &shell,
             config.execution(),
@@ -527,7 +526,6 @@ fn execute_review(
                 &record,
                 &prompt_path,
                 pull.base_sha().as_str(),
-                &result_path,
             ),
             cancelled.clone(),
         );
@@ -541,9 +539,17 @@ fn execute_review(
             incomplete_log = true;
             anyhow::bail!("{error}");
         }
+        failure = FailureKind::Output;
+        let final_response = run
+            .final_response
+            .as_deref()
+            .context("successful review did not provide a final response")?;
+        review_platform::review::write_agent_output(
+            &output.join(sandbox_layout::OUTPUT_FILE_NAME),
+            final_response,
+        )?;
         let stop_result = shell.stop(&record);
         println!("Round {id}: validating private draft.");
-        failure = FailureKind::Output;
         let stop_error = save_output_after_stop_attempt(
             stop_result,
             &output.join(sandbox_layout::OUTPUT_FILE_NAME),
@@ -555,6 +561,12 @@ fn execute_review(
             &output.join(sandbox_layout::OUTPUT_FILE_NAME),
             String::new(),
         )?;
+        let final_response_hash =
+            review_platform::publication::PublicationHash::of(final_response.as_bytes());
+        anyhow::ensure!(
+            artifact_hash == final_response_hash,
+            "saved agent artifact differs from the captured final response"
+        );
         anyhow::ensure!(
             draft.status() == agent.status()
                 && draft.comments() == agent.comments()
