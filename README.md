@@ -920,8 +920,8 @@ The adapter uses the existing private round output directory as `CODEX_HOME`;
 any CLI runtime files remain private beside that round's draft.
 Use an OpenShell model provider that supplies OpenAI Responses API access and an `OPENAI_API_KEY` credential.
 Set its non-secret `OPENAI_BASE_URL` in the verified image metadata or `runner.environment`.
-The adapter requires an explicit absolute HTTP(S) endpoint without embedded credentials, query, or fragment.
-It configures a custom Codex provider for that endpoint with HTTP(S) streaming rather than WebSockets;
+The adapter requires an explicit absolute HTTPS endpoint without embedded credentials, query, or fragment.
+It configures a custom Codex provider for that endpoint with HTTP streaming rather than WebSockets;
 missing endpoint configuration fails before sandbox creation, with no public-service fallback.
 The filesystem policy blocks writes; it does not restrict shell execution to a command allowlist.
 The trusted instructions prohibit executing repository code, installing dependencies, or running tests.

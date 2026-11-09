@@ -47,7 +47,7 @@ impl AgentAdapter for CodexAdapter {
         let uri = endpoint
             .parse::<ureq::http::Uri>()
             .map_err(|_| AgentPreparationError::InvalidCodexEndpoint)?;
-        if !matches!(uri.scheme_str(), Some("http" | "https"))
+        if uri.scheme_str() != Some("https")
             || uri.host().is_none()
             || uri
                 .authority()
@@ -324,6 +324,7 @@ mod tests {
             None,
             Some("relative/path"),
             Some("ftp://gateway.example"),
+            Some("http://gateway.example/v1"),
             Some("https://secret@gateway.example/v1"),
             Some("https://gateway.example/v1?key=secret"),
             Some("https://gateway.example/v1#fragment"),
