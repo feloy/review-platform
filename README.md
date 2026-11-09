@@ -923,7 +923,10 @@ Set its non-secret `OPENAI_BASE_URL` in the verified image metadata or `runner.e
 The adapter requires an explicit absolute HTTPS endpoint without embedded credentials, query, or fragment.
 It configures a custom Codex provider for that endpoint with HTTP streaming rather than WebSockets;
 missing endpoint configuration fails before sandbox creation, with no public-service fallback.
-The filesystem policy blocks writes; it does not restrict shell execution to a command allowlist.
+The filesystem policy blocks writes;
+it does not restrict shell execution to a command allowlist,
+so the input-boundary design is tracked in
+[issue #13](https://github.com/feloy/review-platform/issues/13).
 The trusted instructions prohibit executing repository code, installing dependencies, or running tests.
 See the official [Codex CLI reference](https://developers.openai.com/codex/cli/reference/)
 and [configuration reference](https://developers.openai.com/codex/config-reference/).
