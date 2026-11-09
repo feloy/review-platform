@@ -130,6 +130,9 @@ before any sandbox is created.
 Round-specific checkout and output paths are filled in when the sandbox is created.
 The runner validates these values against the read-only input and isolated output rules.
 It attaches only those providers and disables automatic provider creation.
+Codex disables its own nested Linux sandbox and relies on the outer VM boundary;
+the VM still supplies the only readable inputs, the only writable output,
+and the enforced network and GitHub policies.
 Provider names alone do not prove their permissions;
 the operator must maintain the required policies,
 and the runner must reject any incompatible policy it can inspect.
