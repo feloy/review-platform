@@ -172,7 +172,7 @@ pub fn run(
     let mut process = shell.exec_review_agent(invocation.round, &command);
     process
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .stdin(Stdio::null());
     let mut child = match process.spawn() {
         Ok(child) => child,
@@ -193,6 +193,15 @@ pub fn run(
             final_response: None,
         };
     };
+    let Some(mut stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return AgentRun {
+            log: String::new(),
+            result: Err(AgentRunError::Launch),
+            final_response: None,
+        };
+    };
     let (sender, receiver) = mpsc::channel();
     let limit = config.log_limit_bytes();
     let turns = runner.max_turns();
@@ -200,6 +209,7 @@ pub fn run(
         let capture = adapter.capture(&mut stdout, limit, turns);
         let _ = sender.send(capture);
     });
+    let stderr_reader = std::thread::spawn(move || read_limited(&mut stderr, limit));
     let deadline = Instant::now() + Duration::from_secs(config.timeout_seconds());
     let (capture, process_result) = loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -236,21 +246,74 @@ pub fn run(
     };
     let _ = child.wait();
     let _ = reader.join();
+    let stderr = stderr_reader.join().unwrap_or(Err(AgentRunError::ReadLog));
     let capture = capture.unwrap_or_else(|| AgentRun {
         log: String::new(),
         result: Err(AgentRunError::ReadLog),
         final_response: None,
     });
-    let result = process_result.and(capture.result);
-    AgentRun {
-        log: capture.log,
-        final_response: if result.is_ok() {
-            capture.final_response
-        } else {
-            None
+    with_stderr(
+        AgentRun {
+            log: capture.log,
+            final_response: capture.final_response,
+            result: process_result.and(capture.result),
         },
-        result,
+        stderr,
+        limit,
+    )
+}
+
+fn with_stderr(mut run: AgentRun, stderr: Result<String, AgentRunError>, limit: u64) -> AgentRun {
+    let result = match stderr {
+        Ok(_) => run.result,
+        Err(error) => Err(error),
+    };
+    if let Ok(stderr) = stderr {
+        if !stderr.is_empty() {
+            let mut log = Log {
+                text: run.log,
+                limit,
+            };
+            if let Err(error) = log.append(&format!("\nAgent stderr:\n{stderr}\n")) {
+                run.log = log.text;
+                run.result = Err(error);
+                run.final_response = None;
+                return run;
+            }
+            run.log = log.text;
+        }
     }
+    run.result = result;
+    run.final_response = if result.is_ok() {
+        run.final_response
+    } else {
+        None
+    };
+    run
+}
+
+fn read_limited(mut reader: impl Read, limit: u64) -> Result<String, AgentRunError> {
+    let mut bytes = Vec::new();
+    let mut exceeded_limit = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(count) => count,
+            Err(_) => return Err(AgentRunError::ReadLog),
+        };
+        if count == 0 {
+            break;
+        }
+        if bytes.len() as u64 + count as u64 <= limit {
+            bytes.extend_from_slice(&buffer[..count]);
+        } else {
+            exceeded_limit = true;
+        }
+    }
+    if exceeded_limit {
+        return Err(AgentRunError::LogTooLarge);
+    }
+    String::from_utf8(bytes).map_err(|_| AgentRunError::InvalidUtf8)
 }
 
 struct Log {
@@ -443,5 +506,33 @@ mod tests {
         let codex = compose_system_prompt(AgentKind::Codex, "Review the PR.");
         assert!(!codex.contains("dontAsk"));
         assert!(!codex.contains("Use Edit"));
+    }
+
+    #[test]
+    fn stderr_is_preserved_when_the_event_stream_is_invalid() {
+        let run = AgentRun {
+            log: String::from("stdout log\n"),
+            result: Err(AgentRunError::InvalidEvent),
+            final_response: None,
+        };
+        let run = with_stderr(run, Ok(String::from("unexpected warning")), 1024);
+
+        assert_eq!(run.result, Err(AgentRunError::InvalidEvent));
+        assert!(run.log.contains("stdout log\n"));
+        assert!(run.log.contains("\nAgent stderr:\nunexpected warning\n"));
+        assert_eq!(run.final_response, None);
+    }
+
+    #[test]
+    fn stderr_obeys_the_combined_log_limit() {
+        let run = AgentRun {
+            log: String::from("stdout log\n"),
+            result: Err(AgentRunError::InvalidEvent),
+            final_response: None,
+        };
+        let run = with_stderr(run, Ok(String::from("stderr")), 17);
+
+        assert_eq!(run.result, Err(AgentRunError::LogTooLarge));
+        assert_eq!(run.final_response, None);
     }
 }

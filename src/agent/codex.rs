@@ -163,7 +163,13 @@ struct Renderer {
 
 impl Renderer {
     fn render(&mut self, line: &str, log: &mut Log) -> Result<(), AgentRunError> {
-        let event: Value = serde_json::from_str(line).map_err(|_| AgentRunError::InvalidEvent)?;
+        let event = match serde_json::from_str::<Value>(line) {
+            Ok(event) => event,
+            Err(_) => {
+                log.append(&format!("\nCodex invalid event:\n{line}\n"))?;
+                return Err(AgentRunError::InvalidEvent);
+            }
+        };
         match event["type"].as_str().ok_or(AgentRunError::InvalidEvent)? {
             "thread.started" => log.append("Codex session started\n")?,
             "turn.started" | "item.started" | "item.updated" => {}
@@ -388,6 +394,8 @@ mod tests {
                 .result,
             Err(AgentRunError::InvalidEvent)
         );
+        let run = CodexAdapter.capture(&mut b"not JSON\n".as_slice(), 1024, 10);
+        assert!(run.log.contains("\nCodex invalid event:\nnot JSON\n"));
         assert_eq!(
             CodexAdapter
                 .capture(&mut b"\xff\n".as_slice(), 1024, 10)

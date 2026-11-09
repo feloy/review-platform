@@ -936,6 +936,8 @@ Only `comments` becomes the GitHub review body, followed by the visible footer;
 
 The rendered log limit defaults to 8 MiB;
 exceeding it fails the round instead of truncating it.
+The log records malformed Codex stream lines and agent stderr,
+so local failures retain their diagnostic context.
 Routine CLI output shows progress phases without the dialogue or draft.
 `show-draft --log` is an explicit request to display the sensitive log.
 Terminal control characters in displayed draft text are escaped.
