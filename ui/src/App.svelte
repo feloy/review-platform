@@ -51,8 +51,7 @@
     checkingSession = false;
   }
 
-  async function signIn(event) {
-    event.preventDefault();
+  async function exchangeCode(code) {
     if (signingIn) return;
     signingIn = true;
     signInError = '';
@@ -60,7 +59,7 @@
       const response = await fetch('/api/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: signInCode.trim() }),
+        body: JSON.stringify({ code }),
       });
       if (!response.ok) {
         signInError = response.status === 401
@@ -75,7 +74,13 @@
       signInError = 'Could not connect to the local API. Try again.';
     } finally {
       signingIn = false;
+      checkingSession = false;
     }
+  }
+
+  async function signIn(event) {
+    event.preventDefault();
+    return exchangeCode(signInCode.trim());
   }
 
   async function performRequestAction(requestId, operation, body, successMessage, failureMessage) {
@@ -232,7 +237,15 @@
   }
 
   onMount(() => {
-    checkSession();
+    const url = new URL(window.location.href);
+    const bootstrapCode = url.searchParams.get('code')?.trim() ?? '';
+    if (bootstrapCode) {
+      url.searchParams.delete('code');
+      window.history.replaceState(window.history.state, '', url);
+      exchangeCode(bootstrapCode);
+    } else {
+      checkSession();
+    }
     const events = new EventSource('/api/requests/events');
 
     events.onopen = () => {

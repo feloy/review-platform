@@ -189,8 +189,7 @@ Review workflow operations remain available through the CLI while the GUI grows.
 
 ```sh
 review-platform gui
-# Open http://localhost:8080/ in a browser.
-# Enter the one-time sign-in code shown in the terminal to enable actions.
+# Open the one-time sign-in link shown in the terminal to enable actions.
 # Inspect the current local request list.
 curl http://localhost:8080/api/requests
 # Watch request updates from the server.
@@ -200,13 +199,13 @@ curl -N http://localhost:8080/api/requests/events
 The command serves the compiled HTML, JavaScript, and CSS from the executable
 and listens only on IPv4 loopback at port 8080.
 
-The command requires an interactive terminal to display its one-time code.
+The command requires an interactive terminal to display its one-time sign-in link.
 It trusts the OS user who launches it as the lead:
-anyone with access to that terminal and code can start the browser session.
+anyone with access to that terminal and sign-in link can start the browser session.
 Keep the terminal and browser session private.
 The code can be used once, and the session is tied to the browser tab and server launch;
 reloads in that tab retain it.
-If the session is lost, restart the GUI for a new code.
+If the session is lost, restart the GUI for a new sign-in link.
 The GUI uses the GitHub credentials available when it starts.
 
 `GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
