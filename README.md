@@ -900,16 +900,18 @@ Claude Code may still allow some reads and simple shell commands outside the exp
 The wildcard Git and GitHub Bash grants do not restrict every read or write option.
 This is a known limitation tracked in [issue #13](https://github.com/feloy/review-platform/issues/13).
 
-The Codex adapter requires Codex CLI 0.166.0 or newer with the documented permission-profile support.
+The Codex adapter requires Codex CLI 0.159.3 or newer with sandbox-mode support.
 It uses `codex exec --json --ephemeral --ignore-user-config --ignore-rules --strict-config`.
-An explicit permission profile extends `:read-only` and enables network access for GitHub reads;
-the operator's OpenShell policy still controls network destinations and read-only GitHub access.
+It selects Codex `danger-full-access` internally because nested user namespaces are unavailable
+inside the OpenShell VM; the outer VM still controls filesystem mounts, network destinations,
+and read-only GitHub access.
 Approval prompts, repository instruction loading, hooks, automatic skill instructions,
 MCP servers, plugins, multi-agent delegation, memories, and web search are disabled.
 The trusted system prompt is supplied through `model_instructions_file`.
 Codex receives the required JSON Schema through `--output-schema`,
 and its final response is captured from the JSON event stream.
-Its tools receive no writable repository or output directory grant.
+Its tools receive no writable repository mount;
+the only writable mount is the private round output directory.
 The adapter uses the existing private round output directory as `CODEX_HOME`;
 any CLI runtime files remain private beside that round's draft.
 Use an OpenShell model provider that supplies OpenAI Responses API access and an `OPENAI_API_KEY` credential.

@@ -1,4 +1,4 @@
-//! Codex CLI invocation, read-only tool permissions, and JSON event interpretation.
+//! Codex CLI invocation, VM-bound tool access, and JSON event interpretation.
 
 use super::{
     AgentAdapter, AgentInvocation, AgentPreparationError, AgentRun, AgentRunError, Log,
@@ -13,8 +13,9 @@ use std::ffi::OsString;
 use std::io::Read;
 
 const TOOL_GUIDANCE: &str = concat!(
-    "Tool access for this review: Codex runs in /sandbox with read-only filesystem access ",
-    "for tool calls, network access through the operator's OpenShell policy, and no approvals.\n",
+    "Tool access for this review: Codex runs inside the operator's OpenShell VM, ",
+    "which provides read-only review inputs, a private writable output directory, ",
+    "network access through the operator's policy, and no approvals.\n",
     "Read review inputs under /sandbox/src and trusted instructions under /sandbox/instructions.\n",
     "Use read-only Git commands and gh api --method GET for GitHub context. ",
     "Do not execute repository code, install dependencies, run tests, or modify files.\n",
@@ -83,9 +84,6 @@ impl AgentAdapter for CodexAdapter {
             "model_providers.review.requires_openai_auth=false",
             "model_providers.review.supports_websockets=false",
             "approval_policy=\"never\"",
-            "default_permissions=\"review\"",
-            "permissions.review.extends=\":read-only\"",
-            "permissions.review.network.enabled=true",
             "project_doc_max_bytes=0",
             "project_doc_fallback_filenames=[]",
             "projects.\"/sandbox\".trust_level=\"untrusted\"",
@@ -112,6 +110,8 @@ impl AgentAdapter for CodexAdapter {
             "--ignore-rules".into(),
             "--ephemeral".into(),
             "--skip-git-repo-check".into(),
+            "--sandbox".into(),
+            "danger-full-access".into(),
             "--cd".into(),
             sandbox_layout::WORKDIR_TARGET.into(),
             "--model".into(),
@@ -282,9 +282,6 @@ mod tests {
             "model_providers.review.requires_openai_auth=false",
             "model_providers.review.supports_websockets=false",
             "approval_policy=\"never\"",
-            "default_permissions=\"review\"",
-            "permissions.review.extends=\":read-only\"",
-            "permissions.review.network.enabled=true",
             "project_doc_max_bytes=0",
             "project_doc_fallback_filenames=[]",
             "projects.\"/sandbox\".trust_level=\"untrusted\"",
@@ -302,6 +299,7 @@ mod tests {
         for (flag, expected) in [
             ("--cd", "/sandbox"),
             ("--model", "model-alpha"),
+            ("--sandbox", "danger-full-access"),
             (
                 "--output-schema",
                 "/sandbox/instructions/review-output.schema.json",
