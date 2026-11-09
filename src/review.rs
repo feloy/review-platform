@@ -712,12 +712,15 @@ pub fn write_agent_output(path: &Path, response: &str) -> Result<(), ArtifactErr
             path: path.to_owned(),
             source: source.error,
         })?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| ArtifactError::Write {
-            path: path.to_owned(),
-            source,
-        })?;
+    #[cfg(not(windows))]
+    {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| ArtifactError::Write {
+                path: path.to_owned(),
+                source,
+            })?;
+    }
     Ok(())
 }
 
