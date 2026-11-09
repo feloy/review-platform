@@ -893,10 +893,11 @@ and keeps an incomplete log file if an agent run fails after emitting dialogue.
 
 Both adapters start in `/sandbox` and share the same draft validation and publication rules.
 The runner seeds the output file with an invalid marker.
-For Claude, it grants the `Edit` tool permission to replace that marker.
-Relative `Read` permissions cover the checkout and instructions.
-`Edit(./output/review-output.json)` matches the output file.
-An unchanged marker cannot become a draft.
+Both agents must return the required JSON object as their final response.
+After a successful stream and process exit,
+the trusted runner captures that exact response
+and atomically replaces the marker with the private artifact.
+Neither adapter receives an intended tool permission to write the artifact.
 
 The trusted prompt lists the standalone Git and GitHub Bash commands the runner grants.
 It tells Claude to treat other shell commands as denied.
@@ -913,9 +914,8 @@ Approval prompts, repository instruction loading, hooks, automatic skill instruc
 MCP servers, plugins, multi-agent delegation, memories, and web search are disabled.
 The trusted system prompt is supplied through `model_instructions_file`.
 Codex receives the required JSON Schema through `--output-schema`,
-and `--output-last-message` saves its final response to the draft artifact.
+and its final response is captured from the JSON event stream.
 Its tools receive no writable repository or output directory grant.
-The CLI itself writes the final artifact outside its tool sandbox.
 The adapter uses the existing private round output directory as `CODEX_HOME`;
 any CLI runtime files remain private beside that round's draft.
 Use an OpenShell model provider that supplies OpenAI Responses API access and an `OPENAI_API_KEY` credential.

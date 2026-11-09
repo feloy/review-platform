@@ -153,7 +153,6 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
                 "--ignore-rules",
                 "--strict-config",
                 "--output-schema",
-                "--output-last-message",
             ]
         }
     };
