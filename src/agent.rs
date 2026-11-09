@@ -45,7 +45,7 @@ pub enum AgentPreparationError {
     #[error("VM image configuration lacks an absolute {variable} path")]
     MissingExecutable { variable: &'static str },
     #[error(
-        "Codex requires an absolute HTTP(S) OPENAI_BASE_URL without credentials, query, or fragment in image metadata or runner.environment"
+        "Codex requires an absolute HTTPS OPENAI_BASE_URL without credentials, query, or fragment in image metadata or runner.environment"
     )]
     InvalidCodexEndpoint,
 }
