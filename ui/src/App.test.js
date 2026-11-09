@@ -131,6 +131,7 @@ async function openActionsMenu(user, row) {
 beforeEach(() => {
   FakeEventSource.instances = [];
   sessionStorage.clear();
+  window.history.replaceState(null, '', '/');
   vi.stubGlobal('EventSource', FakeEventSource);
 });
 
@@ -268,6 +269,25 @@ describe('refresh all open PRs', () => {
     await act(() => finishBatchRefresh({ ok: true, json: async () => ({ changed: false }) }));
     expect(await screen.findByText('Refreshed 1 of 3 PRs. Skipped 2 busy, removed, or closed PRs.')).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('sign-in link', () => {
+  it('exchanges the URL code and removes it from the address bar', async () => {
+    window.history.pushState({}, '', '/?code=url-code');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ token: 'session-token' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(App);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/session');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ code: 'url-code' });
+    expect(window.location.search).toBe('');
+    await waitFor(() => expect(sessionStorage.getItem('review-platform-session')).toBe('session-token'));
+    await waitFor(() => expect(screen.queryByLabelText('One-time code')).toBeNull());
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    expect(await screen.findByText('Refresh from GitHub')).toBeTruthy();
   });
 });
 

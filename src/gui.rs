@@ -380,7 +380,7 @@ enum LastEvent {
 
 pub fn run(state_override: Option<PathBuf>, config_override: Option<PathBuf>) -> Result<()> {
     if !std::io::stdout().is_terminal() {
-        anyhow::bail!("GUI requires a terminal to display its one-time sign-in code");
+        anyhow::bail!("GUI requires a terminal to display its one-time sign-in link");
     }
     let state_file = storage::resolve_path(state_override)?;
     let config_file = storage::resolve_config_path(config_override)?;
@@ -396,8 +396,7 @@ pub fn run(state_override: Option<PathBuf>, config_override: Option<PathBuf>) ->
         let listener = tokio::net::TcpListener::bind(ADDRESS)
             .await
             .context("binding GUI to 127.0.0.1:8080")?;
-        println!("Review Platform GUI: http://localhost:8080/");
-        println!("One-time sign-in code: {bootstrap}");
+        println!("Review Platform GUI: http://localhost:8080/?code={bootstrap}");
         let session = Session {
             bootstrap: Some(bootstrap),
             token,
