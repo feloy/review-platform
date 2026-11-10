@@ -1258,7 +1258,7 @@ describe('review requests page', () => {
     expect(sessionStorage.getItem('review-platform-session')).toBeNull();
   });
 
-  it('runs the validated selection for frozen inputs and prevents duplicate clicks', async () => {
+  it.each(['auto', 'full'])('runs the validated selection with %s scope for frozen inputs and prevents duplicate clicks', async (reviewMode) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
     let acceptRun: FinishFetch;
@@ -1278,6 +1278,9 @@ describe('review requests page', () => {
     expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await user.selectOptions(model, 'model-beta');
+    const scope = screen.getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement;
+    expect(scope.value).toBe('auto');
+    await user.selectOptions(scope, reviewMode);
     const run = await clickMaterialButton(user, container, 'Run review');
     expect(run.disabled).toBe(true);
     expect(model.disabled).toBe(true);
@@ -1285,6 +1288,7 @@ describe('review requests page', () => {
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({
       key: { repository: 'owner/repo', number: 15 }, model: 'model-beta', head_sha: 'a'.repeat(40), revision: 2,
+      review_mode: reviewMode,
       rules: { authorization: 'one_round', configuration_sha256: 'c'.repeat(64) },
     });
     await clickMaterialButton(user, container, 'Starting review…');

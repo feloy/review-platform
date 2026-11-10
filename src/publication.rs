@@ -321,6 +321,10 @@ impl PublicationReceipt {
     pub fn review_id(&self) -> u64 {
         self.review_id.get()
     }
+
+    pub(crate) fn review_id_nonzero(&self) -> NonZeroU64 {
+        self.review_id
+    }
     pub fn url(&self) -> &str {
         &self.url
     }

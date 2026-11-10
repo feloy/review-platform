@@ -8,6 +8,7 @@ pub mod github;
 mod model;
 pub mod openshell;
 pub mod preparation;
+pub mod prompt_builder;
 pub mod publication;
 pub mod review;
 pub mod round;

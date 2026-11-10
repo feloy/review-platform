@@ -194,7 +194,7 @@ pub struct ModelValidation {
     head_sha: HeadSha,
     revision: InputRevision,
     prompt_sha256: PromptHash,
-    // Serialized name predates adapters; this hashes common rules and selected tool guidance.
+    // Historical name: compiled system/agent guidance, task templates, and output schema.
     format_sha256: PromptHash,
     execution_sha256: PromptHash,
     runner_sha256: PromptHash,
@@ -221,8 +221,9 @@ impl ModelValidation {
     pub fn matches(&self, choice: &ResolvedReviewModel<'_>) -> bool {
         self.model == *choice.model().id()
             && self.agent == *choice.agent().id()
-            && self.prompt_sha256 == *choice.agent().prompt_hash()
-            && self.format_sha256 == crate::agent::rules_hash(choice.agent().runner().kind())
+            && self.prompt_sha256 == *choice.prompt().hash()
+            && self.format_sha256
+                == crate::prompt_builder::rules_hash(choice.agent().runner().kind())
             && self.execution_sha256 == *choice.execution().hash()
             && self.runner_sha256 == *choice.agent().runner().hash()
             && self.vm_archive == *choice.archive()
@@ -388,6 +389,9 @@ impl State {
             if !seen.contains(round.key()) {
                 return Err(StateError::InvalidRound(round.id().to_string()));
             }
+            if !self.task_matches_history(round) {
+                return Err(StateError::InvalidRound(round.id().to_string()));
+            }
             if round.blocks_new_round() && !blocking_keys.insert(round.key()) {
                 return Err(StateError::InvalidRound(round.id().to_string()));
             }
@@ -398,6 +402,38 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    fn task_matches_history(&self, round: &RoundRecord) -> bool {
+        match round.task().map(|task| task.scope()) {
+            Some(crate::prompt_builder::ReviewScope::Incremental { since, review_id }) => self
+                .rounds
+                .iter()
+                .take_while(|previous| previous.id() != round.id())
+                .any(|previous| {
+                    previous.key() == round.key()
+                        && previous.receipt().is_some_and(|receipt| {
+                            receipt.review_id() == review_id.get() && receipt.commit_id() == since
+                        })
+                }),
+            Some(crate::prompt_builder::ReviewScope::Full) | None => true,
+        }
+    }
+
+    /// Resolve the default scope from this PR's confirmed publications only.
+    /// The caller must verify ancestry before retaining an incremental candidate.
+    pub fn review_scope(
+        &self,
+        key: &PrKey,
+        mode: crate::prompt_builder::ReviewMode,
+    ) -> crate::prompt_builder::ReviewScope {
+        let previous = self
+            .rounds
+            .iter()
+            .rev()
+            .filter(|round| round.key() == key)
+            .find_map(|round| round.receipt());
+        crate::prompt_builder::scope(mode, previous)
     }
 
     /// Requests currently managed by the operator.
@@ -449,13 +485,15 @@ impl State {
             return Err(StateError::AwaitingAuthorization(round.key().clone()).into());
         }
         if request.discussion() != Some(round.discussion())
+            || !self.task_matches_history(&round)
             || !request
                 .model_validation()
                 .is_some_and(|validation| validation.matches(choice))
             || round.model() != choice.model().id()
             || round.agent() != choice.agent().id()
-            || round.prompt_hash() != choice.agent().prompt_hash()
-            || round.format_hash() != &crate::agent::rules_hash(choice.agent().runner().kind())
+            || round.prompt_hash() != choice.prompt().hash()
+            || round.format_hash()
+                != &crate::prompt_builder::rules_hash(choice.agent().runner().kind())
             || round.execution_hash() != choice.execution().hash()
             || round.runner_hash() != choice.agent().runner().hash()
             || round.archive_hash() != choice.archive().checksum()
@@ -957,8 +995,8 @@ impl State {
             agent: choice.agent().id().clone(),
             head_sha: inspected_head.clone(),
             revision: inspected_revision,
-            prompt_sha256: choice.agent().prompt_hash().clone(),
-            format_sha256: crate::agent::rules_hash(choice.agent().runner().kind()),
+            prompt_sha256: choice.prompt().hash().clone(),
+            format_sha256: crate::prompt_builder::rules_hash(choice.agent().runner().kind()),
             execution_sha256: choice.execution().hash().clone(),
             runner_sha256: choice.agent().runner().hash().clone(),
             vm_archive: choice.archive().clone(),
@@ -1713,14 +1751,14 @@ mod tests {
     #[test]
     fn model_validation_tracks_exact_inputs_and_is_cleared_by_changes() {
         let raw = serde_json::json!({
-            "schema_version":6,
+            "schema_version":7,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha", "coauthors":[]}],
             "agents":[
-                {"id":"claude", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()},
-                {"id":"another-agent", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("careful.md"), "runner":crate::config::test_runner_json()}
+                {"id":"claude", "models":["model-alpha"], "runner":crate::config::test_runner_json()},
+                {"id":"another-agent", "models":["model-alpha"], "runner":crate::config::test_runner_json()}
             ],
-            "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+            "repositories":[{"name":"owner/repo", "prompt_file": crate::config::test_prompt_file("review.md"), "review_models":["model-alpha"], "runners":[{
                 "agent":"claude",
                 "vm_archive":{
                     "path":std::env::temp_dir().join("reviewer.tar").to_str().unwrap(),
@@ -1824,7 +1862,7 @@ mod tests {
             Err(ModelValidationError::ArchiveNotVerified)
         ));
         let mut changed_config = raw.clone();
-        changed_config["agents"][0]["prompt_file"] =
+        changed_config["repositories"][0]["prompt_file"] =
             serde_json::json!(crate::config::test_prompt_file("changed.md"));
         let changed_config = ReviewConfig::from_json(
             &serde_json::to_vec(&changed_config).unwrap(),
@@ -1880,7 +1918,7 @@ mod tests {
             .model_validation
             .as_mut()
             .unwrap()
-            .format_sha256 = crate::agent::rules_hash(crate::config::AgentKind::Codex);
+            .format_sha256 = crate::prompt_builder::rules_hash(crate::config::AgentKind::Codex);
         assert!(
             !outdated_rules
                 .get(&key())
@@ -2039,11 +2077,11 @@ mod tests {
     #[test]
     fn rejection_preserves_authorization_and_only_clears_matching_model_validation() {
         let raw = serde_json::json!({
-            "schema_version":6,
+            "schema_version":7,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha", "coauthors":[]}],
-            "agents":[{"id":"claude", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()}],
-            "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+            "agents":[{"id":"claude", "models":["model-alpha"], "runner":crate::config::test_runner_json()}],
+            "repositories":[{"name":"owner/repo", "prompt_file": crate::config::test_prompt_file("review.md"), "review_models":["model-alpha"], "runners":[{
                 "agent":"claude", "vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
             }]}]
         });
@@ -2379,6 +2417,107 @@ mod tests {
         state
     }
 
+    fn state_with_confirmed_publication() -> State {
+        let mut state = state_with_saved_draft();
+        let id = RoundId::new("r-publish").unwrap();
+        let seal = test_seal(&id);
+        let hash = seal.hash().clone();
+        state.seal_round(&id, seal).unwrap();
+        let attempt = state
+            .reserve_publication(
+                &key(),
+                &id,
+                &hash,
+                "uid:1".into(),
+                "publisher".into(),
+                NonZeroU64::new(7).unwrap(),
+                vec![],
+                4,
+            )
+            .unwrap();
+        state.mark_publication_dispatched(&id, attempt, 5).unwrap();
+        let receipt = PublicationReceipt::new(
+            NonZeroU64::new(10).unwrap(),
+            "https://github.com/owner/repo/pull/42#pullrequestreview-10".into(),
+            "publisher".into(),
+            NonZeroU64::new(7).unwrap(),
+            head(HEAD_A),
+            "2026-10-30T10:00:00Z".into(),
+        );
+        state.record_publication(&id, attempt, receipt, 6).unwrap();
+        state
+    }
+
+    #[test]
+    fn review_scope_uses_only_this_prs_latest_confirmed_publication() {
+        use crate::prompt_builder::{ReviewMode, ReviewScope, ReviewTask};
+        let mut unposted = state_with_saved_draft();
+        assert_eq!(
+            unposted.review_scope(&key(), ReviewMode::Auto),
+            ReviewScope::Full
+        );
+        let id = RoundId::new("r-publish").unwrap();
+        let seal = test_seal(&id);
+        let hash = seal.hash().clone();
+        unposted.seal_round(&id, seal).unwrap();
+        unposted
+            .reject_round(&key(), &id, &hash, "uid:1".into(), 4)
+            .unwrap();
+        assert_eq!(
+            unposted.review_scope(&key(), ReviewMode::Auto),
+            ReviewScope::Full
+        );
+
+        let mut state = state_with_confirmed_publication();
+        let incremental = ReviewScope::Incremental {
+            since: head(HEAD_A),
+            review_id: NonZeroU64::new(10).unwrap(),
+        };
+        assert_eq!(state.review_scope(&key(), ReviewMode::Auto), incremental);
+        assert_eq!(
+            state.review_scope(&key(), ReviewMode::Full),
+            ReviewScope::Full
+        );
+        let other_key = PrKey::new("owner/other", 42).unwrap();
+        assert_eq!(
+            state.review_scope(&other_key, ReviewMode::Auto),
+            ReviewScope::Full
+        );
+
+        // A more recent private draft is neither the default baseline nor evidence of publication.
+        let mut later = serde_json::to_value(&state_with_saved_draft().rounds[0]).unwrap();
+        later["id"] = "r-later".into();
+        later["sandbox"] = "rp-r-later".into();
+        let mut later: RoundRecord = serde_json::from_value(later).unwrap();
+        later = later.with_task(ReviewTask::new(head(HEAD_B), incremental.clone()));
+        state.rounds.push(later);
+        state.validate().unwrap();
+        assert_eq!(state.review_scope(&key(), ReviewMode::Auto), incremental);
+        let saved = serde_json::to_value(&state).unwrap();
+        for (field, value) in [
+            ("review_id", serde_json::json!(11)),
+            ("since", serde_json::json!(HEAD_B)),
+        ] {
+            let mut corrupt = saved.clone();
+            corrupt["rounds"][1]["task"]["scope"][field] = value;
+            let corrupt: State = serde_json::from_value(corrupt).unwrap();
+            assert!(matches!(
+                corrupt.validate(),
+                Err(StateError::InvalidRound(_))
+            ));
+        }
+        state
+            .record_request(other_key.clone(), head(HEAD_A))
+            .unwrap();
+        let mut wrong_pr = serde_json::to_value(&state).unwrap();
+        wrong_pr["rounds"][1]["key"] = serde_json::to_value(other_key).unwrap();
+        let wrong_pr: State = serde_json::from_value(wrong_pr).unwrap();
+        assert!(matches!(
+            wrong_pr.validate(),
+            Err(StateError::InvalidRound(_))
+        ));
+    }
+
     #[test]
     fn unmanagement_revokes_access_and_readding_requires_fresh_inputs() {
         let mut state = State::default();
@@ -2674,11 +2813,11 @@ mod tests {
     #[test]
     fn revocation_between_creation_and_dispatch_prevents_consumption() {
         let raw = serde_json::json!({
-            "schema_version":6,
+            "schema_version":7,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha", "coauthors":[]}],
-            "agents":[{"id":"claude", "models":["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()}],
-            "repositories":[{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+            "agents":[{"id":"claude", "models":["model-alpha"], "runner":crate::config::test_runner_json()}],
+            "repositories":[{"name":"owner/repo", "prompt_file": crate::config::test_prompt_file("review.md"), "review_models":["model-alpha"], "runners":[{
                 "agent":"claude", "vm_archive":{"path":std::env::temp_dir().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
             }]}]
         });

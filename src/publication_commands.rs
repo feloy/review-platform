@@ -901,13 +901,13 @@ mod tests {
         )
         .unwrap();
         let mut config = serde_json::json!({
-            "schema_version": 6, "publisher_login": "different-publisher",
+            "schema_version": 7, "publisher_login": "different-publisher",
             "execution": {"openshell": directory.path().join("openshell"), "gateway":"gateway", "workspace":"default", "driver":"vm", "github_provider":"github-ro"},
             "models": [{"id":"model-alpha", "coauthors":[]}],
-            "agents": [{"id":"claude", "models":["model-alpha"], "prompt_file":"review.md", "runner": {
+            "agents": [{"id":"claude", "models":["model-alpha"], "runner": {
                 "kind":"claude", "model_provider":"model-provider", "policy": directory.path().join("policy.yaml"), "policy_sha256":"b".repeat(64), "hold_command":["/bin/sleep","3600"]
             }}],
-            "repositories": [{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+            "repositories": [{"name":"owner/repo", "prompt_file": "review.md", "review_models":["model-alpha"], "runners":[{
                 "agent":"claude", "vm_archive":{"path": directory.path().join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
             }]}],
         });

@@ -82,9 +82,14 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Keep inspected inputs fixed in GUI decision forms;
   live updates must not silently retarget a pending lead decision.
   Bind GUI model validation to the inspected configuration and authorization too.
-  Include referenced prompt contents, selected adapter guidance, and output schemas
+  Include referenced prompt contents, selected adapter guidance, task templates, and output schemas
   in configuration fingerprints and rechecks.
   Recheck persisted state even when the model choice appears unchanged.
+- Keep system rules, agent guidance, and task templates in source;
+  configure project guidance per repository.
+  Select full or incremental scope in the daemon using confirmed publication receipts.
+  Verify the previous reviewed commit's ancestry and fall back to full on divergent or missing history.
+  PR text and review markers never select the scope or baseline.
 - A round requires green checks for the exact PR head being reviewed.
   Bind each draft to that head and the author comments seen; mark it stale on change.
 - Combine check runs and commit statuses for the exact PR head when assessing CI.

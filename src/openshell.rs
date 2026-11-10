@@ -647,11 +647,11 @@ mod tests {
         let policy = dir.path().join("policy.yaml");
         fs::write(&policy, b"policy: test\n").unwrap();
         let mut raw = serde_json::json!({
-            "schema_version":6,
+            "schema_version":7,
             "execution": crate::config::test_execution_json(),
             "models":[{"id":"model-alpha","coauthors":[]}],
-            "agents":[{"id":"claude","models":["model-alpha"],"prompt_file": crate::config::test_prompt_file("review.md"),"runner":crate::config::test_runner_json()}],
-            "repositories":[{"name":"owner/repo","review_models":["model-alpha"],"runners":[{
+            "agents":[{"id":"claude","models":["model-alpha"],"runner":crate::config::test_runner_json()}],
+            "repositories":[{"name":"owner/repo", "prompt_file": crate::config::test_prompt_file("review.md"),"review_models":["model-alpha"],"runners":[{
                 "agent":"claude","vm_archive":{"path":"/tmp/reviewer.tar","sha256":"a".repeat(64),"config_sha256":"c".repeat(64)}
             }]}]
         });

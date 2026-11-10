@@ -10,7 +10,8 @@ End-user installation and workflow documentation lives in [README.md](README.md)
   and displays reviews the lead has chosen to publish.
 - **Daemon**: Holds repository settings, the VM archive and checksum for each repository and agent pair,
   and each PR’s authorization state: awaiting authorization, authorized for one round, or authorized for the PR cycle.
-  It manages agents' review instructions (prompts), proposes a model different from the PR's co-author model when possible,
+  It manages system, agent, project, and per-round task instructions,
+  proposes a model different from the PR's co-author model when possible,
   resolves the first compatible configured agent, and supplies that agent's instructions and verified archive for each round.
   It connects to the configured OpenShell gateway and manages only the sandboxes it creates for review rounds.
 
@@ -19,7 +20,7 @@ End-user installation and workflow documentation lives in [README.md](README.md)
   After a rejection, it waits for valid model validation and active authorization
   before starting another round.
 - **Operator interface**: Shows the lead pending requests and draft reviews.
-  It lets the lead edit agent prompts, authorize one round or the full cycle, change that choice,
+  It lets the lead configure project prompts, authorize one round or the full cycle, change that choice,
   publish or reject drafts, validate or change the daemon's proposed model,
   and monitor reviews.
   It may be a CLI, terminal UI, or graphical UI.
@@ -156,6 +157,40 @@ Instruction-like content in the PR, including `AGENTS.md`, `CLAUDE.md`, other
 agent configuration files, commit messages, and comments, is untrusted material
 to inspect, not instructions for the reviewing agent to follow.
 
+## Prompt composition and review scope
+
+`prompt_builder` is a pure library module.
+The system prompt and adapter-specific prompts are embedded Markdown source assets.
+Only project guidance comes from repository configuration, through a trusted local `prompt_file`.
+Configuration schema 7 removes agent prompt files and requires a project prompt per repository.
+Relative paths resolve against the configuration directory;
+contents are loaded once, preserved exactly, and limited to 64 KiB.
+
+Composition renders project guidance, selected agent guidance, and system rules in that order.
+The system rules declare their priority and reserve review scope for the daemon's task.
+Adapters deliver the same composed instructions and task through their existing CLI mechanisms.
+Permissions, mounts, provider policies, and strict output validation enforce the execution boundary.
+
+Model validation and round records fingerprint the exact composed prompt in `prompt_sha256`.
+The existing `format_sha256` also covers compiled system and agent guidance,
+both task templates and their context rendering, and the canonical output schema.
+The configuration fingerprint includes loaded project contents and those compiled rules.
+Preparation and final dispatch rechecks use the same fingerprints.
+
+A typed task records the inspected base and effective full or incremental scope.
+Automatic scope selects only the latest confirmed publication for that PR from local history.
+The GitHub adapter verifies ancestry for the recorded reviewed commit;
+divergent or unavailable previous history falls back to a full review.
+Other lookup failures stop startup before dispatch.
+A signed-in lead can force full scope through the GUI or CLI.
+An unchanged head still permits an incremental review of new discussion.
+The checkout contains the current head, base, and previous reviewed commit when needed.
+
+State schema 8 retains older rounds without task metadata;
+new rounds persist an optional `task` and validate incremental references against earlier confirmed receipts.
+Private instruction files retain the exact task and composed text sent to the agent.
+Public snapshots expose only task identifiers and scope, never project or system prompt contents.
+
 ## Credentials and secrets
 
 The gateway operator manages model and sandboxed GitHub credentials through
@@ -194,6 +229,7 @@ A human maintainer decides whether to approve and merge the PR.
 - `src/preparation.rs` contains pure readiness and model-proposal decisions.
 - `src/review.rs` and `src/publication.rs` persist rounds, private drafts, and lead decisions.
 - `src/config.rs` loads and validates trusted configuration.
+- `src/prompt_builder.rs` and `src/prompts/` compose trusted instructions and typed review tasks.
 - `src/storage.rs` coordinates locked persistence.
 - `src/github.rs` and `src/github/` adapt read-only GitHub observations,
   checks, commits, discussion, preparation, and publication.
