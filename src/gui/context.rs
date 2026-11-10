@@ -3,7 +3,8 @@
 use crate::storage;
 use anyhow::Result;
 use review_platform::{
-    InputRevision, PrKey, PullDisplay, PullDisplayState, RefreshOutcome, RequestDisplayContext,
+    DisplayContextOutcome, InputRevision, PrKey, PullDisplay, PullDisplayState, RefreshOutcome,
+    RequestDisplayContext,
     github::{PullRequest, PullRequestState, checks::CheckSummary},
     preparation::CiState,
 };
@@ -61,15 +62,11 @@ fn try_record_display_context(path: &Path, key: &PrKey, context: &RequestContext
     // Coordinate with removal and re-addition before retaining any PR identity.
     let _lock = storage::lock(path)?;
     let mut state = storage::load(path)?;
-    let changed = state.record_display_context(key, context.clone())?;
-    if changed {
+    let outcome = state.record_display_context(key, context.clone());
+    if outcome == DisplayContextOutcome::Saved {
         storage::save(path, &state)?;
     }
-    Ok(state.get(key).is_some_and(|request| {
-        request
-            .display_context()
-            .is_some_and(|recorded| recorded == context)
-    }))
+    Ok(outcome != DisplayContextOutcome::Discarded)
 }
 
 pub(super) fn observation_time() -> Option<u64> {
