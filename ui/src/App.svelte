@@ -236,13 +236,18 @@
     }, () => 'Publication accepted. Follow its status below; closing this tab does not interrupt it.', 'Could not start draft publication.');
   }
 
+  async function initializeSession(bootstrapCode) {
+    await checkSession();
+    if (!sessionToken) await exchangeCode(bootstrapCode);
+  }
+
   onMount(() => {
     const url = new URL(window.location.href);
     const bootstrapCode = url.searchParams.get('code')?.trim() ?? '';
     if (bootstrapCode) {
       url.searchParams.delete('code');
       window.history.replaceState(window.history.state, '', url);
-      exchangeCode(bootstrapCode);
+      initializeSession(bootstrapCode);
     } else {
       checkSession();
     }

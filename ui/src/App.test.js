@@ -289,6 +289,26 @@ describe('sign-in link', () => {
     await showSnapshot(FakeEventSource.instances[0], [request()]);
     expect(await screen.findByText('Refresh from GitHub')).toBeTruthy();
   });
+
+  it('restores a valid session instead of exchanging an already used URL code', async () => {
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    window.history.pushState({}, '', '/?code=url-code');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/session');
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer saved-token');
+    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    const button = [...container.querySelectorAll('.request-item md-menu-item')]
+      .find((item) => item.textContent.trim() === 'Refresh from GitHub');
+    expect(button).toBeTruthy();
+    await waitFor(() => expect(screen.queryByLabelText('One-time code')).toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem('review-platform-session')).toBe('saved-token');
+    expect(window.location.search).toBe('');
+  });
 });
 
 describe('review requests page', () => {
