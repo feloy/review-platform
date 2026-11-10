@@ -856,7 +856,7 @@ describe('review requests page', () => {
     expect(screen.getByText('PR cycle')).toBeTruthy();
   });
 
-  it('stops managing a PR and removes it when the live snapshot updates', async () => {
+  it.each(['open', 'closed'])('stops managing a %s PR and removes it when the live snapshot updates', async (state) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
     let finishRemoval: FinishFetch;
@@ -865,7 +865,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
-    await showSnapshot(source, [request()]);
+    await showSnapshot(source, [request({ context: context({ state }) })]);
+    expect(container.querySelector('.request-item').classList.contains('compact-closed')).toBe(state === 'closed');
     await screen.findByText('Stop managing PR');
     await clickMaterialButton(user, container, 'Stop managing PR');
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -907,13 +908,13 @@ describe('review requests page', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('cancels removal without sending a deletion request', async () => {
+  it.each(['open', 'closed'])('cancels removal of a %s PR without sending a deletion request', async (state) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
-    await showSnapshot(FakeEventSource.instances[0], [request()]);
+    await showSnapshot(FakeEventSource.instances[0], [request({ context: context({ state }) })]);
     await screen.findByText('Stop managing PR');
     await clickMaterialButton(user, container, 'Stop managing PR');
     expect(screen.getByText(/Permanently remove owner\/repo #15/)).toBeTruthy();
