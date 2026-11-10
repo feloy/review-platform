@@ -209,6 +209,19 @@
       </div>
     {/if}
   </header>
+  {#if signedIn && confirmingRemoval}
+    <section class="authorization-panel" aria-label={`Stop managing ${request.repository} #${request.number}`}>
+      <h3>Stop managing PR</h3>
+      <p>Permanently remove {request.repository} #{request.number} and all its local drafts, logs, and review history.</p>
+      <p>This cannot be undone. Published reviews remain on GitHub.</p>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-filled-button disabled={action?.pending || managementBlocked} onclick={removeRequest}>
+        Confirm removal
+      </md-filled-button>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-text-button disabled={action?.pending} onclick={() => confirmingRemoval = false}>Cancel removal</md-text-button>
+    </section>
+  {/if}
   {#if !compactClosed}
     <section class="next-step" data-tone={situation.tone} aria-label={`Next step for ${request.repository} #${request.number}`}>
     <div>
@@ -272,19 +285,6 @@
     </div>
     </div>
     {#if signedIn}
-    {#if confirmingRemoval}
-      <section class="authorization-panel" aria-label={`Stop managing ${request.repository} #${request.number}`}>
-        <h3>Stop managing PR</h3>
-        <p>Permanently remove {request.repository} #{request.number} and all its local drafts, logs, and review history.</p>
-        <p>This cannot be undone. Published reviews remain on GitHub.</p>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-filled-button disabled={action?.pending || managementBlocked} onclick={removeRequest}>
-          Confirm removal
-        </md-filled-button>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-text-button disabled={action?.pending} onclick={() => confirmingRemoval = false}>Cancel removal</md-text-button>
-      </section>
-    {/if}
     <p class="action-note">Changed inputs can clear one-round authorization and model validation.</p>
     {#if !request.discussion}
       <p class="action-note">Refresh from GitHub before authorizing this request.</p>
