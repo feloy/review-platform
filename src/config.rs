@@ -19,12 +19,18 @@ pub enum ConfigError {
     Json(#[from] serde_json::Error),
     #[error("unsupported configuration schema version: {0}")]
     UnsupportedSchema(u32),
+    #[error("resolving configuration directory {}: {source}", path.display())]
+    ResolveConfigDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error(
         "invalid agent ID {0:?}; use 1-64 lowercase ASCII letters, digits, hyphens, or underscores, starting with a letter"
     )]
     InvalidAgentId(String),
     #[error(
-        "invalid model ID {0:?}; use 1-128 lowercase ASCII letters, digits, dots, slashes, colons, hyphens, or underscores, starting with a lowercase letter"
+        "invalid model ID {0:?}; use 1-128 ASCII letters, digits, dots, slashes, colons, hyphens, or underscores, starting with a letter"
     )]
     InvalidModelId(String),
     #[error("co-author model name must be 1-128 bytes without control characters: {0:?}")]
@@ -32,7 +38,7 @@ pub enum ConfigError {
     #[error("invalid co-author email {0:?}")]
     InvalidCoauthorEmail(String),
     #[error(
-        "VM archive path must be an absolute .tar path without control characters or traversal: {0:?}"
+        "VM archive path must resolve to an absolute .tar path without control characters or traversal: {0:?}"
     )]
     InvalidArchivePath(PathBuf),
     #[error("SHA-256 must contain 64 hexadecimal characters")]
@@ -157,9 +163,9 @@ impl ModelId {
     pub fn new(value: impl Into<String>) -> Result<Self, ConfigError> {
         let value = value.into();
         let valid = (1..=128).contains(&value.len())
-            && value.as_bytes()[0].is_ascii_lowercase()
+            && value.as_bytes()[0].is_ascii_alphabetic()
             && value.bytes().all(|byte| {
-                byte.is_ascii_lowercase()
+                byte.is_ascii_alphabetic()
                     || byte.is_ascii_digit()
                     || matches!(byte, b'.' | b'/' | b':' | b'-' | b'_')
             });
@@ -491,7 +497,7 @@ impl TryFrom<RawExecution> for ExecutionConfig {
                 .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
         {
             return Err(ConfigError::InvalidExecution(
-                "OpenShell path must be absolute without traversal".into(),
+                "OpenShell path must resolve to an absolute path without traversal".into(),
             ));
         }
         if raw.timeout_seconds == 0
@@ -673,7 +679,7 @@ impl TryFrom<RawAgentRunner> for AgentRunnerConfig {
                 .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
         {
             return Err(ConfigError::InvalidRunner(
-                "policy path must be absolute without traversal".into(),
+                "policy path must resolve to an absolute path without traversal".into(),
             ));
         }
         if raw.hold_command.is_empty()
@@ -906,16 +912,30 @@ impl ReviewConfig {
         &self.execution
     }
 
-    /// Load configuration, resolving prompt paths relative to the JSON file's directory.
+    /// Load configuration, resolving host paths relative to the JSON file's directory.
     pub fn from_json(bytes: &[u8], config_path: &Path) -> Result<Self, ConfigError> {
         let header: SchemaHeader = serde_json::from_slice(bytes)?;
         if header.schema_version != 7 {
             return Err(ConfigError::UnsupportedSchema(header.schema_version));
         }
-        let raw: RawConfig = serde_json::from_slice(bytes)?;
+        let mut raw: RawConfig = serde_json::from_slice(bytes)?;
+        let config_directory = config_directory(config_path)?;
+        raw.execution.openshell = resolve_host_path(&config_directory, &raw.execution.openshell);
+        for agent in &mut raw.agents {
+            agent.runner.policy = resolve_host_path(&config_directory, &agent.runner.policy);
+        }
+        for repository in &mut raw.repositories {
+            for runner in &mut repository.runners {
+                runner.vm_archive.path =
+                    resolve_host_path(&config_directory, &runner.vm_archive.path);
+            }
+        }
         let mut hash = Sha256::new();
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(bytes);
+        let directory_bytes = serde_json::to_vec(&config_directory)?;
+        hash.update((directory_bytes.len() as u64).to_be_bytes());
+        hash.update(directory_bytes);
         let mut models = Vec::with_capacity(raw.models.len());
         let mut seen_models = HashSet::new();
         let mut seen_coauthors = HashMap::new();
@@ -983,7 +1003,7 @@ impl ReviewConfig {
             if !seen_repositories.insert(name.clone()) {
                 return Err(ConfigError::DuplicateRepository(name));
             }
-            let prompt = read_prompt(&name, &raw_repository.prompt_file, config_path)?;
+            let prompt = read_prompt(&name, &raw_repository.prompt_file, &config_directory)?;
             hash.update(PromptHash::of(&prompt).as_str().as_bytes());
             if raw_repository.review_models.is_empty() {
                 return Err(ConfigError::NoReviewModels(name));
@@ -1124,15 +1144,42 @@ impl ReviewConfig {
     }
 }
 
+fn config_directory(config_path: &Path) -> Result<PathBuf, ConfigError> {
+    let directory = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let resolve_error = |source| ConfigError::ResolveConfigDirectory {
+        path: directory.to_owned(),
+        source,
+    };
+    let absolute = std::path::absolute(directory).map_err(resolve_error)?;
+    if absolute
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        // Resolve traversal in the configuration location, never in referenced files.
+        absolute.canonicalize().map_err(resolve_error)
+    } else {
+        Ok(absolute)
+    }
+}
+
+fn resolve_host_path(directory: &Path, path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        // Preserve invalid empty input for the field's existing validator.
+        path.to_owned()
+    } else {
+        directory.join(path)
+    }
+}
+
 fn read_prompt(
     repository: &str,
     prompt_file: &Path,
-    config_path: &Path,
+    config_directory: &Path,
 ) -> Result<String, ConfigError> {
-    let path = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(prompt_file);
+    let path = resolve_host_path(config_directory, prompt_file);
     let read_error = |source| ConfigError::ReadPrompt {
         repository: repository.to_owned(),
         path: path.clone(),
@@ -1268,6 +1315,200 @@ mod tests {
                 ]
             }]
         })
+    }
+
+    #[test]
+    fn model_ids_preserve_provider_case_through_configuration_and_deserialization() {
+        let id = "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017";
+        let model = ModelId::new(id).unwrap();
+        assert_eq!(model.as_str(), id);
+        assert_ne!(model, ModelId::new(id.to_ascii_lowercase()).unwrap());
+        let decoded: ModelId = serde_json::from_value(serde_json::json!(id)).unwrap();
+        assert_eq!(decoded, model);
+        assert_eq!(
+            ModelId::new("DeepSeek-V4.1").unwrap().as_str(),
+            "DeepSeek-V4.1"
+        );
+
+        let mut raw = config_json();
+        raw["models"][1]["id"] = id.into();
+        raw["agents"][0]["models"][1] = id.into();
+        raw["agents"][1]["models"][0] = id.into();
+        raw["repositories"][0]["review_models"][1] = id.into();
+        let config =
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), Path::new("config.json"))
+                .unwrap();
+        let models = config
+            .review_models_for(&PrKey::new("owner/repo", 1).unwrap())
+            .unwrap();
+        assert_eq!(models[1].model().id().as_str(), id);
+        assert!(models[1].agent().supports(&model));
+    }
+
+    #[test]
+    fn model_ids_reject_invalid_input_while_agent_ids_remain_lowercase() {
+        for invalid in [
+            "",
+            "1model",
+            "-model",
+            "Model Name",
+            "Model\nName",
+            "Modèle",
+            "Model;echo",
+        ] {
+            assert!(matches!(
+                ModelId::new(invalid),
+                Err(ConfigError::InvalidModelId(_))
+            ));
+            assert!(serde_json::from_value::<ModelId>(serde_json::json!(invalid)).is_err());
+        }
+        assert!(matches!(
+            ModelId::new("M".repeat(129)),
+            Err(ConfigError::InvalidModelId(_))
+        ));
+        assert!(matches!(
+            AgentId::new("Codex"),
+            Err(ConfigError::InvalidAgentId(_))
+        ));
+    }
+
+    #[test]
+    fn resolves_relative_host_paths_without_changing_absolute_or_vm_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.json");
+        std::fs::write(directory.path().join("review.md"), "Project guidance.\n").unwrap();
+        let mut raw = config_json();
+        let absolute_policy = PathBuf::from(raw["agents"][1]["runner"]["policy"].as_str().unwrap());
+        let absolute_archive = PathBuf::from(
+            raw["repositories"][0]["runners"][1]["vm_archive"]["path"]
+                .as_str()
+                .unwrap(),
+        );
+        raw["execution"]["openshell"] = "bin/openshell".into();
+        raw["agents"][0]["runner"]["policy"] = "policies/claude.yaml".into();
+        raw["repositories"][0]["runners"][0]["vm_archive"]["path"] = "images/codex.tar".into();
+        raw["repositories"][0]["prompt_file"] = "review.md".into();
+        let config =
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), &config_path).unwrap();
+        assert_eq!(
+            config.execution.openshell(),
+            directory.path().join("bin/openshell")
+        );
+        assert_eq!(
+            config.agents[0].runner.policy(),
+            directory.path().join("policies/claude.yaml")
+        );
+        assert_eq!(config.agents[1].runner.policy(), absolute_policy);
+        assert_eq!(
+            config.agents[0].runner.hold_command(),
+            ["/bin/sleep", "3600"]
+        );
+        let runners = &config.repositories[0].runners;
+        assert_eq!(
+            runners[0].archive.path(),
+            directory.path().join("images/codex.tar")
+        );
+        assert_eq!(
+            runners[0].archive.config_path(),
+            directory.path().join("images/codex.tar.config.json")
+        );
+        assert_eq!(runners[1].archive.path(), absolute_archive);
+        assert_eq!(config.repositories[0].prompt, "Project guidance.\n");
+    }
+
+    #[test]
+    fn relative_config_locations_anchor_host_paths_and_allow_parent_navigation() {
+        let mut raw = config_json();
+        raw["execution"]["openshell"] = "bin/openshell".into();
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let config =
+            ReviewConfig::from_json(&bytes, Path::new("configuration/config.json")).unwrap();
+        assert_eq!(
+            config.execution.openshell(),
+            std::env::current_dir()
+                .unwrap()
+                .join("configuration/bin/openshell")
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("nested")).unwrap();
+        let config =
+            ReviewConfig::from_json(&bytes, &directory.path().join("nested/../config.json"))
+                .unwrap();
+        assert_eq!(
+            config.execution.openshell(),
+            directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("bin/openshell")
+        );
+    }
+
+    #[test]
+    fn configuration_location_changes_fingerprints_for_relative_host_paths() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut raw = config_json();
+        raw["execution"]["openshell"] = "bin/openshell".into();
+        raw["agents"][0]["runner"]["policy"] = "policies/review.yaml".into();
+        raw["repositories"][0]["runners"][0]["vm_archive"]["path"] = "images/review.tar".into();
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let a = ReviewConfig::from_json(&bytes, &first.path().join("config.json")).unwrap();
+        let unchanged = ReviewConfig::from_json(&bytes, &first.path().join("config.json")).unwrap();
+        let b = ReviewConfig::from_json(&bytes, &second.path().join("config.json")).unwrap();
+        assert_eq!(a.hash(), unchanged.hash());
+        assert_ne!(a.hash(), b.hash());
+        assert_ne!(a.execution.hash(), b.execution.hash());
+        assert_ne!(a.agents[0].runner.hash(), b.agents[0].runner.hash());
+        assert_ne!(
+            a.repositories[0].runners[0].archive.path(),
+            b.repositories[0].runners[0].archive.path()
+        );
+        assert_eq!(a.repositories[0].prompt, b.repositories[0].prompt);
+    }
+
+    #[test]
+    fn relative_host_paths_still_reject_empty_paths_and_parent_traversal() {
+        for invalid in ["", "../review.tar", "images/../review.tar"] {
+            let mut raw = config_json();
+            raw["repositories"][0]["runners"][0]["vm_archive"]["path"] = invalid.into();
+            assert!(matches!(
+                ReviewConfig::from_json(
+                    &serde_json::to_vec(&raw).unwrap(),
+                    Path::new("config.json")
+                ),
+                Err(ConfigError::InvalidArchivePath(_))
+            ));
+        }
+        for invalid in ["", "../openshell", "bin/../openshell"] {
+            let mut raw = config_json();
+            raw["execution"]["openshell"] = invalid.into();
+            assert!(matches!(
+                ReviewConfig::from_json(
+                    &serde_json::to_vec(&raw).unwrap(),
+                    Path::new("config.json")
+                ),
+                Err(ConfigError::InvalidExecution(_))
+            ));
+        }
+        for invalid in ["", "../policy.yaml", "policies/../policy.yaml"] {
+            let mut raw = config_json();
+            raw["agents"][0]["runner"]["policy"] = invalid.into();
+            assert!(matches!(
+                ReviewConfig::from_json(
+                    &serde_json::to_vec(&raw).unwrap(),
+                    Path::new("config.json")
+                ),
+                Err(ConfigError::InvalidRunner(_))
+            ));
+        }
+        let mut raw = config_json();
+        raw["agents"][0]["runner"]["hold_command"][0] = "bin/sleep".into();
+        assert!(matches!(
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), Path::new("config.json")),
+            Err(ConfigError::InvalidRunner(_))
+        ));
     }
 
     #[test]
@@ -1482,7 +1723,7 @@ mod tests {
     #[test]
     fn rejects_bad_archives_and_invalid_or_duplicate_configuration() {
         let mut raw = config_json();
-        raw["repositories"][0]["runners"][0]["vm_archive"]["path"] = "relative.tar".into();
+        raw["repositories"][0]["runners"][0]["vm_archive"]["path"] = "../relative.tar".into();
         assert!(matches!(
             ReviewConfig::from_json(
                 &serde_json::to_vec(&raw).unwrap(),

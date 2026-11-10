@@ -125,6 +125,14 @@ named providers, then creates, monitors, and removes its own sandbox.
 
 The trusted configuration names the driver and supplies the verified VM image,
 provider names, non-secret environment, policy, and resource limits.
+The configuration loader resolves relative host paths against the directory containing `config.json`.
+This applies to project prompts, VM archives, runner policies, and the OpenShell executable.
+Runner snapshots retain validated absolute paths;
+VM executable paths remain absolute within the VM.
+The configuration fingerprint includes the absolute configuration directory,
+so relocating relative references invalidates model validation.
+Referenced image and policy files are not canonicalized;
+their existing traversal, symlink, and checksum checks still apply.
 Review Platform fixes the mount targets, TTY and restart behavior,
 and each agent adapter's command rules in code.
 The runner accepts only a configured `vm` driver for now and checks that the gateway supports it.
