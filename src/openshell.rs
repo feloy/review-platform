@@ -1,4 +1,4 @@
-//! Synchronous OpenShell 0.1.5 adapter for an operator-managed gateway.
+//! Synchronous OpenShell 0.1.7 adapter for an operator-managed gateway.
 
 use crate::agent::{self, AgentPreparationError};
 use crate::archive::StagedArchive;
@@ -22,7 +22,7 @@ pub enum OpenShellError {
     PlatformUnsupported,
     #[error("podman review execution is unsupported; configure the vm driver")]
     PodmanUnsupported,
-    #[error("OpenShell CLI must be version 0.1.5")]
+    #[error("OpenShell CLI must be version 0.1.7")]
     IncompatibleCli,
     #[error("running OpenShell {step}: {source}")]
     Launch {
@@ -102,7 +102,7 @@ impl<'a> OpenShell<'a> {
         }
         let version = self.command(&["--version"], "version")?;
         if !version.status.success()
-            || std::str::from_utf8(&version.stdout).ok().map(str::trim) != Some("openshell 0.1.5")
+            || std::str::from_utf8(&version.stdout).ok().map(str::trim) != Some("openshell 0.1.7")
         {
             return Err(OpenShellError::IncompatibleCli);
         }
@@ -639,7 +639,7 @@ mod tests {
         let executable = dir.path().join("openshell");
         let calls = dir.path().join("calls.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  *--version*) echo 'openshell 0.1.5';;\n  *'gateway info'*) echo '{{\"compute_drivers\":[{{\"name\":\"vm\"}}]}}';;\n  *'provider get'*) for last do :; done; echo \"Type: $last\";;\n  *test-model-provider*) echo '{{\"inference_capable\":true}}';;\n  *test-github-provider*) echo '{{\"inference_capable\":false,\"endpoints\":[{{\"host\":\"api.github.com\",\"port\":443,\"protocol\":\"rest\",\"access\":\"read-only\",\"enforcement\":\"enforce\"}}]}}';;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  *--version*) echo 'openshell 0.1.7';;\n  *'gateway info'*) echo '{{\"compute_drivers\":[{{\"name\":\"vm\"}}]}}';;\n  *'provider get'*) for last do :; done; echo \"Type: $last\";;\n  *test-model-provider*) echo '{{\"inference_capable\":true}}';;\n  *test-github-provider*) echo '{{\"inference_capable\":false,\"endpoints\":[{{\"host\":\"api.github.com\",\"port\":443,\"protocol\":\"rest\",\"access\":\"read-only\",\"enforcement\":\"enforce\"}}]}}';;\nesac\n",
             calls.display()
         );
         fs::write(&executable, script).unwrap();

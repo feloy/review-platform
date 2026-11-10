@@ -587,7 +587,7 @@ including when loaded from the JSON state file.
   It honors `--state-file` and does not read or create the file.
 - `config-path` prints the absolute path of the effective configuration file.
   It honors `--config-file` and does not read or create the file.
-- `gateway status` checks the configured OpenShell 0.1.5 CLI,
+- `gateway status` checks the configured OpenShell 0.1.7 CLI,
   authenticated gateway access, VM driver, read-only GitHub provider,
   and each configured agent's model provider and policy checksum
   without changing gateway resources.
@@ -864,7 +864,7 @@ Do not put provider credentials or publishing credentials in this configuration.
 
 ### Foreground review rounds
 
-Install the OpenShell 0.1.5 CLI and configure its named gateway and workspace
+Install the OpenShell 0.1.7 CLI and configure its named gateway and workspace
 before running `gateway status` or `run-review`.
 The gateway operator starts the gateway with VM driver support,
 enables the trusted VM mount configuration,
