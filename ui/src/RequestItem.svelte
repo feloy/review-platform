@@ -9,7 +9,7 @@
   let { request, signedIn, checkingSession, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
   let menuButton = $state();
-  let actionsMenu;
+  let actionsMenu = $state();
   let menuOpen = $state(false);
   let itemElement;
   let selectedModel = $state('');
@@ -63,6 +63,10 @@
     ['starting', 'running'].includes(request.run?.status) || request.publication?.status === 'active' ||
     request.latest_round?.cleanup_pending ||
     ['starting', 'running', 'publishing', 'publication_unknown'].includes(request.latest_round?.status));
+  const compactClosed = $derived(
+    request.context?.state === 'closed' &&
+    request.latest_round?.status !== 'awaiting_decision' &&
+    !managementBlocked);
   $effect(() => { if (!signedIn) { draft = null; confirmingRemoval = false; } });
   const inputsChanged = $derived(inspected &&
     (inspected.head_sha !== request.head_sha || inspected.revision !== request.revision));
@@ -127,7 +131,7 @@
   };
 </script>
 
-<li class="request-item" bind:this={itemElement}>
+<li class="request-item" class:compact-closed={compactClosed} bind:this={itemElement}>
   <header class="request-heading">
     <div class="request-identity">
       <p class="field-label">Pull request</p>
@@ -135,7 +139,8 @@
       <p class="request-name"><a href={pullUrl} target="_blank" rel="noopener noreferrer">{request.repository} <span>#{request.number}</span></a></p>
       {#if request.context}<p class="secondary">by @{request.context.author} · {request.context.state === 'closed' ? 'Closed' : request.context.draft ? 'Draft PR' : 'Open'}</p>{/if}
     </div>
-    <div class="request-actions">
+    {#if !compactClosed || signedIn}
+      <div class="request-actions">
       <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <md-icon-button bind:this={menuButton}
@@ -150,43 +155,47 @@
         positioning="popover" anchor-corner="end-end" menu-corner="start-end"
         aria-label={`Actions for ${request.repository} #${request.number}`}
         onopening={() => menuOpen = true} onclosing={() => menuOpen = false}>
-        <md-menu-item type="button" aria-expanded={expanded}
-          aria-label={`${expanded ? 'Hide' : 'Show'} details for ${request.repository} #${request.number}`}
-          onclose-menu={(event) => selectMenuAction(event, () => expanded = !expanded)}>
-          <div slot="headline">{expanded ? 'Hide details' : 'Show details'}</div>
-        </md-menu-item>
+        {#if !compactClosed}
+          <md-menu-item type="button" aria-expanded={expanded}
+            aria-label={`${expanded ? 'Hide' : 'Show'} details for ${request.repository} #${request.number}`}
+            onclose-menu={(event) => selectMenuAction(event, () => expanded = !expanded)}>
+            <div slot="headline">{expanded ? 'Hide details' : 'Show details'}</div>
+          </md-menu-item>
+        {/if}
         {#if signedIn}
-          {#if hasDraft}
+          {#if !compactClosed && hasDraft}
             <md-menu-item type="button" disabled={action?.pending}
               aria-label={`Read private draft for ${request.repository} #${request.number}`}
               onclose-menu={(event) => selectMenuAction(event, viewDraft)}>
               <div slot="headline">{action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'Read private draft'}</div>
             </md-menu-item>
           {/if}
-          <md-menu-item type="button" disabled={action?.pending}
-            aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
-            onclose-menu={(event) => selectMenuAction(event, onRefresh)}>
-            <div slot="headline">{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</div>
-          </md-menu-item>
-          <md-menu-item type="button" disabled={action?.pending || !request.discussion}
-            aria-expanded={Boolean(inspected)}
-            aria-label={`Manage authorization for ${request.repository} #${request.number}`}
-            onclose-menu={(event) => selectMenuAction(event, () => inspected = { ...request })}>
-            <div slot="headline">Manage authorization</div>
-          </md-menu-item>
-          <md-menu-item type="button" disabled={action?.pending}
-            aria-label={`Check review readiness for ${request.repository} #${request.number}`}
-            onclose-menu={(event) => selectMenuAction(event, prepareReview)}>
-            <div slot="headline">{action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Check review readiness'}</div>
-          </md-menu-item>
-          {#if request.authorization !== 'awaiting_lead' || request.validated_model}
+          {#if !compactClosed}
             <md-menu-item type="button" disabled={action?.pending}
-              aria-label={`Revoke authorization for ${request.repository} #${request.number}`}
-              onclose-menu={(event) => selectMenuAction(event, onRevoke)}>
-              <div slot="headline">{action?.pending && action.operation === 'revoke' ? 'Revoking…' : 'Revoke authorization'}</div>
+              aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
+              onclose-menu={(event) => selectMenuAction(event, onRefresh)}>
+              <div slot="headline">{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</div>
             </md-menu-item>
+            <md-menu-item type="button" disabled={action?.pending || !request.discussion}
+              aria-expanded={Boolean(inspected)}
+              aria-label={`Manage authorization for ${request.repository} #${request.number}`}
+              onclose-menu={(event) => selectMenuAction(event, () => inspected = { ...request })}>
+              <div slot="headline">Manage authorization</div>
+            </md-menu-item>
+            <md-menu-item type="button" disabled={action?.pending}
+              aria-label={`Check review readiness for ${request.repository} #${request.number}`}
+              onclose-menu={(event) => selectMenuAction(event, prepareReview)}>
+              <div slot="headline">{action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Check review readiness'}</div>
+            </md-menu-item>
+            {#if request.authorization !== 'awaiting_lead' || request.validated_model}
+              <md-menu-item type="button" disabled={action?.pending}
+                aria-label={`Revoke authorization for ${request.repository} #${request.number}`}
+                onclose-menu={(event) => selectMenuAction(event, onRevoke)}>
+                <div slot="headline">{action?.pending && action.operation === 'revoke' ? 'Revoking…' : 'Revoke authorization'}</div>
+              </md-menu-item>
+            {/if}
           {/if}
-          <md-divider></md-divider>
+          {#if !compactClosed}<md-divider></md-divider>{/if}
           <md-menu-item type="button" disabled={action?.pending || managementBlocked}
             aria-label={`Stop managing ${request.repository} #${request.number}`}
             title={managementBlocked
@@ -197,9 +206,11 @@
           </md-menu-item>
         {/if}
       </md-menu>
-    </div>
+      </div>
+    {/if}
   </header>
-  <section class="next-step" data-tone={situation.tone} aria-label={`Next step for ${request.repository} #${request.number}`}>
+  {#if !compactClosed}
+    <section class="next-step" data-tone={situation.tone} aria-label={`Next step for ${request.repository} #${request.number}`}>
     <div>
       <h3>{situation.title}</h3>
       <p>{situation.message}</p>
@@ -225,8 +236,8 @@
     {:else if situation.action && !checkingSession}
       <a href="#sign-in-heading">Sign in to continue</a>
     {/if}
-  </section>
-  <div class="request-row">
+    </section>
+    <div class="request-row">
     <div class="field">
       <p class="field-label">Recorded inputs</p>
       <code class="head-sha">{request.head_sha}</code>
@@ -259,8 +270,8 @@
         <p class="secondary">No rounds yet</p>
       {/if}
     </div>
-  </div>
-  {#if signedIn}
+    </div>
+    {#if signedIn}
     {#if confirmingRemoval}
       <section class="authorization-panel" aria-label={`Stop managing ${request.repository} #${request.number}`}>
         <h3>Stop managing PR</h3>
@@ -316,14 +327,16 @@
     {#if draft}
       <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => draft = null} />
     {/if}
+    {/if}
   {/if}
   {#if action?.message}
     <p class:action-error={action.error} class="action-note" role={action.error ? 'alert' : 'status'}>
       {action.message}
     </p>
   {/if}
-  <ReviewProgress {request} {signedIn} />
-  <div class="request-details" hidden={!expanded}>
+  {#if !compactClosed}
+    <ReviewProgress {request} {signedIn} />
+    <div class="request-details" hidden={!expanded}>
     <div class="detail-group">
       <h3>Author discussion</h3>
       {#if request.discussion}
@@ -362,6 +375,7 @@
         <p class="detail-empty">No rounds yet</p>
       {/if}
     </div>
-  </div>
+    </div>
+  {/if}
   <md-divider></md-divider>
 </li>
