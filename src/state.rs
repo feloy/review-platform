@@ -69,11 +69,14 @@ pub struct ReviewRequest {
 }
 
 /// GitHub-derived context retained only for display, never for authorization decisions.
+/// Its input binding is validated so corrupted persisted observations are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestDisplayContext {
-    #[serde(flatten)]
-    pull: PullDisplay,
+    title: String,
+    author: String,
+    state: PullDisplayState,
+    draft: bool,
     head_sha: HeadSha,
     revision: InputRevision,
     checked_at: Option<u64>,
@@ -82,13 +85,20 @@ pub struct RequestDisplayContext {
     discussion_changed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullDisplay {
     title: String,
     author: String,
     state: PullDisplayState,
     draft: bool,
+}
+
+/// Whether persisted display context was saved, already current, or discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayContextOutcome {
+    Saved,
+    AlreadyCurrent,
+    Discarded,
 }
 
 impl PullDisplay {
@@ -133,8 +143,17 @@ impl RequestDisplayContext {
                 ..
             } => (head_changed, discussion_changed),
         };
+        let PullDisplay {
+            title,
+            author,
+            state,
+            draft,
+        } = pull;
         Self {
-            pull,
+            title,
+            author,
+            state,
+            draft,
             head_sha,
             revision,
             checked_at,
@@ -890,14 +909,20 @@ impl State {
         &mut self,
         key: &PrKey,
         context: RequestDisplayContext,
-    ) -> Result<bool, StateError> {
-        let request = self.request_mut(key)?;
+    ) -> DisplayContextOutcome {
+        let Some(request) = self.requests.iter_mut().find(|request| request.key == *key) else {
+            return DisplayContextOutcome::Discarded;
+        };
         if request.head_sha != context.head_sha || request.revision != context.revision {
-            return Ok(false);
+            return DisplayContextOutcome::Discarded;
         }
         let changed = request.display_context.as_ref() != Some(&context);
         request.display_context = Some(context);
-        Ok(changed)
+        if changed {
+            DisplayContextOutcome::Saved
+        } else {
+            DisplayContextOutcome::AlreadyCurrent
+        }
     }
 
     pub fn validate_model(
@@ -1084,20 +1109,18 @@ mod tests {
         let revision = state.get(&key()).unwrap().revision();
         let context = display_context(head(HEAD_A), revision);
 
-        assert!(
-            state
-                .record_display_context(&key(), context.clone())
-                .unwrap()
+        assert_eq!(
+            state.record_display_context(&key(), context.clone()),
+            DisplayContextOutcome::Saved
         );
         state.validate().unwrap();
         let persisted = serde_json::to_value(&state).unwrap();
         let mut state: State = serde_json::from_value(persisted).unwrap();
         assert_eq!(state.get(&key()).unwrap().display_context(), Some(&context));
 
-        assert!(
-            !state
-                .record_display_context(&key(), display_context(head(HEAD_B), revision))
-                .unwrap()
+        assert_eq!(
+            state.record_display_context(&key(), display_context(head(HEAD_B), revision)),
+            DisplayContextOutcome::Discarded
         );
         state
             .refresh(
@@ -1109,13 +1132,59 @@ mod tests {
         assert_eq!(state.get(&key()).unwrap().display_context(), None);
 
         let revision = state.get(&key()).unwrap().revision();
-        assert!(
-            state
-                .record_display_context(&key(), display_context(head(HEAD_A), revision))
-                .unwrap()
+        assert_eq!(
+            state.record_display_context(&key(), display_context(head(HEAD_A), revision)),
+            DisplayContextOutcome::Saved
         );
         state.record_request(key(), head(HEAD_B)).unwrap();
         assert_eq!(state.get(&key()).unwrap().display_context(), None);
+    }
+
+    #[test]
+    fn display_context_rejects_unknown_fields_and_input_mismatches() {
+        let mut state = State::default();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        state
+            .refresh(&key(), &head(HEAD_A), &discussion(&[]))
+            .unwrap();
+        let revision = state.get(&key()).unwrap().revision();
+        let context = display_context(head(HEAD_A), revision);
+        assert_eq!(
+            state.record_display_context(&key(), context),
+            DisplayContextOutcome::Saved
+        );
+
+        let mut unknown_field = serde_json::to_value(&state).unwrap();
+        unknown_field["requests"][0]["display_context"]["unexpected"] = "value".into();
+        let error = serde_json::from_value::<State>(unknown_field).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `unexpected`"),
+            "{error}"
+        );
+
+        let mut mismatched = serde_json::to_value(&state).unwrap();
+        mismatched["requests"][0]["display_context"]["head_sha"] = HEAD_B.into();
+        let mismatched: State = serde_json::from_value(mismatched).unwrap();
+        assert_eq!(
+            mismatched.validate(),
+            Err(StateError::HeadMismatch {
+                inspected: head(HEAD_B),
+                recorded: head(HEAD_A),
+            })
+        );
+    }
+
+    #[test]
+    fn recording_display_context_for_a_removed_request_is_not_an_error() {
+        let mut state = State::default();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        let revision = state.get(&key()).unwrap().revision();
+        state.unmanage(&key()).unwrap();
+
+        assert_eq!(
+            state.record_display_context(&key(), display_context(head(HEAD_A), revision)),
+            DisplayContextOutcome::Discarded
+        );
     }
 
     #[test]

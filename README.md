@@ -74,6 +74,8 @@ GitHub display context is saved with the request, survives browser and GUI resta
 and is discarded when recorded inputs change or the PR is removed.
 If saving that context fails, the successful refresh or preparation still completes;
 the server logs a local diagnostic and omits the unavailable display context.
+Because the GitHub check time changes on every observation,
+a refresh or preparation can save display context even when review inputs are unchanged.
 Review start and finish times and confirmed publication times come from saved records.
 
 After signing in, use **Refresh from GitHub** on a request to fetch its current head
