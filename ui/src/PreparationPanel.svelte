@@ -32,7 +32,8 @@
   const runReason = $derived(stale ? 'Refresh readiness and inspect the current PR before starting.'
     : workflowBlocker || (!modelValidated ? 'Confirm the selected review model before starting.'
     : !currentModelValidated ? 'Waiting for the saved model choice. Refresh readiness if it was cleared.' : ''));
-  const validationDisabled = $derived(action?.pending || stale || !permitsValidation || !selected || modelValidated);
+  const selectionDisabled = $derived(action?.pending || stale || !permitsValidation);
+  const validationDisabled = $derived(selectionDisabled || !selected || modelValidated);
   const runDisabled = $derived(action?.pending || !currentModelValidated || Boolean(workflowBlocker));
   const checkLabels = {
     green: 'Green', pending: 'Pending', failing: 'Failing', unknown: 'Unknown', no_results: 'No checks reported',
@@ -62,7 +63,7 @@
   {/if}
   <label class="model-choice">
     Review model for {request.repository} #{request.number}
-    <select bind:value={selectedModel} disabled={action?.pending || stale || !permitsValidation}>
+    <select bind:value={selectedModel} disabled={selectionDisabled}>
       {#each preparation.models as choice (choice.model)}
         <option value={choice.model}>{choice.model}</option>
       {/each}
@@ -71,7 +72,7 @@
   <p>Resolved agent: <strong>{selected?.agent ?? 'Unavailable'}</strong></p>
   <label class="model-choice">
     Review scope for {request.repository} #{request.number}
-    <select bind:value={reviewMode} disabled={action?.pending || stale}>
+    <select bind:value={reviewMode} disabled={selectionDisabled}>
       <option value="auto">Incremental after a published review</option>
       <option value="full">Full PR review</option>
     </select>
