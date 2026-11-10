@@ -10,6 +10,7 @@ use review_platform::{
     github::{self, PullRequestState},
     openshell::{OpenShell, OpenShellError, SandboxMounts},
     preparation::Readiness,
+    prompt_builder::{self, ReviewMode, ReviewScope, ReviewTask},
     review::{
         DraftOutput, FailureKind, Freshness, OUTPUT_MARKER, OUTPUT_SCHEMA, RoundId, RoundRecord,
         RoundStatus,
@@ -32,11 +33,25 @@ use thiserror::Error;
 pub struct InspectedRun {
     selection: ModelSelection,
     rules: InspectedRules,
+    review_mode: ReviewMode,
 }
 
 impl InspectedRun {
     pub fn new(selection: ModelSelection, rules: InspectedRules) -> Self {
-        Self { selection, rules }
+        Self {
+            selection,
+            rules,
+            review_mode: ReviewMode::Auto,
+        }
+    }
+
+    pub fn with_review_mode(mut self, review_mode: ReviewMode) -> Self {
+        self.review_mode = review_mode;
+        self
+    }
+
+    pub fn review_mode(&self) -> ReviewMode {
+        self.review_mode
     }
 
     pub fn selection(&self) -> &ModelSelection {
@@ -199,6 +214,7 @@ pub fn run_review(
     pr: u64,
     head: String,
     revision: u64,
+    review_mode: ReviewMode,
 ) -> Result<()> {
     let key = PrKey::new(repository, pr)?;
     let inspected_head = HeadSha::new(head)?;
@@ -214,6 +230,7 @@ pub fn run_review(
             head: &inspected_head,
             revision: inspected_revision,
             inspection: None,
+            review_mode,
         },
         cancellation.flag(),
         &mut |_| {},
@@ -236,6 +253,7 @@ pub fn run_inspected_review(
             head: inspected.selection().head(),
             revision: inspected.selection().revision(),
             inspection: Some(inspected),
+            review_mode: inspected.review_mode(),
         },
         cancelled,
         started,
@@ -251,6 +269,7 @@ struct RunInputs<'a> {
     head: &'a HeadSha,
     revision: InputRevision,
     inspection: Option<&'a InspectedRun>,
+    review_mode: ReviewMode,
 }
 
 impl RunInputs<'_> {
@@ -344,6 +363,17 @@ fn execute_review(
         pull.head_sha() == inspected_head && pull.state() == PullRequestState::Open,
         "PR head changed or PR closed during preparation"
     );
+    let candidate = state.review_scope(key, inputs.review_mode);
+    let scope = match candidate {
+        ReviewScope::Incremental { ref since, .. }
+            if !client.is_ancestor(key, since, inspected_head)? =>
+        {
+            ReviewScope::Full
+        }
+        other => other,
+    };
+    let task = ReviewTask::new(pull.base_sha().clone(), scope);
+    let task_prompt = task.prompt(key, inspected_head);
     let round_dir = new_round_dir(state_path)?;
     let _runner_lock = storage::try_lock(&round_dir.join("runner"))?;
     let id = RoundId::new(
@@ -366,7 +396,8 @@ fn execute_review(
         discussion,
         choice,
         now()?,
-    );
+    )
+    .with_task(task.clone());
     {
         let _lock = storage::lock(state_path)?;
         let mut current = storage::load(state_path)?;
@@ -405,7 +436,13 @@ fn execute_review(
         }
         failure = FailureKind::Checkout;
         let checkout_path = round_dir.join("src");
-        checkout::create_checkout(&checkout_path, key, inspected_head, pull.base_sha())?;
+        checkout::create_checkout(
+            &checkout_path,
+            key,
+            inspected_head,
+            task.base_sha(),
+            task.scope().since(),
+        )?;
         if cancelled.load(Ordering::Relaxed) {
             failure = FailureKind::Recovery;
             anyhow::bail!("review interrupted");
@@ -419,16 +456,21 @@ fn execute_review(
             OUTPUT_MARKER.as_bytes(),
         )?;
         write_new(
-            &instructions.join("configured-prompt.txt"),
-            choice.agent().prompt().as_bytes(),
+            &instructions.join("project-prompt.txt"),
+            choice.project_prompt().as_bytes(),
         )?;
         write_new(
-            &instructions.join("review-rules.txt"),
-            agent::review_rules(choice.agent().runner().kind()).as_bytes(),
+            &instructions.join("task-prompt.txt"),
+            task_prompt.as_bytes(),
         )?;
-        let composed = agent::compose_system_prompt(choice.agent().runner().kind(), choice.agent().prompt());
-        write_new(&instructions.join("system-prompt.txt"), composed.as_bytes())?;
-        write_new(&instructions.join(sandbox_layout::OUTPUT_SCHEMA_FILE_NAME), OUTPUT_SCHEMA.as_bytes())?;
+        write_new(
+            &instructions.join("system-prompt.txt"),
+            choice.prompt().text().as_bytes(),
+        )?;
+        write_new(
+            &instructions.join(sandbox_layout::OUTPUT_SCHEMA_FILE_NAME),
+            OUTPUT_SCHEMA.as_bytes(),
+        )?;
         failure = FailureKind::SandboxCreate;
         let private_policy = round_dir.join("sandbox-policy.yaml");
         shell.stage_policy(choice.agent().runner(), &private_policy)?;
@@ -496,7 +538,8 @@ fn execute_review(
             .context("validated model is no longer configured")?;
         anyhow::ensure!(
             current_choice.agent().id() == record.agent()
-                && current_choice.agent().prompt_hash() == record.prompt_hash()
+                && current_choice.prompt().hash() == record.prompt_hash()
+                && prompt_builder::rules_hash(current_choice.agent().runner().kind()) == *record.format_hash()
                 && current_choice.agent().runner().hash() == record.runner_hash()
                 && current_choice.execution().hash() == record.execution_hash()
                 && current_choice.archive() == choice.archive(),
@@ -525,7 +568,7 @@ fn execute_review(
                 &prepared_agent,
                 &record,
                 &prompt_path,
-                pull.base_sha().as_str(),
+                &task_prompt,
             ),
             cancelled.clone(),
         );
@@ -925,13 +968,15 @@ mod tests {
         let state_file = dir.path().join("state.json");
         let config_file = dir.path().join("config.json");
         let config = serde_json::to_vec(&serde_json::json!({
-            "schema_version":6,
+            "schema_version":7,
             "execution":{"openshell":dir.path().join("missing-openshell"), "gateway":"gateway", "workspace":"default", "driver":"vm", "github_provider":"github-ro"},
             "models":[{"id":"model-alpha", "coauthors":[]}],
-            "agents":[{"id":"claude", "models":["model-alpha"], "prompt_file":"review.md", "runner":{
+            "agents":[{"id":"claude", "models":["model-alpha"], "runner":{
                 "kind":"claude", "model_provider":"model-provider", "policy":dir.path().join("policy.yaml"), "policy_sha256":"b".repeat(64), "hold_command":["/bin/sleep","3600"]
             }}],
-            "repositories":[],
+            "repositories":[{"name":"owner/repo", "prompt_file":"review.md", "review_models":["model-alpha"], "runners":[{
+                "agent":"claude", "vm_archive":{"path":dir.path().join("reviewer.tar"),"sha256":"a".repeat(64),"config_sha256":"b".repeat(64)}
+            }]}],
         })).unwrap();
         fs::write(dir.path().join("review.md"), "Original prompt.\n").unwrap();
         fs::write(&config_file, &config).unwrap();
@@ -1093,7 +1138,7 @@ mod tests {
         let config_path = dir.path().join("config.json");
         let id = RoundId::new("r-test").unwrap();
         let config = serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "execution": {
                 "openshell": dir.path().join("openshell"),
                 "gateway": "test-gateway",
@@ -1202,7 +1247,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let config = ReviewConfig::from_json(
             &serde_json::to_vec(&serde_json::json!({
-                "schema_version": 6,
+                "schema_version": 7,
                 "execution": {
                     "openshell": executable,
                     "gateway": "test-gateway",

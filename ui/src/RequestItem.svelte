@@ -13,6 +13,7 @@
   let menuOpen = $state(false);
   let itemElement;
   let selectedModel = $state('');
+  let reviewMode = $state('auto');
   let inspected = $state(null);
   let preparation = $state(null);
   let preparationInvalid = $state(false);
@@ -99,7 +100,7 @@
 
   async function runReview(model) {
     if (!preparation || preparationInvalid || action?.pending) return;
-    const result = await onRun(preparation, model);
+    const result = await onRun(preparation, model, reviewMode);
     preparationInvalid = true;
     if (result) preparation = null;
   }
@@ -267,6 +268,10 @@
       {#if request.latest_round}
         <p class="round-status">{roundLabels[request.latest_round.status] ?? 'Unknown'}</p>
         <p class="secondary">{request.latest_round.id}</p>
+        {#if request.latest_round.task}
+          <p class="secondary">{request.latest_round.task.scope.mode === 'full'
+            ? 'Full PR review' : `Incremental since ${request.latest_round.task.scope.since.slice(0, 7)}`}</p>
+        {/if}
         {#if request.latest_round.cleanup_status === 'needs_attention'}
           <p class="warning">
             {request.latest_round.status === 'starting' || request.latest_round.status === 'running'
@@ -322,7 +327,7 @@
     {/if}
     {#if preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
-        onRefresh={prepareReview} onSelect={(model) => selectedModel = model} onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
+        bind:reviewMode onRefresh={prepareReview} onSelect={(model) => selectedModel = model} onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
     {/if}
     {#if draft}
       <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => draft = null} />

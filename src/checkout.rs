@@ -29,6 +29,7 @@ pub fn create_checkout(
     key: &PrKey,
     head: &HeadSha,
     base: &HeadSha,
+    since: Option<&HeadSha>,
 ) -> Result<(), CheckoutError> {
     fs::create_dir(directory).map_err(CheckoutError::Create)?;
     let template = directory
@@ -76,6 +77,19 @@ pub fn create_checkout(
     verify_base.args(["cat-file", "-t", base.as_str()]);
     if String::from_utf8_lossy(&require(verify_base, "verify base")?.stdout).trim() != "commit" {
         return Err(CheckoutError::MissingBase);
+    }
+    if let Some(since) = since.filter(|since| *since != head && *since != base) {
+        let mut fetch_previous = git(Some(directory));
+        fetch_previous.args([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--depth=1",
+            &remote,
+            since.as_str(),
+        ]);
+        require(fetch_previous, "fetch previously reviewed commit")?;
     }
     let mut checkout = git(Some(directory));
     checkout.args(["checkout", "--quiet", "--detach", "--force", head.as_str()]);

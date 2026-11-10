@@ -112,6 +112,8 @@ struct RoundSummary {
     created_at: u64,
     dispatched_at: Option<u64>,
     finished_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task: Option<review_platform::prompt_builder::ReviewTask>,
 }
 
 #[derive(Serialize)]
@@ -307,6 +309,18 @@ struct InspectedModelRequest {
     head_sha: HeadSha,
     revision: InputRevision,
     rules: InspectedRules,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunRequest {
+    key: PrKey,
+    model: ModelId,
+    head_sha: HeadSha,
+    revision: InputRevision,
+    rules: InspectedRules,
+    #[serde(default)]
+    review_mode: review_platform::prompt_builder::ReviewMode,
 }
 
 #[derive(Serialize)]
@@ -753,7 +767,7 @@ async fn validate_model_request(
 async fn run_request(
     HttpState(state): HttpState<Arc<AppState>>,
     headers: axum::http::HeaderMap,
-    Json(request): Json<InspectedModelRequest>,
+    Json(request): Json<RunRequest>,
 ) -> Result<(StatusCode, Json<RunResponse>), (StatusCode, Json<ApiError>)> {
     if !has_session(&state, &headers) {
         return Err(api_error(
@@ -764,7 +778,8 @@ async fn run_request(
     let inspected = review_commands::InspectedRun::new(
         ModelSelection::new(request.model, request.head_sha, request.revision),
         request.rules,
-    );
+    )
+    .with_review_mode(request.review_mode);
     let _start = state.job_start_guard(&request.key)?;
     state
         .runs
@@ -1138,6 +1153,7 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                             created_at: round.created_at(),
                             dispatched_at: round.dispatched_at(),
                             finished_at: round.finished_at(),
+                            task: round.task().cloned(),
                         })
                     })
                     .transpose()?,
@@ -1305,6 +1321,93 @@ mod tests {
             "model": "model-beta", "head_sha": "a".repeat(40), "revision": 2,
             "rules": {"authorization": "one_round", "configuration_sha256": "a".repeat(64)},
         })
+    }
+
+    #[test]
+    fn run_scope_accepts_only_typed_lead_preferences() {
+        use review_platform::prompt_builder::ReviewMode;
+        let mut body = validation_body();
+        assert_eq!(
+            serde_json::from_value::<RunRequest>(body.clone())
+                .unwrap()
+                .review_mode,
+            ReviewMode::Auto
+        );
+        body["review_mode"] = "full".into();
+        let request: RunRequest = serde_json::from_value(body.clone()).unwrap();
+        let inspected = review_commands::InspectedRun::new(
+            ModelSelection::new(request.model, request.head_sha, request.revision),
+            request.rules,
+        )
+        .with_review_mode(request.review_mode);
+        assert_eq!(inspected.review_mode(), ReviewMode::Full);
+        body["review_mode"] = "incremental".into();
+        assert!(serde_json::from_value::<RunRequest>(body.clone()).is_err());
+        body["review_mode"] = "auto".into();
+        body["since"] = "b".repeat(40).into();
+        assert!(serde_json::from_value::<RunRequest>(body).is_err());
+    }
+
+    #[test]
+    fn signed_in_run_delivers_the_selected_scope_to_the_server_job() {
+        use review_platform::prompt_builder::ReviewMode;
+        fn check_mode(
+            _: &Path,
+            _: &Path,
+            key: &PrKey,
+            inspected: &review_commands::InspectedRun,
+            _: Arc<std::sync::atomic::AtomicBool>,
+            _: &mut dyn FnMut(&review_platform::review::RoundId),
+        ) -> Result<(), review_commands::RunError> {
+            let expected = if key.number() == 15 {
+                ReviewMode::Auto
+            } else {
+                ReviewMode::Full
+            };
+            assert_eq!(inspected.review_mode(), expected);
+            Ok(())
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("state.json");
+        let runs = Arc::new(Runs::new(
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            check_mode,
+        ));
+        let app = router_with_runs(
+            state_file.clone(),
+            state_file.with_extension("config.json"),
+            Session {
+                bootstrap: None,
+                token: "test-token".into(),
+            },
+            fake_refresh,
+            fake_prepare,
+            runs.clone(),
+        );
+        test_runtime().block_on(async {
+            for (number, mode) in [(15, "auto"), (16, "full")] {
+                let mut body = validation_body();
+                body["key"]["number"] = number.into();
+                body["review_mode"] = mode.into();
+                let response = app
+                    .clone()
+                    .oneshot(json_post(
+                        "/api/requests/run",
+                        Some("http://localhost:8080"),
+                        Some("test-token"),
+                        &body.to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                wait_for_run(
+                    &runs,
+                    &PrKey::new("owner/repo", number).unwrap(),
+                    "finished",
+                )
+                .await;
+            }
+        });
     }
 
     fn fake_run(

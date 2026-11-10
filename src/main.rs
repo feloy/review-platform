@@ -97,6 +97,9 @@ enum Command {
         head: String,
         #[arg(long, value_name = "REVISION")]
         revision: u64,
+        /// Review the entire PR even when an earlier published review exists.
+        #[arg(long)]
+        full_review: bool,
     },
     /// Display a saved private draft and optionally its sensitive review log.
     ShowDraft {
@@ -314,6 +317,21 @@ fn run(cli: Cli) -> Result<()> {
             }
             if let Some(round) = state.latest_round(&key) {
                 println!("  latest round: {} ({})", round.id(), round.status());
+                if let Some(task) = round.task() {
+                    match task.scope() {
+                        review_platform::prompt_builder::ReviewScope::Full => {
+                            println!("  review scope: full PR")
+                        }
+                        review_platform::prompt_builder::ReviewScope::Incremental {
+                            since,
+                            review_id,
+                        } => {
+                            println!(
+                                "  review scope: incremental since {since} (published review {review_id})"
+                            );
+                        }
+                    }
+                }
                 if round.cleanup_pending() {
                     println!("  cleanup pending: run recover-review");
                 }
@@ -356,8 +374,22 @@ fn run(cli: Cli) -> Result<()> {
             pr,
             head,
             revision,
+            full_review,
         } => {
-            review_commands::run_review(state_file, config_file, repository, pr, head, revision)?;
+            let mode = if full_review {
+                review_platform::prompt_builder::ReviewMode::Full
+            } else {
+                review_platform::prompt_builder::ReviewMode::Auto
+            };
+            review_commands::run_review(
+                state_file,
+                config_file,
+                repository,
+                pr,
+                head,
+                revision,
+                mode,
+            )?;
         }
         Command::ShowDraft {
             repository,
@@ -606,6 +638,32 @@ fn escape_terminal_field(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{escape_diff_for_terminal, escape_terminal_controls, escape_terminal_field};
+
+    #[test]
+    fn full_review_is_an_explicit_cli_override() {
+        use clap::Parser;
+        for full in [false, true] {
+            let head = "a".repeat(40);
+            let mut args = vec![
+                "review-platform",
+                "run-review",
+                "owner/repo",
+                "42",
+                "--head",
+                &head,
+                "--revision",
+                "2",
+            ];
+            if full {
+                args.push("--full-review");
+            }
+            let parsed = super::Cli::try_parse_from(args).unwrap();
+            let super::Command::RunReview { full_review, .. } = parsed.command else {
+                panic!("wrong command");
+            };
+            assert_eq!(full_review, full);
+        }
+    }
 
     #[test]
     fn code_changes_cannot_control_the_terminal() {

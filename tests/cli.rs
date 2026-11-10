@@ -384,7 +384,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
 
     let config_file = dir.path().join("config.json");
     let config = serde_json::json!({
-        "schema_version": 6,
+        "schema_version": 7,
         "publisher_login": "publisher",
         "execution": {
             "openshell": std::env::current_exe().unwrap(),
@@ -629,7 +629,7 @@ fn recovery_preserves_a_saved_draft_when_sandbox_stop_fails() {
     .unwrap();
     std::fs::set_permissions(&fake_openshell, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = serde_json::json!({
-        "schema_version": 6,
+        "schema_version": 7,
         "execution": {
             "openshell": fake_openshell,
             "gateway": "test-gateway",

@@ -19,7 +19,7 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let config_path = std::env::var("REVIEW_PLATFORM_LIVE_VM_CONFIG")
-        .expect("set REVIEW_PLATFORM_LIVE_VM_CONFIG to a private schema 6 config");
+        .expect("set REVIEW_PLATFORM_LIVE_VM_CONFIG to a private schema 7 config");
     let config = ReviewConfig::from_json(
         &fs::read(&config_path).unwrap(),
         std::path::Path::new(&config_path),
@@ -180,8 +180,12 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
     );
     if kind == AgentKind::Codex {
         let prompt_path = sandbox_layout::system_prompt_file();
-        let invocation =
-            agent::AgentInvocation::new(&prepared, &round, &prompt_path, "base-commit");
+        let invocation = agent::AgentInvocation::new(
+            &prepared,
+            &round,
+            &prompt_path,
+            "Synthetic task overridden below.",
+        );
         let mut exact_command = agent::adapter(kind).command(&invocation);
         let prompt = exact_command
             .last_mut()

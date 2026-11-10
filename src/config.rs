@@ -37,20 +37,20 @@ pub enum ConfigError {
     InvalidArchivePath(PathBuf),
     #[error("SHA-256 must contain 64 hexadecimal characters")]
     InvalidArchiveChecksum,
-    #[error("agent {0} has an empty or oversized review prompt (maximum 64 KiB)")]
-    InvalidPrompt(AgentId),
-    #[error("agent {agent} prompt_file must name a regular file: {}", path.display())]
-    InvalidPromptFile { agent: AgentId, path: PathBuf },
-    #[error("reading prompt file {} for agent {agent}: {source}", path.display())]
+    #[error("repository {0} has an empty or oversized review prompt (maximum 64 KiB)")]
+    InvalidPrompt(String),
+    #[error("repository {repository} prompt_file must name a regular file: {}", path.display())]
+    InvalidPromptFile { repository: String, path: PathBuf },
+    #[error("reading prompt file {} for repository {repository}: {source}", path.display())]
     ReadPrompt {
-        agent: AgentId,
+        repository: String,
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("prompt file {} for agent {agent} is not UTF-8: {source}", path.display())]
+    #[error("prompt file {} for repository {repository} is not UTF-8: {source}", path.display())]
     PromptEncoding {
-        agent: AgentId,
+        repository: String,
         path: PathBuf,
         #[source]
         source: std::string::FromUtf8Error,
@@ -350,7 +350,7 @@ impl TryFrom<RawVmArchive> for VmArchive {
     }
 }
 
-/// SHA-256 of the exact configured prompt, without storing it in state.
+/// SHA-256 of trusted instructions or configuration, without storing private text in state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct PromptHash(String);
@@ -773,22 +773,12 @@ impl Model {
 pub struct Agent {
     id: AgentId,
     models: Vec<ModelId>,
-    prompt: String,
-    prompt_hash: PromptHash,
     runner: AgentRunnerConfig,
 }
 
 impl Agent {
     pub fn id(&self) -> &AgentId {
         &self.id
-    }
-
-    pub fn prompt(&self) -> &str {
-        &self.prompt
-    }
-
-    pub fn prompt_hash(&self) -> &PromptHash {
-        &self.prompt_hash
     }
 
     pub fn runner(&self) -> &AgentRunnerConfig {
@@ -803,6 +793,7 @@ impl Agent {
 #[derive(Debug)]
 pub struct RepositoryConfig {
     name: String,
+    prompt: String,
     review_models: Vec<ModelId>,
     runners: Vec<Runner>,
 }
@@ -819,9 +810,19 @@ pub struct ResolvedReviewModel<'a> {
     agent: &'a Agent,
     archive: &'a VmArchive,
     execution: &'a ExecutionConfig,
+    project_prompt: &'a str,
+    prompt: crate::prompt_builder::BuiltPrompt,
 }
 
 impl<'a> ResolvedReviewModel<'a> {
+    pub fn project_prompt(&self) -> &'a str {
+        self.project_prompt
+    }
+
+    pub fn prompt(&self) -> &crate::prompt_builder::BuiltPrompt {
+        &self.prompt
+    }
+
     pub fn repository(&self) -> &'a str {
         self.repository
     }
@@ -872,7 +873,6 @@ struct RawModel {
 struct RawAgent {
     id: String,
     models: Vec<String>,
-    prompt_file: PathBuf,
     runner: RawAgentRunner,
 }
 
@@ -880,6 +880,7 @@ struct RawAgent {
 #[serde(deny_unknown_fields)]
 struct RawRepository {
     name: String,
+    prompt_file: PathBuf,
     review_models: Vec<String>,
     runners: Vec<RawRunner>,
 }
@@ -908,7 +909,7 @@ impl ReviewConfig {
     /// Load configuration, resolving prompt paths relative to the JSON file's directory.
     pub fn from_json(bytes: &[u8], config_path: &Path) -> Result<Self, ConfigError> {
         let header: SchemaHeader = serde_json::from_slice(bytes)?;
-        if header.schema_version != 6 {
+        if header.schema_version != 7 {
             return Err(ConfigError::UnsupportedSchema(header.schema_version));
         }
         let raw: RawConfig = serde_json::from_slice(bytes)?;
@@ -945,9 +946,6 @@ impl ReviewConfig {
             if !seen_agents.insert(id.clone()) {
                 return Err(ConfigError::DuplicateAgent(id));
             }
-            let prompt = read_prompt(&id, &raw_agent.prompt_file, config_path)?;
-            let prompt_hash = PromptHash::of(&prompt);
-            hash.update(prompt_hash.as_str().as_bytes());
             if raw_agent.models.is_empty() {
                 return Err(ConfigError::NoSupportedModels(id));
             }
@@ -964,12 +962,14 @@ impl ReviewConfig {
                 supported_models.push(model);
             }
             let runner = AgentRunnerConfig::try_from(raw_agent.runner)?;
-            hash.update(crate::agent::rules_hash(runner.kind()).as_str().as_bytes());
+            hash.update(
+                crate::prompt_builder::rules_hash(runner.kind())
+                    .as_str()
+                    .as_bytes(),
+            );
             agents.push(Agent {
                 id,
                 models: supported_models,
-                prompt_hash,
-                prompt,
                 runner,
             });
         }
@@ -983,6 +983,8 @@ impl ReviewConfig {
             if !seen_repositories.insert(name.clone()) {
                 return Err(ConfigError::DuplicateRepository(name));
             }
+            let prompt = read_prompt(&name, &raw_repository.prompt_file, config_path)?;
+            hash.update(PromptHash::of(&prompt).as_str().as_bytes());
             if raw_repository.review_models.is_empty() {
                 return Err(ConfigError::NoReviewModels(name));
             }
@@ -1028,6 +1030,7 @@ impl ReviewConfig {
             }
             repositories.push(RepositoryConfig {
                 name,
+                prompt,
                 review_models,
                 runners,
             });
@@ -1100,6 +1103,11 @@ impl ReviewConfig {
                             agent,
                             archive: &runner.archive,
                             execution: &self.execution,
+                            project_prompt: &repository.prompt,
+                            prompt: crate::prompt_builder::build(
+                                agent.runner.kind(),
+                                &repository.prompt,
+                            ),
                         });
                     }
                 }
@@ -1117,7 +1125,7 @@ impl ReviewConfig {
 }
 
 fn read_prompt(
-    id: &AgentId,
+    repository: &str,
     prompt_file: &Path,
     config_path: &Path,
 ) -> Result<String, ConfigError> {
@@ -1126,7 +1134,7 @@ fn read_prompt(
         .unwrap_or_else(|| Path::new("."))
         .join(prompt_file);
     let read_error = |source| ConfigError::ReadPrompt {
-        agent: id.clone(),
+        repository: repository.to_owned(),
         path: path.clone(),
         source,
     };
@@ -1134,14 +1142,14 @@ fn read_prompt(
         || !std::fs::metadata(&path).map_err(read_error)?.is_file()
     {
         return Err(ConfigError::InvalidPromptFile {
-            agent: id.clone(),
+            repository: repository.to_owned(),
             path,
         });
     }
     let file = File::open(&path).map_err(read_error)?;
     if !file.metadata().map_err(read_error)?.is_file() {
         return Err(ConfigError::InvalidPromptFile {
-            agent: id.clone(),
+            repository: repository.to_owned(),
             path,
         });
     }
@@ -1150,15 +1158,15 @@ fn read_prompt(
         .read_to_end(&mut bytes)
         .map_err(read_error)?;
     if bytes.len() > MAX_PROMPT_BYTES {
-        return Err(ConfigError::InvalidPrompt(id.clone()));
+        return Err(ConfigError::InvalidPrompt(repository.to_owned()));
     }
     let prompt = String::from_utf8(bytes).map_err(|source| ConfigError::PromptEncoding {
-        agent: id.clone(),
+        repository: repository.to_owned(),
         path,
         source,
     })?;
     if prompt.trim().is_empty() {
-        return Err(ConfigError::InvalidPrompt(id.clone()));
+        return Err(ConfigError::InvalidPrompt(repository.to_owned()));
     }
     Ok(prompt)
 }
@@ -1233,7 +1241,7 @@ mod tests {
 
     fn config_json() -> serde_json::Value {
         serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "execution": test_execution_json(),
             "models": [
                 {"id": "model-alpha", "coauthors": [{"name":"Model Alpha", "email":"model@example.com"}]},
@@ -1243,18 +1251,16 @@ mod tests {
                 {
                     "id": "claude",
                     "models": ["model-alpha", "model-beta"],
-                    "prompt_file": crate::config::test_prompt_file("review.md"),
                     "runner": test_runner_json()
                 },
                 {
                     "id": "codex",
                     "models": ["model-beta"],
-                    "prompt_file": crate::config::test_prompt_file("careful.md"),
                     "runner": test_runner_json()
                 }
             ],
             "repositories": [{
-                "name": "Owner/Repo",
+                "name": "Owner/Repo", "prompt_file": crate::config::test_prompt_file("review.md"),
                 "review_models": ["model-alpha", "model-beta"],
                 "runners": [
                     {"agent": "codex", "vm_archive": {"path": archive_path("codex.tar"), "sha256": "b".repeat(64), "config_sha256": "c".repeat(64)}},
@@ -1274,11 +1280,18 @@ mod tests {
         std::fs::write(&prompt_path, prompt).unwrap();
         for path in [Path::new("prompts/claude/review.md"), prompt_path.as_path()] {
             let mut raw = config_json();
-            raw["agents"][0]["prompt_file"] = serde_json::json!(path);
+            raw["repositories"][0]["prompt_file"] = serde_json::json!(path);
             let config =
                 ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), &config_path).unwrap();
-            assert_eq!(config.agents()[0].prompt(), prompt);
-            assert_eq!(config.agents()[0].prompt_hash(), &PromptHash::of(prompt));
+            assert_eq!(config.repositories[0].prompt, prompt);
+            assert_eq!(
+                config
+                    .review_models_for(&PrKey::new("owner/repo", 1).unwrap())
+                    .unwrap()[0]
+                    .prompt()
+                    .hash(),
+                crate::prompt_builder::build(AgentKind::Claude, prompt).hash()
+            );
         }
     }
 
@@ -1288,7 +1301,7 @@ mod tests {
         let config_path = directory.path().join("config.json");
         let prompt_path = directory.path().join("review.md");
         let mut raw = config_json();
-        raw["agents"][0]["prompt_file"] = "review.md".into();
+        raw["repositories"][0]["prompt_file"] = "review.md".into();
         let bytes = serde_json::to_vec(&raw).unwrap();
         std::fs::write(&prompt_path, "Original prompt.\n").unwrap();
         let original = ReviewConfig::from_json(&bytes, &config_path).unwrap();
@@ -1298,10 +1311,18 @@ mod tests {
         let changed = ReviewConfig::from_json(&bytes, &config_path).unwrap();
         assert_ne!(original.hash(), changed.hash());
         assert_ne!(
-            original.agents()[0].prompt_hash(),
-            changed.agents()[0].prompt_hash()
+            original
+                .review_models_for(&PrKey::new("owner/repo", 1).unwrap())
+                .unwrap()[0]
+                .prompt()
+                .hash(),
+            changed
+                .review_models_for(&PrKey::new("owner/repo", 1).unwrap())
+                .unwrap()[0]
+                .prompt()
+                .hash()
         );
-        assert_eq!(original.agents()[0].prompt(), "Original prompt.\n");
+        assert_eq!(original.repositories[0].prompt, "Original prompt.\n");
     }
 
     #[test]
@@ -1310,14 +1331,14 @@ mod tests {
         let config_path = directory.path().join("config.json");
         let prompt_path = directory.path().join("review.md");
         let mut raw = config_json();
-        raw["agents"][0]["prompt_file"] = "review.md".into();
+        raw["repositories"][0]["prompt_file"] = "review.md".into();
         let bytes = serde_json::to_vec(&raw).unwrap();
         assert!(matches!(
             ReviewConfig::from_json(&bytes, &config_path),
-            Err(ConfigError::ReadPrompt { agent, path, source })
-                if agent.as_str() == "claude" && path == prompt_path && source.kind() == io::ErrorKind::NotFound
+            Err(ConfigError::ReadPrompt { repository, path, source })
+                if repository == "owner/repo" && path == prompt_path && source.kind() == io::ErrorKind::NotFound
         ));
-        raw["agents"][0]["prompt_file"] = serde_json::json!(directory.path());
+        raw["repositories"][0]["prompt_file"] = serde_json::json!(directory.path());
         assert!(matches!(
             ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), &config_path),
             Err(ConfigError::InvalidPromptFile { .. })
@@ -1326,7 +1347,7 @@ mod tests {
             std::fs::write(&prompt_path, invalid).unwrap();
             assert!(matches!(
                 ReviewConfig::from_json(&bytes, &config_path),
-                Err(ConfigError::InvalidPrompt(agent)) if agent.as_str() == "claude"
+                Err(ConfigError::InvalidPrompt(repository)) if repository == "owner/repo"
             ));
         }
         std::fs::write(&prompt_path, b"PRIVATE_PROMPT\xff").unwrap();
@@ -1336,17 +1357,23 @@ mod tests {
         let at_limit = "é".repeat(MAX_PROMPT_BYTES / 2);
         std::fs::write(&prompt_path, &at_limit).unwrap();
         let config = ReviewConfig::from_json(&bytes, &config_path).unwrap();
-        assert_eq!(config.agents()[0].prompt(), at_limit);
+        assert_eq!(config.repositories[0].prompt, at_limit);
     }
 
     #[test]
     fn rejects_previous_schema_and_inline_prompt_fields() {
         assert!(matches!(
-            ReviewConfig::from_json(br#"{"schema_version":5}"#, Path::new("config.json")),
-            Err(ConfigError::UnsupportedSchema(5))
+            ReviewConfig::from_json(br#"{"schema_version":6}"#, Path::new("config.json")),
+            Err(ConfigError::UnsupportedSchema(6))
         ));
         let mut raw = config_json();
         raw["agents"][0]["prompt"] = "Legacy inline prompt.".into();
+        assert!(matches!(
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), Path::new("config.json")),
+            Err(ConfigError::Json(_))
+        ));
+        raw["agents"][0].as_object_mut().unwrap().remove("prompt");
+        raw["agents"][0]["prompt_file"] = "legacy.md".into();
         assert!(matches!(
             ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), Path::new("config.json")),
             Err(ConfigError::Json(_))
@@ -1355,10 +1382,36 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("prompt_file");
+        raw["repositories"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("prompt_file");
         assert!(matches!(
             ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), Path::new("config.json")),
             Err(ConfigError::Json(_))
         ));
+    }
+
+    #[test]
+    fn repositories_share_agents_without_sharing_project_guidance() {
+        let mut raw = config_json();
+        let mut second = raw["repositories"][0].clone();
+        second["name"] = "owner/other".into();
+        second["prompt_file"] = serde_json::json!(test_prompt_file("careful.md"));
+        raw["repositories"].as_array_mut().unwrap().push(second);
+        let config =
+            ReviewConfig::from_json(&serde_json::to_vec(&raw).unwrap(), Path::new("config.json"))
+                .unwrap();
+        let first = config
+            .review_models_for(&PrKey::new("owner/repo", 42).unwrap())
+            .unwrap();
+        let other = config
+            .review_models_for(&PrKey::new("owner/other", 42).unwrap())
+            .unwrap();
+        assert_eq!(first[0].agent().id(), other[0].agent().id());
+        assert_ne!(first[0].project_prompt(), other[0].project_prompt());
+        assert_ne!(first[0].prompt().hash(), other[0].prompt().hash());
+        assert_eq!(first[0].prompt().hash(), first[1].prompt().hash());
     }
 
     #[test]
@@ -1385,10 +1438,10 @@ mod tests {
             "second-model-provider"
         );
         assert_eq!(
-            review_models[0].agent().prompt(),
+            review_models[0].project_prompt(),
             include_str!("../tests/fixtures/prompts/review.md")
         );
-        assert_eq!(review_models[0].agent().prompt_hash().as_str().len(), 64);
+        assert_eq!(review_models[0].prompt().hash().as_str().len(), 64);
         assert!(review_models[0].archive().path().ends_with("claude.tar"));
         assert_eq!(
             review_models[0].archive().checksum().as_str(),
@@ -1504,7 +1557,7 @@ mod tests {
         ));
 
         let mut raw = config_json();
-        raw["agents"][0]["prompt_file"] = "".into();
+        raw["repositories"][0]["prompt_file"] = "".into();
         assert!(matches!(
             ReviewConfig::from_json(
                 &serde_json::to_vec(&raw).unwrap(),

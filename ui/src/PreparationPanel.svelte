@@ -2,7 +2,7 @@
   import { preparationOutdated, reviewBlocker } from './request-status.js';
   import TimeAgo from './TimeAgo.svelte';
   import ButtonHelp from './ButtonHelp.svelte';
-  let { request, preparation, invalid, action, onRefresh, onValidate, onRun, onClose, onSelect = () => {} } = $props();
+  let { request, preparation, invalid, action, onRefresh, onValidate, onRun, onClose, onSelect = () => {}, reviewMode = $bindable('auto') } = $props();
   let selectedModel = $state('');
   $effect(() => { selectedModel = preparation.resolved_model; });
   $effect(() => { onSelect(selectedModel); });
@@ -69,6 +69,15 @@
     </select>
   </label>
   <p>Resolved agent: <strong>{selected?.agent ?? 'Unavailable'}</strong></p>
+  <label class="model-choice">
+    Review scope for {request.repository} #{request.number}
+    <select bind:value={reviewMode} disabled={action?.pending || stale}>
+      <option value="auto">Incremental after a published review</option>
+      <option value="full">Full PR review</option>
+    </select>
+  </label>
+  <p>Incremental review starts from the latest confirmed published review.
+    The first review, or a force push that breaks that history, gets a full review.</p>
   {#if modelValidated}
     <p>This model is validated for the prepared head and revision. Choose a different model to change it.</p>
   {:else}

@@ -136,7 +136,7 @@ impl PreparedChoice {
         Self {
             model: choice.model().id().clone(),
             agent: choice.agent().id().clone(),
-            prompt_sha256: choice.agent().prompt_hash().clone(),
+            prompt_sha256: choice.prompt().hash().clone(),
             vm_archive: choice.archive().clone(),
         }
     }
@@ -144,7 +144,7 @@ impl PreparedChoice {
     fn matches(&self, choice: &ResolvedReviewModel<'_>) -> bool {
         self.model == *choice.model().id()
             && self.agent == *choice.agent().id()
-            && self.prompt_sha256 == *choice.agent().prompt_hash()
+            && self.prompt_sha256 == *choice.prompt().hash()
             && self.vm_archive == *choice.archive()
     }
 }
@@ -288,18 +288,18 @@ mod tests {
     fn config_json() -> serde_json::Value {
         let archive = |name: &str| std::env::temp_dir().join(name).to_str().unwrap().to_owned();
         serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "execution": crate::config::test_execution_json(),
             "models": [
                 {"id":"model-alpha", "coauthors":[{"name":"Model Alpha", "email":"model@example.com"}]},
                 {"id":"model-beta", "coauthors":[{"name":"Model Beta", "email":"model@example.com"}]}
             ],
             "agents": [
-                {"id":"claude", "models":["model-alpha", "model-beta"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner": crate::config::test_runner_json()},
-                {"id":"codex", "models":["model-beta"], "prompt_file": crate::config::test_prompt_file("careful.md"), "runner": crate::config::test_runner_json()}
+                {"id":"claude", "models":["model-alpha", "model-beta"], "runner": crate::config::test_runner_json()},
+                {"id":"codex", "models":["model-beta"], "runner": crate::config::test_runner_json()}
             ],
             "repositories": [{
-                "name":"owner/repo",
+                "name":"owner/repo", "prompt_file": crate::config::test_prompt_file("review.md"),
                 "review_models":["model-alpha", "model-beta"],
                 "runners":[
                     {"agent":"codex", "vm_archive":{"path":archive("codex.tar"), "sha256":"b".repeat(64), "config_sha256":"c".repeat(64)}},
@@ -524,7 +524,7 @@ mod tests {
             );
         }
         let mut changed = config_json();
-        changed["agents"][0]["prompt_file"] =
+        changed["repositories"][0]["prompt_file"] =
             serde_json::json!(crate::config::test_prompt_file("changed.md"));
         let changed = ReviewConfig::from_json(
             &serde_json::to_vec(&changed).unwrap(),

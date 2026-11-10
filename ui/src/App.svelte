@@ -204,10 +204,11 @@
     }, () => 'Review model validated.', 'Could not validate the review model.');
   }
 
-  function runReview(request, requestId, preparation, model) {
+  function runReview(request, requestId, preparation, model, reviewMode) {
     return performRequestAction(requestId, 'run', {
       key: { repository: request.repository, number: request.number },
       model,
+      review_mode: reviewMode,
       head_sha: preparation.head_sha,
       revision: preparation.revision,
       rules: {
@@ -372,7 +373,7 @@
             onUnmanage={() => unmanage(request, requestId)}
             onPrepare={() => prepareReview(request, requestId)}
             onValidate={(preparation, model) => validateModel(request, requestId, preparation, model)}
-            onRun={(preparation, model) => runReview(request, requestId, preparation, model)}
+            onRun={(preparation, model, reviewMode) => runReview(request, requestId, preparation, model, reviewMode)}
             onViewDraft={(roundId) => viewDraft(request, requestId, roundId)}
             onRejectDraft={(inspected) => rejectDraft(requestId, inspected)}
             onPublishDraft={(inspected) => publishDraft(requestId, inspected)} />

@@ -87,7 +87,7 @@ impl PreparedModel {
             agent: choice.agent().id().clone(),
             runner_kind: choice.agent().runner().kind(),
             model_provider: choice.agent().runner().model_provider().to_owned(),
-            prompt_sha256: choice.agent().prompt_hash().clone(),
+            prompt_sha256: choice.prompt().hash().clone(),
             runner_sha256: choice.agent().runner().hash().clone(),
             archive: choice.archive().clone(),
         }
@@ -306,13 +306,13 @@ mod tests {
             .unwrap();
         storage::save(&state_file, &state).unwrap();
         let config = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "execution": {"openshell": directory.join("openshell"), "gateway":"gateway", "workspace":"default", "driver":"vm", "github_provider":"github-ro"},
             "models": [{"id":"model-alpha", "coauthors":[]}],
-            "agents": [{"id":"claude", "models":["model-alpha"], "prompt_file":"review.md", "runner": {
+            "agents": [{"id":"claude", "models":["model-alpha"], "runner": {
                 "kind":"claude", "model_provider":"model-provider", "policy": directory.join("policy.yaml"), "policy_sha256":"b".repeat(64), "hold_command":["/bin/sleep","3600"]
             }}],
-            "repositories": [{"name":"owner/repo", "review_models":["model-alpha"], "runners":[{
+            "repositories": [{"name":"owner/repo", "prompt_file": "review.md", "review_models":["model-alpha"], "runners":[{
                 "agent":"claude", "vm_archive":{"path": directory.join("reviewer.tar"), "sha256":"a".repeat(64), "config_sha256":"c".repeat(64)}
             }]}],
         })).unwrap();

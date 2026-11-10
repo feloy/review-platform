@@ -4,11 +4,9 @@ mod claude;
 mod codex;
 
 use crate::archive::StagedArchive;
-use crate::config::{
-    AgentKind, AgentRunnerConfig, ExecutionConfig, PromptHash, valid_vm_absolute_path,
-};
+use crate::config::{AgentKind, AgentRunnerConfig, ExecutionConfig, valid_vm_absolute_path};
 use crate::openshell::OpenShell;
-use crate::review::{OUTPUT_SCHEMA, REVIEW_RULES, RoundRecord};
+use crate::review::RoundRecord;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
@@ -96,18 +94,6 @@ pub(crate) fn reserved_environment_key(key: &str) -> bool {
     )
 }
 
-pub fn review_rules(kind: AgentKind) -> String {
-    format!("{REVIEW_RULES}\n{}", adapter(kind).tool_guidance())
-}
-
-pub fn rules_hash(kind: AgentKind) -> PromptHash {
-    PromptHash::of(&format!("{}\n{OUTPUT_SCHEMA}", review_rules(kind)))
-}
-
-pub fn compose_system_prompt(kind: AgentKind, configured: &str) -> String {
-    format!("{configured}\n\n{}", review_rules(kind))
-}
-
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum AgentRunError {
     #[error("starting the review agent failed")]
@@ -141,7 +127,7 @@ pub struct AgentInvocation<'a> {
     prepared: &'a PreparedAgent,
     round: &'a RoundRecord,
     prompt_path: &'a str,
-    base_sha: &'a str,
+    task_prompt: &'a str,
 }
 
 impl<'a> AgentInvocation<'a> {
@@ -149,13 +135,13 @@ impl<'a> AgentInvocation<'a> {
         prepared: &'a PreparedAgent,
         round: &'a RoundRecord,
         prompt_path: &'a str,
-        base_sha: &'a str,
+        task_prompt: &'a str,
     ) -> Self {
         Self {
             prepared,
             round,
             prompt_path,
-            base_sha,
+            task_prompt,
         }
     }
 }
@@ -424,12 +410,12 @@ mod tests {
         let mut runner = crate::config::test_runner_json();
         runner["kind"] = kind.as_str().into();
         let raw = serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "execution": crate::config::test_execution_json(),
             "models": [{"id": "model-alpha", "coauthors": []}],
             "agents": [{"id": "reviewer", "models": ["model-alpha"],
-                "prompt_file": crate::config::test_prompt_file("review.md"), "runner": runner}],
-            "repositories": [{"name": "owner/repo", "review_models": ["model-alpha"],
+                "runner": runner}],
+            "repositories": [{"name": "owner/repo", "prompt_file": crate::config::test_prompt_file("review.md"), "review_models": ["model-alpha"],
                 "runners": [{"agent": "reviewer", "vm_archive": {
                     "path": std::env::temp_dir().join("reviewer.tar"),
                     "sha256": "a".repeat(64), "config_sha256": "b".repeat(64)
@@ -493,19 +479,45 @@ mod tests {
     }
 
     #[test]
-    fn trusted_rules_and_round_fingerprints_use_the_selected_adapter() {
-        assert_ne!(rules_hash(AgentKind::Claude), rules_hash(AgentKind::Codex));
+    fn round_fingerprints_use_the_selected_adapter() {
         for kind in [AgentKind::Claude, AgentKind::Codex] {
             let (_, round) = test_round(kind);
-            let prompt = compose_system_prompt(kind, "Configured review instructions.");
-            assert!(prompt.starts_with("Configured review instructions.\n\n"));
-            assert!(prompt.contains(REVIEW_RULES));
-            assert!(prompt.ends_with(adapter(kind).tool_guidance()));
-            assert_eq!(round.format_hash(), &rules_hash(kind));
+            assert_eq!(
+                round.format_hash(),
+                &crate::prompt_builder::rules_hash(kind)
+            );
         }
-        let codex = compose_system_prompt(AgentKind::Codex, "Review the PR.");
-        assert!(!codex.contains("dontAsk"));
-        assert!(!codex.contains("Use Edit"));
+    }
+
+    #[test]
+    fn adapters_deliver_the_exact_same_full_and_incremental_task() {
+        use crate::prompt_builder::{ReviewScope, ReviewTask};
+        let prepared = PreparedAgent {
+            executable: "/usr/bin/reviewer".into(),
+            environment: BTreeMap::new(),
+            arguments: vec![],
+        };
+        let base = HeadSha::new("b".repeat(40)).unwrap();
+        for scope in [
+            ReviewScope::Full,
+            ReviewScope::Incremental {
+                since: HeadSha::new("c".repeat(40)).unwrap(),
+                review_id: NonZeroU64::new(17).unwrap(),
+            },
+        ] {
+            let task = ReviewTask::new(base.clone(), scope);
+            for kind in [AgentKind::Claude, AgentKind::Codex] {
+                let (_, round) = test_round(kind);
+                let prompt = task.prompt(round.key(), round.head_sha());
+                let args = adapter(kind).command(&AgentInvocation::new(
+                    &prepared,
+                    &round,
+                    "/sandbox/instructions/system-prompt.txt",
+                    &prompt,
+                ));
+                assert_eq!(args.last().unwrap(), prompt.as_str());
+            }
+        }
     }
 
     #[test]

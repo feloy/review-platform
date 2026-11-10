@@ -183,6 +183,27 @@ impl GithubClient {
         })
     }
 
+    /// Compare exact commits without treating review text as evidence of prior work.
+    pub fn is_ancestor(
+        &self,
+        key: &PrKey,
+        previous: &HeadSha,
+        current: &HeadSha,
+    ) -> GithubResult<bool> {
+        if previous == current {
+            return Ok(true);
+        }
+        let route = format!("/repos/{}/compare/{previous}...{current}", key.repository());
+        let resource = format!("comparison for {key}");
+        let response = match self.get(&route, "application/vnd.github+json", &resource) {
+            Ok(response) => response,
+            Err(GithubError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let comparison: ApiComparison = parse_json(response, resource)?;
+        Ok(&comparison.merge_base_commit.sha == previous)
+    }
+
     /// Return the PR diff, or changes after a supplied ancestor commit.
     /// Recheck the live PR before returning mutable diff data to the caller.
     pub fn diff_for_pull(
@@ -848,6 +869,42 @@ mod tests {
             matches!(&error, GithubError::DivergentHistory { .. }),
             "{error}"
         );
+    }
+
+    #[test]
+    fn scope_ancestry_distinguishes_ancestors_divergence_missing_history_and_errors() {
+        let key = PrKey::new("owner/repo", 42).unwrap();
+        let previous = HeadSha::new(PREVIOUS_HEAD).unwrap();
+        let head = HeadSha::new(HEAD).unwrap();
+        let route = format!("/repos/owner/repo/compare/{PREVIOUS_HEAD}...{HEAD}");
+        for (status, merge_base, expected) in [
+            ("200 OK", PREVIOUS_HEAD, Some(true)),
+            ("200 OK", HEAD, Some(false)),
+            ("404 Not Found", HEAD, Some(false)),
+            ("500 Internal Server Error", HEAD, None),
+        ] {
+            let mut reply = json_reply(
+                route.clone(),
+                serde_json::json!({
+                    "merge_base_commit": {"sha": merge_base}
+                })
+                .to_string(),
+            );
+            reply.status = status.into();
+            let (url, handle) = serve_many(vec![reply]);
+            let client = GithubClient::for_api(url, Some("test-token".into()));
+            let result = client.is_ancestor(&key, &previous, &head);
+            handle.join().unwrap();
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected),
+                None => assert!(matches!(
+                    result,
+                    Err(GithubError::HttpStatus { status: 500, .. })
+                )),
+            }
+            // Identical commits need no comparison request, even for discussion-only rounds.
+            assert!(client.is_ancestor(&key, &head, &head).unwrap());
+        }
     }
 
     #[test]
@@ -1781,12 +1838,12 @@ mod tests {
             };
             let config = ReviewConfig::from_json(
                 &serde_json::to_vec(&serde_json::json!({
-                    "schema_version": 6,
+                    "schema_version": 7,
                     "execution": crate::config::test_execution_json(),
                     "models": [{"id": "model-alpha", "coauthors": []}],
-                    "agents": [{"id": "claude", "models": ["model-alpha"], "prompt_file": crate::config::test_prompt_file("review.md"), "runner":crate::config::test_runner_json()}],
+                    "agents": [{"id": "claude", "models": ["model-alpha"], "runner":crate::config::test_runner_json()}],
                     "repositories": [{
-                        "name": "owner/repo",
+                        "name": "owner/repo", "prompt_file": crate::config::test_prompt_file("review.md"),
                         "review_models": ["model-alpha"],
                         "runners": [{
                             "agent": "claude",

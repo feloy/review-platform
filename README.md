@@ -130,6 +130,9 @@ authorize the refreshed inputs and prepare again in that case.
 Preparation and validation never start a review or consume authorization.
 
 Use **Run review** once the selected model is validated and preparation is current.
+The **Review scope** selection defaults to incremental after the latest confirmed published review.
+The first review is full, and a force push that breaks the previous reviewed commit's ancestry also falls back to full.
+Choose **Full PR review** to inspect the entire PR again regardless of earlier reviews.
 Startup rechecks PR inputs, exact-head CI, authorization, configuration, and gateway readiness,
 then uses the same runner and sandbox lifecycle as `run-review`.
 The review runs in the GUI server process;
@@ -222,6 +225,8 @@ The optional `context` contains persisted display-only GitHub metadata
 bound to `head_sha` and `revision`,
 with `checked_at`, optional exact-head `checks`, and code and discussion change flags.
 Round summaries include `created_at`, optional `dispatched_at`, and optional `finished_at`.
+New rounds also include `task` with `base_sha` and `scope`:
+`mode: full`, or `mode: incremental` with the previously reviewed `since` commit and confirmed `review_id`.
 
 The optional `run` reports the latest GUI job for this server launch:
 `status` (`starting`, `running`, `finished`, or `failed`), `round_id`, and `failure`.
@@ -301,7 +306,10 @@ Configuration and archive verification failures return HTTP 422.
 GitHub failures can leave freshly observed inputs saved without a new model choice.
 The snapshots omit prompts, provider details, and archive paths.
 
-Run accepts the same inspected payload as validation, including the selected model and rules.
+Run accepts the same inspected payload as validation, including the selected model and rules,
+plus optional `review_mode`: `auto` (the default) or `full`.
+Automatic scope uses only publication receipts recorded for this PR;
+copied markers and reviews published outside this daemon do not select an incremental baseline.
 It rechecks the persisted model choice and inspected inputs, authorization, and configuration
 before startup and again before dispatch.
 It returns HTTP 202 with `accepted: true` when the server takes ownership of the job;
@@ -606,6 +614,18 @@ including when loaded from the JSON state file.
   It copies and verifies the configured rootfs tar and OCI metadata,
   checks out the exact PR head and base without running repository code,
   and creates a sandbox with read-only checkout and instructions.
+  Automatic scope is incremental after the latest confirmed publication for this PR,
+  using its reviewed commit after checking ancestry against the current head.
+  With no confirmed publication, or after divergent or unavailable previous history, it performs a full review.
+  Author discussion changes at the same head produce an incremental discussion review with no code changes.
+  Add `--full-review` to inspect the entire PR regardless of earlier reviews:
+
+  ```sh
+  review-platform run-review owner/repo 42 --head HEAD_SHA --revision REVISION --full-review
+  ```
+
+  The daemon records the base commit and effective scope and makes the previous commit available in the checkout.
+  Only recorded confirmed publications supply an incremental baseline; rejected and uncertain drafts do not.
   Immediately before dispatch it rechecks GitHub inputs, CI, authorization,
   configuration, and policy.
 
@@ -694,20 +714,20 @@ Keep the state file private to the lead operator.
 
 Create a private JSON configuration before using `prepare-review`,
 `gateway status`, or `run-review`.
-The configuration file has schema version 6;
+The configuration file has schema version 7;
 the state file uses schema version 8.
 Earlier configuration schemas are rejected during development;
 update the private file before running review commands.
 
 `models` defines selectable models and their co-author signatures;
-`agents` defines agent capabilities, prompts, and runner settings.
-Each repository orders its review models and agent runners,
+`agents` defines agent capabilities and runner settings.
+Each repository supplies its project prompt and orders its review models and agent runners,
 with a prebuilt VM rootfs tar archive for each runner.
 For example:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "publisher_login": "expected-publisher-account",
   "execution": {
     "openshell": "/absolute/path/to/openshell",
@@ -734,7 +754,6 @@ For example:
     {
       "id": "claude",
       "models": ["model-alpha"],
-      "prompt_file": "prompts/claude/review.md",
       "runner": {
         "kind": "claude",
         "model_provider": "operator-model-provider",
@@ -748,7 +767,6 @@ For example:
     {
       "id": "codex",
       "models": ["model-beta"],
-      "prompt_file": "prompts/codex/review.md",
       "runner": {
         "kind": "codex",
         "model_provider": "operator-openai-responses-provider",
@@ -763,6 +781,7 @@ For example:
   "repositories": [
     {
       "name": "owner/repo",
+      "prompt_file": "prompts/owner-repo.md",
       "review_models": ["model-alpha", "model-beta"],
       "runners": [
         {
@@ -802,12 +821,11 @@ For that model, it chooses the first repository-listed runner whose agent declar
 Configuration is rejected if any listed review model has no compatible runner.
 Commit trailers are author-controlled hints; only the lead's explicit model choice is trusted.
 
-`prompt_file` names a local UTF-8 text or Markdown file containing the agent's review instructions.
+Each repository's `prompt_file` names a local UTF-8 text or Markdown file containing its project review guidance.
 Relative paths resolve from the configuration file's directory, independently of the working directory;
 absolute paths are also accepted.
-For the example above, create `prompts/claude/review.md` under the directory containing `config.json`.
-Create `prompts/codex/review.md` there too;
-the same initial instructions work for both agents:
+For the example above, create `prompts/owner-repo.md` under the directory containing `config.json`.
+The same project guidance applies to every agent reviewing this repository:
 
 ```text
 Review correctness, security, and the PR's changes.
@@ -820,10 +838,15 @@ Its exact contents, including line breaks, are loaded with the configuration.
 Prompt edits change the configuration fingerprint and invalidate a matching model validation;
 prepare and inspect the review again after editing a prompt.
 Prompt contents are not printed by `prepare-review`.
-The common review rules and selected adapter's tool guidance also participate in freshness fingerprints.
-Updating those rules requires fresh preparation and model validation, even for an unchanged model choice.
-Earlier configurations using inline `prompt` must move that text into a file,
-replace the field with `prompt_file`, and set `schema_version` to 6.
+Shared system rules, agent-specific tool guidance, and full and incremental task instructions are embedded in the application.
+System rules take priority over agent and project guidance;
+the task supplied by the daemon determines the round's review scope.
+PR files, comments, and instruction files never become trusted prompt layers.
+The composed prompt, task templates, and output schema participate in freshness fingerprints.
+Updating them requires fresh preparation and model validation, even for an unchanged model choice.
+To update schema 6 configuration, move `prompt_file` from each agent to its repository and set `schema_version` to 7.
+Consolidate repository conventions into the project file;
+agent tool instructions and full or incremental scope selection now belong to the application.
 
 Archive paths must be absolute, end in `.tar`, and name regular files rather than symlinks.
 Each archive needs a regular, separate OCI metadata file at `<archive>.config.json`.
@@ -888,7 +911,8 @@ remote gateway deployment is not implemented.
 
 `run-review` creates a private round directory beside the state file,
 under `rounds/ROUND_ID/`.
-It retains the `output/review-output.json` agent artifact,
+It retains the private composed system, project, and task instruction files,
+the `output/review-output.json` agent artifact,
 stores the assembled private `draft.json`,
 and keeps an incomplete log file if an agent run fails after emitting dialogue.
 
@@ -1048,7 +1072,7 @@ It also limits response data to 8 MiB per retrieval pass and rejects an unstable
 ## How reviews work
 
 The lead configures the repositories the daemon watches, the available models and agents,
-agent review prompts, the VM archive for each repository and agent pair,
+project review prompts, the VM archive for each repository and agent pair,
 and privileged access for trusted people.
 An operator supplies an already-running OpenShell gateway with compatible model
 and read-only GitHub providers configured for review sandboxes.
@@ -1062,7 +1086,8 @@ Authorization for the full cycle lets each new commit or author comment start an
 once the checks are green.
 The lead can switch between these choices at any time.
 
-The daemon manages the review instructions (prompts) for each agent.
+The daemon combines its embedded system and agent instructions with repository project guidance
+and an explicit full or incremental task for each round.
 For each round, it uses PR co-author information to propose a review model
 different from the one that helped author the PR, when possible.
 The lead validates or changes the model choice.
