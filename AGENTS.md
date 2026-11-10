@@ -80,6 +80,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 - Keep model selection separate from agent selection.
   Co-author trailers are untrusted hints for proposing a different model;
   resolve its agent from configured capabilities and repository runner order.
+- Disable GUI model and scope selectors together when readiness is blocked,
+  an action is pending, or preparation is outdated.
 - Require each lead authorization to name the PR head the lead inspected.
   Reject it if the recorded head has changed; revocation needs no head match.
   Keep inspected inputs fixed in GUI decision forms;

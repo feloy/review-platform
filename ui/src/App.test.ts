@@ -1072,8 +1072,9 @@ describe('review requests page', () => {
     ['checks_unknown', 'unknown', 'checks for the current head have an unknown result'],
     ['no_checks', 'no_results', 'no checks were reported for the current head'],
     ['awaiting_authorization', 'green', 'lead authorization is required'],
+    ['discussion_not_observed', 'green', 'author discussion has not been observed'],
     ['pull_closed', 'green', 'the PR is closed'],
-  ])('shows %s as a blocker and disables model validation', async (readiness, checks, readiness_message) => {
+  ])('shows %s as a blocker and disables model and scope selection', async (readiness, checks, readiness_message) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
@@ -1085,6 +1086,10 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText(readiness_message)).toBeTruthy();
     expect((screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(true);
+    const scope = screen.getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement;
+    expect(scope.disabled).toBe(true);
+    await user.selectOptions(scope, 'full');
+    expect(scope.value).toBe('auto');
     const button = await clickMaterialButton(user, container, 'Validate model');
     expect(button.disabled).toBe(true);
     expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
@@ -1116,6 +1121,7 @@ describe('review requests page', () => {
     expect(within(panel).getByText('Refreshing readiness…')).toBeTruthy();
     expect(within(panel).getByText('Checks for this head').nextElementSibling.textContent).toBe(originalChecks);
     expect((within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(true);
+    expect((within(panel).getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement).disabled).toBe(true);
     refresh.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/prepare');
@@ -1125,6 +1131,7 @@ describe('review requests page', () => {
     await waitFor(() => expect(within(panel).getByText('Checks for this head').nextElementSibling.textContent).toBe('Green'));
     expect(screen.getByRole('region', { name: 'Review preparation for owner/repo #15' })).toBe(panel);
     expect((within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
+    expect((within(panel).getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
     expect((within(panel).getByText('Validate model') as MaterialControl).disabled).toBe(false);
     expect((within(panel).getByText('Run review') as MaterialControl).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -1284,6 +1291,7 @@ describe('review requests page', () => {
     const run = await clickMaterialButton(user, container, 'Run review');
     expect(run.disabled).toBe(true);
     expect(model.disabled).toBe(true);
+    expect(scope.disabled).toBe(true);
     expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/run');
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({

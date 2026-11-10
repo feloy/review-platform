@@ -119,6 +119,8 @@ including after pending or failing checks change on GitHub.
 The panel keeps its previous results visible while refreshing;
 if refreshing fails, retry before confirming a model or starting a review.
 Select a model and use **Validate model** to confirm it for the prepared head and revision.
+The model and scope selectors use the same readiness requirements.
+Both are disabled during actions or when preparation is outdated.
 The confirmed selection shows **Model validated**;
 selecting a different model enables **Validate model** again.
 
