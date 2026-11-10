@@ -288,6 +288,14 @@ h2 {
   fill: currentColor;
 }
 
+.request-item.compact-closed .request-heading {
+  padding-bottom: 22px;
+}
+
+.request-item.compact-closed .pr-title {
+  margin-bottom: 4px;
+}
+
 .next-step {
   display: flex;
   align-items: center;

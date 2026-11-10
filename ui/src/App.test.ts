@@ -566,6 +566,38 @@ describe('review requests page', () => {
     expect(screen.getByText('Review in progress')).toBeTruthy();
   });
 
+  it('shows an inactive closed PR as a compact summary row', async () => {
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0],
+      [request({ context: context({ state: 'closed' }) })]);
+    const row = container.querySelector('.request-item');
+    expect(screen.getByRole('link', { name: 'Fix login redirect' })).toBeTruthy();
+    expect(row.querySelector('.request-name a')?.textContent).toBe('owner/repo #15');
+    expect(screen.getByText('by @alice · Closed')).toBeTruthy();
+    expect(screen.queryByText('Pull request closed')).toBeNull();
+    expect(row.querySelector('.request-row')).toBeNull();
+    expect(row.querySelector('.request-details')).toBeNull();
+    expect(row.querySelector('.next-step')).toBeNull();
+    expect(row.querySelector('md-icon-button')).toBeNull();
+    await showSnapshot(FakeEventSource.instances[0], [request({
+      context: context({ state: 'closed' }),
+      latest_round: round({ status: 'published', cleanup_pending: false, cleanup_status: 'complete' }),
+    })]);
+    expect(row.classList.contains('compact-closed')).toBe(true);
+  });
+
+  it('keeps closed-PR controls when a draft still needs a decision', async () => {
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({
+      context: context({ state: 'closed' }),
+      latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }),
+    })]);
+    const row = container.querySelector('.request-item');
+    expect(screen.getByText('Draft ready for your decision')).toBeTruthy();
+    expect(row.querySelector('.request-row')).toBeTruthy();
+    expect(row.querySelector('.request-details')).toBeTruthy();
+  });
+
   it('offers the next action and starts only the currently confirmed model', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
