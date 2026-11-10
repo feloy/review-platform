@@ -1,6 +1,5 @@
 //! Display-only GitHub observations bound to recorded PR inputs.
 
-use super::RequestList;
 use crate::storage;
 use anyhow::Result;
 use review_platform::{
@@ -9,9 +8,7 @@ use review_platform::{
     preparation::CiState,
 };
 use std::{
-    collections::HashMap,
     path::Path,
-    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -45,78 +42,34 @@ pub(super) fn request_context(
     )
 }
 
-#[derive(Default)]
-pub(super) struct Contexts(Mutex<HashMap<PrKey, RequestContext>>);
-
-impl Contexts {
-    pub(super) fn record(
-        &self,
-        path: &Path,
-        key: &PrKey,
-        context: RequestContext,
-    ) -> Option<RequestContext> {
-        match self.try_record(path, key, &context) {
-            Ok(true) => Some(context),
-            Ok(false) => None,
-            Err(error) => {
-                crate::gui_diagnostics::report("display context", key, None, error.as_ref());
-                let _ = self.forget(key);
-                None
-            }
+pub(super) fn record_display_context(
+    path: &Path,
+    key: &PrKey,
+    context: RequestContext,
+) -> Option<RequestContext> {
+    match try_record_display_context(path, key, &context) {
+        Ok(true) => Some(context),
+        Ok(false) => None,
+        Err(error) => {
+            crate::gui_diagnostics::report("display context", key, None, error.as_ref());
+            None
         }
     }
+}
 
-    fn try_record(&self, path: &Path, key: &PrKey, context: &RequestContext) -> Result<bool> {
-        // Coordinate with removal and re-addition before retaining any PR identity.
-        let _lock = storage::lock(path)?;
-        let mut state = storage::load(path)?;
-        let changed = state.record_display_context(key, context.clone())?;
-        if changed {
-            storage::save(path, &state)?;
-        }
-        if state.get(key).is_some_and(|request| {
-            request
-                .display_context()
-                .is_some_and(|recorded| recorded == context)
-        }) {
-            self.0
-                .lock()
-                .map_err(|_| anyhow::anyhow!("could not save GUI display context"))?
-                .insert(key.clone(), context.clone());
-            return Ok(true);
-        }
-        Ok(false)
+fn try_record_display_context(path: &Path, key: &PrKey, context: &RequestContext) -> Result<bool> {
+    // Coordinate with removal and re-addition before retaining any PR identity.
+    let _lock = storage::lock(path)?;
+    let mut state = storage::load(path)?;
+    let changed = state.record_display_context(key, context.clone())?;
+    if changed {
+        storage::save(path, &state)?;
     }
-
-    pub(super) fn forget(&self, key: &PrKey) -> Result<()> {
-        self.0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("could not clear GUI display context"))?
-            .remove(key);
-        Ok(())
-    }
-
-    pub(super) fn apply(&self, list: &mut RequestList) -> Result<()> {
-        let mut contexts = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("could not read GUI display context"))?;
-        contexts.retain(|key, context| {
-            list.requests.iter().any(|request| {
-                request.repository == key.repository()
-                    && request.number == key.number()
-                    && request.head_sha == context.head_sha().as_str()
-                    && request.revision == context.revision().get()
-            })
-        });
-        for request in &mut list.requests {
-            request.context = contexts
-                .get(&PrKey::new(&request.repository, request.number)?)
-                .or(request.context.as_ref())
-                .cloned();
-        }
-        Ok(())
-    }
+    Ok(state.get(key).is_some_and(|request| {
+        request
+            .display_context()
+            .is_some_and(|recorded| recorded == context)
+    }))
 }
 
 pub(super) fn observation_time() -> Option<u64> {
@@ -274,15 +227,13 @@ mod tests {
         storage::save(&path, &state).unwrap();
         let revision = state.get(&key).unwrap().revision();
         let context = display_context(head.clone(), revision);
-        let contexts = Contexts::default();
-        contexts.record(&path, &key, context.clone()).unwrap();
+        record_display_context(&path, &key, context.clone()).unwrap();
         let persisted = storage::load(&path).unwrap();
         assert_eq!(
             persisted.get(&key).unwrap().display_context(),
             Some(&context)
         );
-        let mut list = request_list(&path).unwrap();
-        contexts.apply(&mut list).unwrap();
+        let list = request_list(&path).unwrap();
         let displayed = serde_json::to_value(list.requests[0].context.as_ref().unwrap()).unwrap();
         assert_eq!(displayed["title"], "Fix login redirect");
         assert_eq!(displayed["checked_at"], 123);
@@ -291,20 +242,16 @@ mod tests {
             .record_request(key.clone(), HeadSha::new("b".repeat(40)).unwrap())
             .unwrap();
         storage::save(&path, &state).unwrap();
-        let mut list = request_list(&path).unwrap();
-        contexts.apply(&mut list).unwrap();
+        let list = request_list(&path).unwrap();
         assert!(list.requests[0].context.is_none());
-        assert!(contexts.record(&path, &key, context.clone()).is_none());
-        assert!(contexts.0.lock().unwrap().is_empty());
+        assert!(record_display_context(&path, &key, context.clone()).is_none());
 
         request_commands::unmanage(&path, &key).unwrap();
-        assert!(contexts.record(&path, &key, context.clone()).is_none());
-        assert!(contexts.0.lock().unwrap().is_empty());
+        assert!(record_display_context(&path, &key, context.clone()).is_none());
         let mut state = storage::load(&path).unwrap();
         state.record_request(key.clone(), head).unwrap();
         storage::save(&path, &state).unwrap();
         assert!(state.get(&key).unwrap().revision().get() > revision.get());
-        assert!(contexts.record(&path, &key, context).is_none());
-        assert!(contexts.0.lock().unwrap().is_empty());
+        assert!(record_display_context(&path, &key, context).is_none());
     }
 }
