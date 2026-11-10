@@ -24,10 +24,12 @@ if (!window.HTMLElement.prototype.showPopover) {
 // Material Web ripples and menus use Web Animations, which jsdom lacks.
 if (!window.Element.prototype.animate) {
   window.Element.prototype.animate = () => {
-    const animation = new EventTarget();
-    animation.currentTime = 1000;
-    const timer = setTimeout(() => animation.dispatchEvent(new Event('finish')), 0);
-    animation.cancel = () => clearTimeout(timer);
+    let timer: ReturnType<typeof setTimeout>;
+    const animation = Object.assign(new EventTarget(), {
+      currentTime: 1000,
+      cancel: () => clearTimeout(timer),
+    }) as Animation;
+    timer = setTimeout(() => animation.dispatchEvent(new Event('finish')), 0);
     return animation;
   };
 }
