@@ -70,11 +70,10 @@ Refreshing or preparing a PR adds its title, author, open or closed state,
 the inspected commit, and when GitHub was checked.
 Preparation also shows the check result for that commit.
 The page's local update time describes browser updates, separately from GitHub checks.
-GitHub display context lasts for the current server launch, survives browser reloads,
+GitHub display context is saved with the request, survives browser and GUI restarts,
 and is discarded when recorded inputs change or the PR is removed.
-If caching that context fails, the successful refresh or preparation still completes;
+If saving that context fails, the successful refresh or preparation still completes;
 the server logs a local diagnostic and omits the unavailable display context.
-After restarting the GUI, refresh or prepare a PR to load its display context again.
 Review start and finish times and confirmed publication times come from saved records.
 
 After signing in, use **Refresh from GitHub** on a request to fetch its current head
@@ -211,7 +210,8 @@ The GUI uses the GitHub credentials available when it starts.
 `GET /api/requests` returns a JSON snapshot sorted by repository and PR number.
 Each request includes optional discussion counts and model validation,
 plus a summary of its latest round when one exists, including its failure kind and draft freshness.
-The optional `context` contains display-only GitHub metadata bound to `head_sha` and `revision`,
+The optional `context` contains persisted display-only GitHub metadata
+bound to `head_sha` and `revision`,
 with `checked_at`, optional exact-head `checks`, and code and discussion change flags.
 Round summaries include `created_at`, optional `dispatched_at`, and optional `finished_at`.
 
@@ -670,8 +670,8 @@ An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
 
 The state file and configuration file have separate schema versions.
-The current state schema is version 7.
-Versions 5 and 6 are upgraded in memory and saved as version 7 on the next mutation;
+The current state schema is version 8.
+Versions 5 through 7 are upgraded in memory and saved as version 8 on the next mutation;
 older and future versions are rejected.
 Existing private draft artifacts are left unchanged.
 A global `request_revision_floor` prevents reuse of discarded input revisions
@@ -687,7 +687,7 @@ Keep the state file private to the lead operator.
 Create a private JSON configuration before using `prepare-review`,
 `gateway status`, or `run-review`.
 The configuration file has schema version 6;
-the state file uses schema version 7.
+the state file uses schema version 8.
 Earlier configuration schemas are rejected during development;
 update the private file before running review commands.
 

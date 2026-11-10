@@ -6,14 +6,14 @@ use crate::model::{
     Authorization, AuthorizationScope, HeadSha, InputRevision, ObservedDiscussion, PrKey,
     StateError,
 };
-use crate::preparation::{Preparation, Readiness};
+use crate::preparation::{CiState, Preparation, Readiness};
 use crate::publication::{AttemptOutcome, PublicationHash, PublicationReceipt, SealedBody};
 use crate::review::{FailureKind, Freshness, RoundId, RoundRecord, RoundStateError, RoundStatus};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Error)]
 pub enum ModelValidationError {
@@ -64,6 +64,93 @@ pub struct ReviewRequest {
     discussion: Option<ObservedDiscussion>,
     #[serde(deserialize_with = "deserialize_model_validation")]
     model_validation: Option<ModelValidation>,
+    #[serde(default)]
+    display_context: Option<RequestDisplayContext>,
+}
+
+/// GitHub-derived context retained only for display, never for authorization decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestDisplayContext {
+    #[serde(flatten)]
+    pull: PullDisplay,
+    head_sha: HeadSha,
+    revision: InputRevision,
+    checked_at: Option<u64>,
+    checks: Option<CiState>,
+    head_changed: bool,
+    discussion_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullDisplay {
+    title: String,
+    author: String,
+    state: PullDisplayState,
+    draft: bool,
+}
+
+impl PullDisplay {
+    #[must_use]
+    pub fn new(
+        title: impl Into<String>,
+        author: impl Into<String>,
+        state: PullDisplayState,
+        draft: bool,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            author: author.into(),
+            state,
+            draft,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PullDisplayState {
+    Open,
+    Closed,
+}
+
+impl RequestDisplayContext {
+    #[must_use]
+    pub fn new(
+        pull: PullDisplay,
+        head_sha: HeadSha,
+        revision: InputRevision,
+        checked_at: Option<u64>,
+        checks: Option<CiState>,
+        changes: RefreshOutcome,
+    ) -> Self {
+        let (head_changed, discussion_changed) = match changes {
+            RefreshOutcome::Unchanged => (false, false),
+            RefreshOutcome::Updated {
+                head_changed,
+                discussion_changed,
+                ..
+            } => (head_changed, discussion_changed),
+        };
+        Self {
+            pull,
+            head_sha,
+            revision,
+            checked_at,
+            checks,
+            head_changed,
+            discussion_changed,
+        }
+    }
+
+    pub fn head_sha(&self) -> &HeadSha {
+        &self.head_sha
+    }
+
+    pub fn revision(&self) -> InputRevision {
+        self.revision
+    }
 }
 
 // Require the field in current state while allowing null to mean not yet observed.
@@ -161,6 +248,10 @@ impl ReviewRequest {
         self.model_validation.as_ref()
     }
 
+    pub fn display_context(&self) -> Option<&RequestDisplayContext> {
+        self.display_context.as_ref()
+    }
+
     pub fn ensure_inspected(
         &self,
         inspected_head: &HeadSha,
@@ -209,7 +300,7 @@ impl Default for State {
 impl State {
     /// Retain existing requests and drafts when upgrading supported local state.
     pub fn migrate_legacy(&mut self) -> Result<bool, StateError> {
-        if matches!(self.schema_version, 5 | 6) {
+        if matches!(self.schema_version, 5..=7) {
             self.schema_version = SCHEMA_VERSION;
             self.validate()?;
             return Ok(true);
@@ -248,6 +339,20 @@ impl State {
                 }
                 if request.authorization == Authorization::AwaitingLead {
                     return Err(StateError::AwaitingAuthorization(request.key.clone()));
+                }
+            }
+            if let Some(context) = &request.display_context {
+                if request.head_sha != context.head_sha {
+                    return Err(StateError::HeadMismatch {
+                        inspected: context.head_sha.clone(),
+                        recorded: request.head_sha.clone(),
+                    });
+                }
+                if request.revision != context.revision {
+                    return Err(StateError::RevisionMismatch {
+                        inspected: context.revision,
+                        recorded: request.revision,
+                    });
                 }
             }
         }
@@ -704,6 +809,7 @@ impl State {
             request.revision = next_revision;
             request.discussion = None;
             request.model_validation = None;
+            request.display_context = None;
             return Ok(match request.authorization {
                 Authorization::OneRound => {
                     request.authorization = Authorization::AwaitingLead;
@@ -725,6 +831,7 @@ impl State {
             )?,
             discussion: None,
             model_validation: None,
+            display_context: None,
         });
         Ok(RecordOutcome::New)
     }
@@ -750,6 +857,7 @@ impl State {
         request.discussion = Some(discussion.clone());
         request.revision = next_revision;
         request.model_validation = None;
+        request.display_context = None;
         if authorization_cleared {
             request.authorization = Authorization::AwaitingLead;
         }
@@ -775,6 +883,20 @@ impl State {
         if changed {
             request.model_validation = None;
         }
+        Ok(changed)
+    }
+
+    pub fn record_display_context(
+        &mut self,
+        key: &PrKey,
+        context: RequestDisplayContext,
+    ) -> Result<bool, StateError> {
+        let request = self.request_mut(key)?;
+        if request.head_sha != context.head_sha || request.revision != context.revision {
+            return Ok(false);
+        }
+        let changed = request.display_context.as_ref() != Some(&context);
+        request.display_context = Some(context);
         Ok(changed)
     }
 
@@ -937,6 +1059,65 @@ mod tests {
         ObservedDiscussion::new(NonZeroU64::new(7).unwrap(), comments).unwrap()
     }
 
+    fn display_context(head_sha: HeadSha, revision: InputRevision) -> RequestDisplayContext {
+        RequestDisplayContext::new(
+            PullDisplay::new("Fix login redirect", "alice", PullDisplayState::Open, false),
+            head_sha,
+            revision,
+            Some(123),
+            Some(CiState::Green),
+            RefreshOutcome::Updated {
+                head_changed: false,
+                discussion_changed: true,
+                authorization_cleared: false,
+            },
+        )
+    }
+
+    #[test]
+    fn display_context_persists_and_is_discarded_when_inputs_change() {
+        let mut state = State::default();
+        state.record_request(key(), head(HEAD_A)).unwrap();
+        state
+            .refresh(&key(), &head(HEAD_A), &discussion(&[]))
+            .unwrap();
+        let revision = state.get(&key()).unwrap().revision();
+        let context = display_context(head(HEAD_A), revision);
+
+        assert!(
+            state
+                .record_display_context(&key(), context.clone())
+                .unwrap()
+        );
+        state.validate().unwrap();
+        let persisted = serde_json::to_value(&state).unwrap();
+        let mut state: State = serde_json::from_value(persisted).unwrap();
+        assert_eq!(state.get(&key()).unwrap().display_context(), Some(&context));
+
+        assert!(
+            !state
+                .record_display_context(&key(), display_context(head(HEAD_B), revision))
+                .unwrap()
+        );
+        state
+            .refresh(
+                &key(),
+                &head(HEAD_A),
+                &discussion(&[(CommentSource::IssueComment, 1, 1)]),
+            )
+            .unwrap();
+        assert_eq!(state.get(&key()).unwrap().display_context(), None);
+
+        let revision = state.get(&key()).unwrap().revision();
+        assert!(
+            state
+                .record_display_context(&key(), display_context(head(HEAD_A), revision))
+                .unwrap()
+        );
+        state.record_request(key(), head(HEAD_B)).unwrap();
+        assert_eq!(state.get(&key()).unwrap().display_context(), None);
+    }
+
     #[test]
     fn one_round_authorization_expires_when_head_changes() {
         let mut state = State::default();
@@ -1063,7 +1244,7 @@ mod tests {
             ),
         ] {
             let invalid_state = serde_json::json!({
-                "schema_version": 7,
+                "schema_version": 8,
                 "rounds": [],
                 "requests": [{"key": raw_key, "head_sha": HEAD_A, "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}]
             });
@@ -1071,7 +1252,7 @@ mod tests {
             assert!(error.to_string().contains(expected_error), "{error}");
         }
         let invalid_head = serde_json::json!({
-            "schema_version": 7,
+            "schema_version": 8,
             "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": "not-a-sha", "authorization": "awaiting_lead", "revision": 1, "discussion": null, "model_validation": null}
@@ -1118,7 +1299,7 @@ mod tests {
     #[test]
     fn state_json_keeps_its_shape_and_normalizes_identifiers() {
         let raw = serde_json::json!({
-            "schema_version": 7,
+            "schema_version": 8,
             "rounds": [],
             "requests": [
                 {
@@ -1140,7 +1321,7 @@ mod tests {
         assert_eq!(serialized["requests"][0]["key"]["number"], 42);
         assert_eq!(serialized["requests"][0]["head_sha"], HEAD_A);
         assert_eq!(serialized["requests"][0]["authorization"], "awaiting_lead");
-        assert_eq!(serialized["schema_version"], 7);
+        assert_eq!(serialized["schema_version"], 8);
         assert_eq!(serialized["rounds"], serde_json::json!([]));
         assert_eq!(serialized["requests"][0]["revision"], 1);
         assert!(serialized["requests"][0]["discussion"].is_null());
@@ -1150,7 +1331,7 @@ mod tests {
     #[test]
     fn corrupt_or_future_state_is_rejected() {
         let duplicate = serde_json::json!({
-            "schema_version": 7,
+            "schema_version": 8,
             "rounds": [],
             "requests": [
                 {"key": {"repository": "owner/repo", "number": 42}, "head_sha": HEAD_A, "authorization": "one_round", "revision": 1, "discussion": {"author_id": 7, "comments": []}, "model_validation": null},
@@ -1161,8 +1342,8 @@ mod tests {
         assert_eq!(state.validate(), Err(StateError::DuplicateRequest(key())));
 
         let future: State =
-            serde_json::from_str(r#"{"schema_version":8,"requests":[],"rounds":[]}"#).unwrap();
-        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(8)));
+            serde_json::from_str(r#"{"schema_version":9,"requests":[],"rounds":[]}"#).unwrap();
+        assert_eq!(future.validate(), Err(StateError::UnsupportedSchema(9)));
     }
 
     #[test]
@@ -1263,7 +1444,7 @@ mod tests {
     #[test]
     fn current_state_rejects_one_round_authorization_without_observed_discussion() {
         let state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 7,
+            "schema_version": 8,
             "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
@@ -1403,7 +1584,7 @@ mod tests {
     #[test]
     fn malformed_observations_and_revision_overflow_are_rejected() {
         let base = serde_json::json!({
-            "schema_version": 7,
+            "schema_version": 8,
             "rounds": [],
             "requests": [{
                 "key": {"repository": "owner/repo", "number": 42},
@@ -2085,7 +2266,7 @@ mod tests {
 
     fn state_with_saved_draft() -> State {
         let state: State = serde_json::from_value(serde_json::json!({
-            "schema_version": 7,
+            "schema_version": 8,
             "requests": [{
                 "key": {"repository":"owner/repo","number":42},
                 "head_sha": HEAD_A,
@@ -2283,7 +2464,7 @@ mod tests {
         reloaded.record_request(key(), head(HEAD_A)).unwrap();
         assert_eq!(reloaded.get(&key()).unwrap().revision(), revision(5));
         let mut overflow: State = serde_json::from_value(serde_json::json!({
-            "schema_version":7, "requests":[], "rounds":[], "request_revision_floor":u64::MAX,
+            "schema_version":8, "requests":[], "rounds":[], "request_revision_floor":u64::MAX,
         }))
         .unwrap();
         let before = serde_json::to_vec(&overflow).unwrap();

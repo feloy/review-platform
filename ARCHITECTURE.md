@@ -59,11 +59,14 @@ A round ends when the lead publishes the unchanged draft or rejects it.
 
 The current CLI records the authorization state, PR head, input revision,
 observed author discussion fingerprints, validated model choice,
-and review rounds with their sandbox identities and private drafts.
+review rounds with their sandbox identities and private drafts,
+and display-only GitHub metadata bound to the recorded PR inputs.
 `status` reports the latest round for a PR;
 `list` remains a compact request list.
 It clears one-round authorization when refreshed inputs change
 and consumes it when a round is dispatched.
+Changing the recorded head or author discussion also discards the display context;
+it never authorizes a review or publication.
 
 ## Workflow
 

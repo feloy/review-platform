@@ -348,7 +348,7 @@ mod tests {
         )
         .unwrap();
         let state = serde_json::json!({
-            "schema_version":7,
+            "schema_version":8,
             "requests":[{"key":{"repository":"owner/repo","number":15}, "head_sha":"a".repeat(40),
                 "authorization":"awaiting_lead", "revision":2, "discussion":{"author_id":7,"comments":[]}, "model_validation":null}],
             "rounds":[{"id":"r-draft", "key":{"repository":"owner/repo","number":15}, "status":"awaiting_decision",
