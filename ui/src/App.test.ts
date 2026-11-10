@@ -10,15 +10,117 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
 
-class FakeEventSource extends EventTarget {
-  static instances = [];
+type MaterialControl = HTMLElement & { disabled?: boolean };
+type UserEvent = ReturnType<typeof userEvent.setup>;
+type FetchResponse = { ok: boolean; status?: number; json?: () => Promise<unknown> };
+type FinishFetch = (response: FetchResponse) => void;
+type ValidatedModel = ModelValidation | string;
 
-  constructor(url) {
+interface Discussion {
+  issue_comments: number;
+  review_comments: number;
+  review_bodies: number;
+}
+
+interface ModelValidation {
+  model: string;
+  agent: string;
+}
+
+interface RequestContext {
+  title: string;
+  author: string;
+  state: string;
+  draft: boolean;
+  head_sha: string;
+  revision: number;
+  checked_at: number;
+  checks: string | null;
+  head_changed: boolean;
+  discussion_changed: boolean;
+}
+
+interface ReviewRound {
+  id: string;
+  status: string;
+  cleanup_pending: boolean;
+  cleanup_status: string;
+  head_sha: string;
+  revision: number;
+  model: string;
+  agent: string;
+  freshness?: string;
+  failure?: string | null;
+  receipt?: {
+    review_id: number;
+    url: string;
+    publisher_login: string;
+    commit_id: string;
+  } | null;
+}
+
+interface Preparation {
+  head_sha: string;
+  revision: number;
+  authorization: string;
+  configuration_sha256: string;
+  checks: string;
+  readiness: string;
+  readiness_message: string;
+  proposed_model: string;
+  proposal_matches_coauthor: boolean;
+  validated_model: ValidatedModel | null;
+  resolved_model: string;
+  models: ModelValidation[];
+}
+
+interface RequestSnapshot {
+  repository: string;
+  number: number;
+  head_sha: string;
+  revision: number;
+  authorization: string;
+  discussion: Discussion | null;
+  validated_model: ValidatedModel | null;
+  latest_round: ReviewRound | null;
+  context?: RequestContext;
+  run?: { status: string; round_id?: string | null; failure?: string | null };
+  publication?: {
+    round_id?: string;
+    status: string;
+    error?: string | null;
+    freshness?: string | null;
+  };
+}
+
+interface DraftSnapshot {
+  key: { repository: string; number: number };
+  round_id: string;
+  head_sha: string;
+  revision: number;
+  publisher_login: string;
+  decision: string;
+  model: string;
+  agent: string;
+  verdict: string;
+  freshness: string;
+  publication_body: string;
+  publication_body_sha256: string;
+  lead_advice: string;
+}
+
+class FakeEventSource extends EventTarget {
+  static instances: FakeEventSource[] = [];
+  readonly url: string;
+  onopen: ((event: Event) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  close = vi.fn();
+
+  constructor(url: string) {
     super();
     this.url = url;
     this.onopen = null;
     this.onerror = null;
-    this.close = vi.fn();
     FakeEventSource.instances.push(this);
   }
 
@@ -30,16 +132,16 @@ class FakeEventSource extends EventTarget {
     this.onerror?.(new Event('error'));
   }
 
-  send(type, data) {
+  send(type: string, data: string) {
     this.dispatchEvent(new MessageEvent(type, { data }));
   }
 
-  snapshot(requests) {
+  snapshot(requests: RequestSnapshot[]) {
     this.send('requests', JSON.stringify({ requests }));
   }
 }
 
-function request(overrides = {}) {
+function request(overrides: Partial<RequestSnapshot> = {}): RequestSnapshot {
   return {
     repository: 'owner/repo',
     number: 15,
@@ -53,7 +155,7 @@ function request(overrides = {}) {
   };
 }
 
-function context(overrides = {}) {
+function context(overrides: Partial<RequestContext> = {}): RequestContext {
   return {
     title: 'Fix login redirect', author: 'alice', state: 'open', draft: false,
     head_sha: 'a'.repeat(40), revision: 1, checked_at: Math.floor(Date.now() / 1000),
@@ -61,7 +163,7 @@ function context(overrides = {}) {
   };
 }
 
-function round(overrides = {}) {
+function round(overrides: Partial<ReviewRound> = {}): ReviewRound {
   return {
     id: 'r-example',
     status: 'running',
@@ -75,7 +177,7 @@ function round(overrides = {}) {
   };
 }
 
-function preparation(overrides = {}) {
+function preparation(overrides: Partial<Preparation> = {}): Preparation {
   return {
     head_sha: 'a'.repeat(40), revision: 2, authorization: 'one_round',
     configuration_sha256: 'c'.repeat(64), checks: 'green',
@@ -87,12 +189,12 @@ function preparation(overrides = {}) {
   };
 }
 
-function preparedRequest(overrides = {}) {
+function preparedRequest(overrides: Partial<RequestSnapshot> = {}): RequestSnapshot {
   return request({ revision: 2, authorization: 'one_round',
     discussion: { issue_comments: 0, review_comments: 0, review_bodies: 0 }, ...overrides });
 }
 
-function draft(overrides = {}) {
+function draft(overrides: Partial<DraftSnapshot> = {}): DraftSnapshot {
   return {
     key: { repository: 'owner/repo', number: 15 }, round_id: 'r-example', head_sha: 'a'.repeat(40), revision: 1,
     publisher_login: 'review-bot',
@@ -102,13 +204,13 @@ function draft(overrides = {}) {
   };
 }
 
-async function showSnapshot(source, requests) {
+async function showSnapshot(source: FakeEventSource, requests: RequestSnapshot[]) {
   await act(() => source.snapshot(requests));
 }
 
-async function clickMaterialButton(user, container, label) {
+async function clickMaterialButton(user: UserEvent, container: Element, label: string): Promise<MaterialControl> {
   const control = [...container.querySelectorAll('md-text-button, md-filled-button, md-menu-item')]
-    .find((button) => button.textContent.trim() === label);
+    .find((button) => button.textContent.trim() === label) as HTMLElement;
   expect(control).toBeTruthy();
   const menu = control.closest('md-menu');
   if (menu && !menu.open) await openActionsMenu(user, menu.closest('.request-item'));
@@ -117,7 +219,7 @@ async function clickMaterialButton(user, container, label) {
   return control;
 }
 
-async function openActionsMenu(user, row) {
+async function openActionsMenu(user: UserEvent, row: Element) {
   const trigger = row.querySelector('md-icon-button');
   await trigger.updateComplete;
   const menu = row.querySelector('md-menu');
@@ -162,7 +264,7 @@ describe('refresh all open PRs', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await screen.findByText('Refresh all open PRs');
-    const button = container.querySelector('.queue-toolbar md-filled-button');
+    const button = container.querySelector('.queue-toolbar md-filled-button') as MaterialControl;
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     expect(button.disabled).toBe(true);
     for (const snapshot of [[], [request({ context: context({ state: 'closed' }) })]]) {
@@ -176,8 +278,8 @@ describe('refresh all open PRs', () => {
   it('refreshes open and unchecked PRs sequentially, prevents duplicate batches, and keeps live snapshots authoritative', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishFirst;
-    let finishSecond;
+    let finishFirst: FinishFetch;
+    let finishSecond: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
       .mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve; }));
@@ -222,7 +324,7 @@ describe('refresh all open PRs', () => {
     await screen.findAllByText('Refresh from GitHub');
     await clickMaterialButton(user, container, 'Refresh all open PRs');
     expect(await screen.findByText('Refreshed 1 of 2 PRs. 1 could not be refreshed; see the PR rows for details.')).toBeTruthy();
-    const [first, second] = container.querySelectorAll('.request-item');
+    const [first, second] = [...container.querySelectorAll('.request-item')] as HTMLElement[];
     expect(within(first).getByText(failure === 'github' ? 'GitHub is unavailable. Try again later.' : 'Could not connect to the local API. Try again.')).toBeTruthy();
     expect(within(second).getByText('No code or author discussion changes found.')).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -248,8 +350,8 @@ describe('refresh all open PRs', () => {
   it('waits for pending row actions and skips PRs removed or closed during the batch', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishRowRefresh;
-    let finishBatchRefresh;
+    let finishRowRefresh: FinishFetch;
+    let finishBatchRefresh: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishRowRefresh = resolve; }))
       .mockImplementationOnce(() => new Promise((resolve) => { finishBatchRefresh = resolve; }));
@@ -313,7 +415,7 @@ describe('sign-in link', () => {
   it('exchanges a URL code without showing sign-in after a stored session expires', async () => {
     sessionStorage.setItem('review-platform-session', 'expired-token');
     window.history.pushState({}, '', '/?code=url-code');
-    let finishSessionCheck;
+    let finishSessionCheck: FinishFetch;
     const fetchMock = vi.fn()
       .mockImplementationOnce(() => new Promise((resolve) => { finishSessionCheck = resolve; }))
       .mockResolvedValueOnce({ ok: true, json: async () => ({ token: 'session-token' }) });
@@ -351,7 +453,7 @@ describe('review requests page', () => {
 
   it('shows the sign-in link only when its target is available after session checking', async () => {
     sessionStorage.setItem('review-platform-session', 'expired-token');
-    let finishSessionCheck;
+    let finishSessionCheck: FinishFetch;
     vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finishSessionCheck = resolve; })));
     render(App);
     await showSnapshot(FakeEventSource.instances[0], [request()]);
@@ -453,7 +555,7 @@ describe('review requests page', () => {
       head_sha: 'a'.repeat(40), revision: 1, checked_at: Math.floor(Date.now() / 1000) - 120,
       checks: 'green', head_changed: false, discussion_changed: true };
     await showSnapshot(source, [request({ context })]);
-    expect(screen.getByRole('link', { name: title }).href).toBe('https://github.com/owner/repo/pull/15');
+    expect((screen.getByRole('link', { name: title }) as HTMLAnchorElement).href).toBe('https://github.com/owner/repo/pull/15');
     expect(screen.getByText('by @alice · Open')).toBeTruthy();
     expect(screen.getByText('2 minutes ago')).toBeTruthy();
     expect(screen.getByText(/Local update received/)).toBeTruthy();
@@ -497,7 +599,7 @@ describe('review requests page', () => {
     await screen.findAllByText('Check review readiness');
     await clickMaterialButton(user, container.querySelector('.next-step'), 'Check review readiness');
     const panel = await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
-    const button = within(panel).getByText('Run review');
+    const button = within(panel).getByText('Run review') as MaterialControl;
     const trigger = within(panel).getByRole('group', { name: 'Run review' });
     const tooltip = document.getElementById(trigger.getAttribute('aria-describedby'));
     expect(tooltip.getAttribute('role')).toBe('tooltip');
@@ -561,7 +663,7 @@ describe('review requests page', () => {
 
   it('signs in and refreshes a request while keeping the live snapshot authoritative', async () => {
     const user = userEvent.setup();
-    let finishRefresh;
+    let finishRefresh: FinishFetch;
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, json: async () => ({ token: 'session-token' }) })
       .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
@@ -637,7 +739,7 @@ describe('review requests page', () => {
   ])('authorizes %s for the displayed inputs and waits for the saved snapshot', async (scope, label, message, badge) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishAuthorization;
+    let finishAuthorization: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishAuthorization = resolve; }));
     vi.stubGlobal('fetch', fetchMock);
@@ -650,7 +752,7 @@ describe('review requests page', () => {
     const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
     expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
     expect(within(panel).getByText('Input revision').nextElementSibling.textContent).toBe('2');
-    expect(within(panel).getByRole('link', { name: 'PR on GitHub' }).href).toBe('https://github.com/owner/repo/pull/15');
+    expect((within(panel).getByRole('link', { name: 'PR on GitHub' }) as HTMLAnchorElement).href).toBe('https://github.com/owner/repo/pull/15');
 
     const button = await clickMaterialButton(user, container, label);
     expect(button.disabled).toBe(true);
@@ -725,7 +827,7 @@ describe('review requests page', () => {
   it('stops managing a PR and removes it when the live snapshot updates', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishRemoval;
+    let finishRemoval: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishRemoval = resolve; }));
     vi.stubGlobal('fetch', fetchMock);
@@ -831,7 +933,8 @@ describe('review requests page', () => {
   it('prepares a review and validates a different model for the inspected inputs and rules', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishPreparation, finishValidation;
+    let finishPreparation: FinishFetch;
+    let finishValidation: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishPreparation = resolve; }))
       .mockImplementationOnce(() => new Promise((resolve) => { finishValidation = resolve; }));
@@ -851,7 +954,7 @@ describe('review requests page', () => {
     expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
     expect(within(panel).getByText('Green')).toBeTruthy();
     expect(within(panel).getByText('lead model validation is required')).toBeTruthy();
-    const model = within(panel).getByLabelText('Review model for owner/repo #15');
+    const model = within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     expect(model.value).toBe('model-alpha');
     await user.selectOptions(model, 'model-beta');
     expect(within(panel).getByText('claude-alt')).toBeTruthy();
@@ -896,7 +999,7 @@ describe('review requests page', () => {
     await screen.findAllByText('Check review readiness');
     await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText(readiness_message)).toBeTruthy();
-    expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(true);
+    expect((screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(true);
     const button = await clickMaterialButton(user, container, 'Validate model');
     expect(button.disabled).toBe(true);
     expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
@@ -909,7 +1012,7 @@ describe('review requests page', () => {
   ])('refreshes %s from the visible preparation panel without reopening the row menu', async (readiness, checks) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishRefresh;
+    let finishRefresh: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({ readiness, checks }) })
       .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
@@ -920,14 +1023,14 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container.querySelector('.next-step'), 'Check review readiness');
     const panel = await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
     const originalChecks = within(panel).getByText('Checks for this head').nextElementSibling.textContent;
-    expect(screen.getByRole('link', { name: 'View checks on GitHub' }).href).toBe(`https://github.com/owner/repo/commit/${'a'.repeat(40)}/checks`);
+    expect((screen.getByRole('link', { name: 'View checks on GitHub' }) as HTMLAnchorElement).href).toBe(`https://github.com/owner/repo/commit/${'a'.repeat(40)}/checks`);
     expect(container.querySelector('md-menu').open).toBe(false);
     const refresh = await clickMaterialButton(user, panel, 'Refresh readiness');
     expect(refresh.closest('.authorization-buttons')).toBeTruthy();
     expect(refresh.disabled).toBe(true);
     expect(within(panel).getByText('Refreshing readiness…')).toBeTruthy();
     expect(within(panel).getByText('Checks for this head').nextElementSibling.textContent).toBe(originalChecks);
-    expect(within(panel).getByLabelText('Review model for owner/repo #15').disabled).toBe(true);
+    expect((within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(true);
     refresh.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/prepare');
@@ -936,9 +1039,9 @@ describe('review requests page', () => {
     await act(() => finishRefresh({ ok: true, json: async () => preparation() }));
     await waitFor(() => expect(within(panel).getByText('Checks for this head').nextElementSibling.textContent).toBe('Green'));
     expect(screen.getByRole('region', { name: 'Review preparation for owner/repo #15' })).toBe(panel);
-    expect(within(panel).getByLabelText('Review model for owner/repo #15').disabled).toBe(false);
-    expect(within(panel).getByText('Validate model').disabled).toBe(false);
-    expect(within(panel).getByText('Run review').disabled).toBe(true);
+    expect((within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
+    expect((within(panel).getByText('Validate model') as MaterialControl).disabled).toBe(false);
+    expect((within(panel).getByText('Run review') as MaterialControl).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -957,7 +1060,7 @@ describe('review requests page', () => {
     await screen.findAllByText('Check review readiness');
     await clickMaterialButton(user, container.querySelector('.next-step'), 'Check review readiness');
     const panel = await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
-    expect(within(panel).getByText('Run review').disabled).toBe(false);
+    expect((within(panel).getByText('Run review') as MaterialControl).disabled).toBe(false);
     await clickMaterialButton(user, panel, 'Refresh readiness');
     await screen.findByText(failure === 'github' ? 'GitHub is unavailable. Try again later.' : 'Could not connect to the local API. Try again.');
     expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
@@ -967,7 +1070,7 @@ describe('review requests page', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     await clickMaterialButton(user, panel, 'Refresh readiness');
     await waitFor(() => expect(within(panel).queryByText(/This preparation is outdated/)).toBeNull());
-    expect(within(panel).getByText('Run review').disabled).toBe(false);
+    expect((within(panel).getByText('Run review') as MaterialControl).disabled).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls.slice(1).every(([url]) => url === '/api/requests/prepare')).toBe(true);
   });
@@ -997,7 +1100,7 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('GitHub checks and review preparation updated.');
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByLabelText('Review model for owner/repo #15').disabled).toBe(false);
+    expect((screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
   });
 
   it('requires new preparation after a model validation conflict', async () => {
@@ -1034,18 +1137,18 @@ describe('review requests page', () => {
     await screen.findAllByText('Check review readiness');
     await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText(/The proposed model matches a PR co-author hint/)).toBeTruthy();
-    const model = screen.getByLabelText('Review model for owner/repo #15');
+    const model = screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     expect(model.value).toBe('model-beta');
     const validated = await clickMaterialButton(user, container, 'Model validated');
     expect(validated.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await user.selectOptions(model, 'model-alpha');
-    expect(screen.getByText('Validate model').disabled).toBe(false);
+    expect((screen.getByText('Validate model') as MaterialControl).disabled).toBe(false);
     expect(screen.queryByText(/This model is validated for the prepared head and revision/)).toBeNull();
     await user.selectOptions(model, 'model-beta');
-    expect(screen.getByText('Model validated').disabled).toBe(true);
+    expect((screen.getByText('Model validated') as MaterialControl).disabled).toBe(true);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ revision: 3 })]);
-    expect(screen.getByText('Validate model').disabled).toBe(true);
+    expect((screen.getByText('Validate model') as MaterialControl).disabled).toBe(true);
     expect(screen.getByRole('alert').textContent).toContain('This preparation is outdated');
   });
 
@@ -1073,7 +1176,7 @@ describe('review requests page', () => {
   it('runs the validated selection for frozen inputs and prevents duplicate clicks', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let acceptRun;
+    let acceptRun: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({
         readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-beta', resolved_model: 'model-beta',
@@ -1085,7 +1188,7 @@ describe('review requests page', () => {
     await screen.findAllByText('Check review readiness');
     await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('ready to run');
-    const model = screen.getByLabelText('Review model for owner/repo #15');
+    const model = screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     await user.selectOptions(model, 'model-alpha');
     expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -1131,7 +1234,7 @@ describe('review requests page', () => {
     await screen.findAllByText('Check review readiness');
     await clickMaterialButton(user, container, 'Check review readiness');
     await screen.findByText('ready to run');
-    expect(screen.getByText('Run review').disabled).toBe(false);
+    expect((screen.getByText('Run review') as MaterialControl).disabled).toBe(false);
     await showSnapshot(source, [{ ...original, ...change }]);
     expect((await clickMaterialButton(user, container, 'Run review')).disabled).toBe(true);
     if (change.publication?.status === 'active') {
@@ -1193,7 +1296,7 @@ describe('review requests page', () => {
   it('loads a private draft only on request and renders its exact contents as text', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishDraft;
+    let finishDraft: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishDraft = resolve; }));
     vi.stubGlobal('fetch', fetchMock);
@@ -1244,7 +1347,7 @@ describe('review requests page', () => {
   it('keeps the requested round fixed during loading and live updates until explicitly reopened', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishDraft;
+    let finishDraft: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishDraft = resolve; }))
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ round_id: 'r-new', head_sha: 'b'.repeat(40), revision: 2, publication_body: 'New draft' }) });
@@ -1273,7 +1376,7 @@ describe('review requests page', () => {
   it.each(['stale', 'unknown'])('confirms the displayed draft with %s freshness and waits for SSE after rejection', async (freshness) => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishReject;
+    let finishReject: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness }) })
       .mockImplementationOnce(() => new Promise((resolve) => { finishReject = resolve; }));
@@ -1324,7 +1427,7 @@ describe('review requests page', () => {
   it('confirms the inspected publication hash, starts once, and shows the receipt from SSE', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');
-    let finishPublication;
+    let finishPublication: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() })
       .mockImplementationOnce(() => new Promise((resolve) => { finishPublication = resolve; }));
