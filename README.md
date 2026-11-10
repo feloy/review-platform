@@ -758,7 +758,7 @@ For example:
         "kind": "claude",
         "model_provider": "operator-model-provider",
         "environment": {},
-        "policy": "/absolute/path/to/review-policy.yaml",
+        "policy": "policies/claude/review-policy.yaml",
         "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "hold_command": ["/bin/sleep", "3600"],
         "max_turns": 100
@@ -771,7 +771,7 @@ For example:
         "kind": "codex",
         "model_provider": "operator-openai-responses-provider",
         "environment": {"OPENAI_BASE_URL": "https://model-gateway.example/v1"},
-        "policy": "/absolute/path/to/codex-review-policy.yaml",
+        "policy": "policies/codex/review-policy.yaml",
         "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "hold_command": ["/bin/sleep", "3600"],
         "max_turns": 100
@@ -781,13 +781,13 @@ For example:
   "repositories": [
     {
       "name": "owner/repo",
-      "prompt_file": "prompts/owner-repo.md",
+      "prompt_file": "prompts/owner/repo.md",
       "review_models": ["model-alpha", "model-beta"],
       "runners": [
         {
           "agent": "claude",
           "vm_archive": {
-            "path": "/absolute/path/to/osi-claude-1.tar",
+            "path": "images/claude/osi-claude-1.tar",
             "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "config_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
           }
@@ -795,7 +795,7 @@ For example:
         {
           "agent": "codex",
           "vm_archive": {
-            "path": "/absolute/path/to/osi-codex-1.tar",
+            "path": "images/codex/osi-codex-1.tar",
             "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "config_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
           }
@@ -809,7 +809,17 @@ For example:
 Replace the example model IDs, co-author signatures, prompt file, archive path, and checksums
 with the trusted values for your setup.
 Model IDs should identify the exact models that the agent can run.
+Their spelling and case are preserved to match the provider's model IDs.
 Agent IDs are lowercase ASCII identifiers.
+
+Host file paths in `prompt_file`, `vm_archive.path`, `runner.policy`, and `execution.openshell`
+accept absolute paths or paths relative to the directory containing `config.json`.
+Resolution is independent of the working directory when the application runs.
+Archive, policy, and OpenShell executable paths must be nonempty and cannot contain `..` traversal.
+The loaded configuration stores absolute host paths for adapters.
+Its fingerprint includes the configuration directory;
+moving a configuration requires fresh preparation and model validation.
+Paths to executables inside the VM, including `hold_command[0]`, remain absolute VM paths.
 
 The CLI matches both the name and email of trailing `Co-authored-by` commit trailers,
 case insensitively, so models sharing a co-author email can be distinguished.
@@ -824,7 +834,8 @@ Commit trailers are author-controlled hints; only the lead's explicit model choi
 Each repository's `prompt_file` names a local UTF-8 text or Markdown file containing its project review guidance.
 Relative paths resolve from the configuration file's directory, independently of the working directory;
 absolute paths are also accepted.
-For the example above, create `prompts/owner-repo.md` under the directory containing `config.json`.
+Store project prompts as `prompts/<owner>/<repo>.md`, using the repository's organization or owner as the directory.
+For the example above, create `prompts/owner/repo.md` under the directory containing `config.json`.
 The same project guidance applies to every agent reviewing this repository:
 
 ```text
@@ -848,7 +859,7 @@ To update schema 6 configuration, move `prompt_file` from each agent to its repo
 Consolidate repository conventions into the project file;
 agent tool instructions and full or incremental scope selection now belong to the application.
 
-Archive paths must be absolute, end in `.tar`, and name regular files rather than symlinks.
+Archive paths must end in `.tar` and name regular files rather than symlinks.
 Each archive needs a regular, separate OCI metadata file at `<archive>.config.json`.
 Both SHA-256 checksums must match their files.
 Calculate them with `shasum -a 256 FILE` on macOS or `sha256sum FILE` on Linux,

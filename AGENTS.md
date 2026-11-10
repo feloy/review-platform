@@ -16,6 +16,7 @@ add a dependency or abstraction when a current feature needs it.
   Keep CLI, GitHub, storage, and OpenShell adapters at the edges.
 - Model identifiers and states so invalid values are rejected at input boundaries.
   Parse CLI and deserialized data through the same fallible constructors.
+  Preserve provider model IDs exactly, including case.
   Keep cross-record checks on the containing state.
   Make transitions return useful errors instead of silently changing state.
 - Keep fields private on adapter snapshots whose origin matters.
@@ -126,6 +127,9 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Pin each agent's model endpoint explicitly and verify its CLI routing;
   do not assume a base-URL environment variable controls the destination.
   Build sandbox arguments from validated trusted configuration and round inputs.
+  Resolve host file references against the configuration file's directory and retain absolute paths in runner snapshots.
+  Bind configuration fingerprints to that directory and preserve referenced-file traversal, symlink, and checksum checks.
+  Keep executable paths inside the VM absolute.
   Keep review mount targets, access modes, and mandatory lifecycle restrictions fixed in code.
   Read the driver type from configuration; support only `vm` for now
   and report `podman` as unsupported or unknown names as invalid
