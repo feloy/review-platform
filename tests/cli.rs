@@ -150,7 +150,7 @@ fn unmanage_removes_only_the_selected_pr_and_can_be_reversed_with_request() {
 
 #[test]
 fn unmanage_upgrades_supported_state_without_losing_existing_requests() {
-    for schema in [5, 6] {
+    for schema in [5, 6, 7] {
         let dir = tempfile::tempdir().unwrap();
         let state_file = dir.path().join("state.json");
         run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
@@ -165,7 +165,7 @@ fn unmanage_upgrades_supported_state_without_losing_existing_requests() {
         run(&state_file, &["unmanage", "owner/repo", "42"]);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
-        assert_eq!(saved["schema_version"], 7);
+        assert_eq!(saved["schema_version"], 8);
         assert_eq!(saved["requests"], serde_json::json!([]));
         assert_eq!(saved["rounds"], serde_json::json!([]));
         assert!(saved.get("unmanaged_requests").is_none());
@@ -907,7 +907,7 @@ fn new_state_uses_current_schema_and_older_schema_is_rejected() {
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 7);
+    assert_eq!(saved["schema_version"], 8);
     assert_eq!(saved["requests"][0]["revision"], 1);
     assert!(saved["requests"][0]["discussion"].is_null());
     assert!(saved["requests"][0]["model_validation"].is_null());

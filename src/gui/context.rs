@@ -1,13 +1,13 @@
-//! Display-only GitHub observations scoped to the GUI launch and recorded PR inputs.
+//! Display-only GitHub observations bound to recorded PR inputs.
 
 use super::RequestList;
 use crate::storage;
 use anyhow::Result;
 use review_platform::{
-    HeadSha, InputRevision, PrKey, RefreshOutcome,
+    InputRevision, PrKey, PullDisplay, PullDisplayState, RefreshOutcome, RequestDisplayContext,
     github::{PullRequest, PullRequestState, checks::CheckSummary},
+    preparation::CiState,
 };
-use serde::Serialize;
 use std::{
     collections::HashMap,
     path::Path,
@@ -15,50 +15,34 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// Display-only GitHub context, bound to the inputs observed in this server launch.
-#[derive(Clone, Serialize)]
-pub(super) struct RequestContext {
-    title: String,
-    author: String,
-    state: PullRequestState,
-    draft: bool,
-    head_sha: HeadSha,
+pub(super) type RequestContext = RequestDisplayContext;
+
+pub(super) fn request_context(
+    pull: &PullRequest,
     revision: InputRevision,
     checked_at: Option<u64>,
     checks: Option<CheckSummary>,
-    head_changed: bool,
-    discussion_changed: bool,
-}
-
-impl RequestContext {
-    pub(super) fn new(
-        pull: &PullRequest,
-        revision: InputRevision,
-        checked_at: Option<u64>,
-        checks: Option<CheckSummary>,
-        changes: RefreshOutcome,
-    ) -> Self {
-        let (head_changed, discussion_changed) = match changes {
-            RefreshOutcome::Unchanged => (false, false),
-            RefreshOutcome::Updated {
-                head_changed,
-                discussion_changed,
-                ..
-            } => (head_changed, discussion_changed),
-        };
-        Self {
-            title: pull.title().to_owned(),
-            author: pull.author().to_owned(),
-            state: pull.state(),
-            draft: pull.draft(),
-            head_sha: pull.head_sha().clone(),
-            revision,
-            checked_at,
-            checks,
-            head_changed,
-            discussion_changed,
-        }
-    }
+    changes: RefreshOutcome,
+) -> RequestContext {
+    let state = match pull.state() {
+        PullRequestState::Open => PullDisplayState::Open,
+        PullRequestState::Closed => PullDisplayState::Closed,
+    };
+    let checks = checks.map(|summary| match summary {
+        CheckSummary::Green => CiState::Green,
+        CheckSummary::Pending => CiState::Pending,
+        CheckSummary::Failing => CiState::Failing,
+        CheckSummary::Unknown => CiState::Unknown,
+        CheckSummary::NoResults => CiState::NoResults,
+    });
+    RequestDisplayContext::new(
+        PullDisplay::new(pull.title(), pull.author(), state, pull.draft()),
+        pull.head_sha().clone(),
+        revision,
+        checked_at,
+        checks,
+        changes,
+    )
 }
 
 #[derive(Default)]
@@ -85,9 +69,15 @@ impl Contexts {
     fn try_record(&self, path: &Path, key: &PrKey, context: &RequestContext) -> Result<bool> {
         // Coordinate with removal and re-addition before retaining any PR identity.
         let _lock = storage::lock(path)?;
-        let state = storage::load(path)?;
+        let mut state = storage::load(path)?;
+        let changed = state.record_display_context(key, context.clone())?;
+        if changed {
+            storage::save(path, &state)?;
+        }
         if state.get(key).is_some_and(|request| {
-            request.head_sha() == &context.head_sha && request.revision() == context.revision
+            request
+                .display_context()
+                .is_some_and(|recorded| recorded == context)
         }) {
             self.0
                 .lock()
@@ -115,13 +105,14 @@ impl Contexts {
             list.requests.iter().any(|request| {
                 request.repository == key.repository()
                     && request.number == key.number()
-                    && request.head_sha == context.head_sha.as_str()
-                    && request.revision == context.revision.get()
+                    && request.head_sha == context.head_sha().as_str()
+                    && request.revision == context.revision().get()
             })
         });
         for request in &mut list.requests {
             request.context = contexts
                 .get(&PrKey::new(&request.repository, request.number)?)
+                .or(request.context.as_ref())
                 .cloned();
         }
         Ok(())
@@ -147,7 +138,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use review_platform::{
-        ObservedDiscussion, State,
+        HeadSha, ObservedDiscussion, State,
         config::{ModelId, PromptHash},
         preparation::Readiness,
         round::ModelSelection,
@@ -155,18 +146,18 @@ mod tests {
     use tower::ServiceExt;
 
     fn display_context(head_sha: HeadSha, revision: InputRevision) -> RequestContext {
-        RequestContext {
-            title: "Fix login redirect".into(),
-            author: "alice".into(),
-            state: PullRequestState::Open,
-            draft: false,
+        RequestDisplayContext::new(
+            PullDisplay::new("Fix login redirect", "alice", PullDisplayState::Open, false),
             head_sha,
             revision,
-            checked_at: Some(123),
-            checks: Some(CheckSummary::Green),
-            head_changed: false,
-            discussion_changed: true,
-        }
+            Some(123),
+            Some(CiState::Green),
+            RefreshOutcome::Updated {
+                head_changed: false,
+                discussion_changed: true,
+                authorization_cleared: false,
+            },
+        )
     }
 
     fn refresh_before_cache_failure(
@@ -197,8 +188,8 @@ mod tests {
         let refreshed = refresh_before_cache_failure(path, key).unwrap();
         let context = refreshed.context.unwrap();
         Ok(PreparationResponse {
-            head_sha: context.head_sha.clone(),
-            revision: context.revision,
+            head_sha: context.head_sha().clone(),
+            revision: context.revision(),
             authorization: review_platform::Authorization::AwaitingLead,
             configuration_sha256: PromptHash::new("a".repeat(64)).unwrap(),
             checks: CheckSummary::Green,
@@ -268,6 +259,7 @@ mod tests {
             let saved_request = saved.get(&key).unwrap();
             assert_eq!(saved_request.head_sha().as_str(), "b".repeat(40));
             assert!(saved_request.discussion().is_some());
+            assert!(saved_request.display_context().is_none());
         }
     }
 
@@ -283,14 +275,17 @@ mod tests {
         let revision = state.get(&key).unwrap().revision();
         let context = display_context(head.clone(), revision);
         let contexts = Contexts::default();
-        let original = std::fs::read(&path).unwrap();
         contexts.record(&path, &key, context.clone()).unwrap();
+        let persisted = storage::load(&path).unwrap();
+        assert_eq!(
+            persisted.get(&key).unwrap().display_context(),
+            Some(&context)
+        );
         let mut list = request_list(&path).unwrap();
         contexts.apply(&mut list).unwrap();
-        let displayed = list.requests[0].context.as_ref().unwrap();
-        assert_eq!(displayed.title, "Fix login redirect");
-        assert_eq!(displayed.checked_at, Some(123));
-        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let displayed = serde_json::to_value(list.requests[0].context.as_ref().unwrap()).unwrap();
+        assert_eq!(displayed["title"], "Fix login redirect");
+        assert_eq!(displayed["checked_at"], 123);
 
         state
             .record_request(key.clone(), HeadSha::new("b".repeat(40)).unwrap())

@@ -4,7 +4,7 @@ use crate::config::{
     AgentId, CoauthorIdentity, ConfigError, ModelId, PromptHash, ResolvedReviewModel, VmArchive,
 };
 use crate::{Authorization, HeadSha, InputRevision, PrKey, ReviewRequest};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
@@ -50,7 +50,8 @@ impl<'a> PullObservation<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CiState {
     Green,
     Pending,

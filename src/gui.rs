@@ -4,7 +4,7 @@ mod context;
 mod drafts;
 mod publications;
 
-use self::context::{Contexts, RequestContext, observation_time};
+use self::context::{Contexts, RequestContext, observation_time, request_context};
 use crate::{
     gui_runs::{RunSummary, Runs, StartError},
     preparation_commands::{self, InspectedRules, PrepareError},
@@ -271,7 +271,7 @@ fn refresh_for_gui(
     let checked_at = observation_time();
     let report = request_commands::refresh_with_details(path, key)?;
     let mut response = RefreshResponse::from_outcome(report.outcome());
-    response.context = Some(RequestContext::new(
+    response.context = Some(request_context(
         report.pull(),
         report.revision(),
         checked_at,
@@ -343,7 +343,7 @@ fn prepare_for_gui(
     let checked_at = observation_time();
     let report = preparation_commands::prepare(state_file, config_file, key, selection, rules)?;
     Ok(PreparationResponse {
-        context: Some(RequestContext::new(
+        context: Some(request_context(
             report.pull(),
             report.request().revision(),
             checked_at,
@@ -1120,7 +1120,7 @@ fn request_list(state_file: &Path) -> Result<RequestList> {
                 authorization: request.authorization(),
                 run: None,
                 publication: None,
-                context: None,
+                context: request.display_context().cloned(),
                 discussion: request.discussion().map(|discussion| DiscussionSummary {
                     issue_comments: discussion.count(CommentSource::IssueComment),
                     review_comments: discussion.count(CommentSource::ReviewComment),

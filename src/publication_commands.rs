@@ -703,7 +703,7 @@ mod tests {
             "status":"ACCEPT", "comments":"Exact comments", "lead_advice":"Private advice", "review_log":"Private log",
         })).unwrap()).unwrap();
         let state = serde_json::json!({
-            "schema_version":7,
+            "schema_version":8,
             "requests":[{"key":key, "head_sha":"a".repeat(40), "authorization":"awaiting_lead", "revision":2,
                 "discussion":{"author_id":7,"comments":[]}, "model_validation":null}],
             "rounds":[{"id":id,"key":key,"status":"awaiting_decision", "sandbox":"rp-722d7075626c697368",
