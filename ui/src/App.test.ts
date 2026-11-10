@@ -598,6 +598,58 @@ describe('review requests page', () => {
     expect(row.querySelector('.request-details')).toBeTruthy();
   });
 
+  it('refreshes a compact closed PR and restores full controls when an open snapshot arrives', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('review-platform-session', 'saved-token');
+    let finishRefresh: FinishFetch;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const observed = request({
+      context: context({ state: 'closed' }),
+      discussion: { issue_comments: 0, review_comments: 0, review_bodies: 0 },
+      latest_round: round({ status: 'published', cleanup_pending: false, cleanup_status: 'complete' }),
+    });
+    await showSnapshot(source, [observed]);
+    await screen.findByText('Stop managing PR');
+    const row = container.querySelector('.request-item');
+    expect(row.classList.contains('compact-closed')).toBe(true);
+    expect(row.querySelector('.request-row')).toBeNull();
+    expect(row.querySelector('.next-step')).toBeNull();
+    const menu = await openActionsMenu(user, row);
+    expect([...menu.querySelectorAll('md-menu-item')].map((item) => item.textContent.trim()))
+      .toEqual(['Refresh from GitHub', 'Stop managing PR']);
+
+    const refresh = await clickMaterialButton(user, row, 'Refresh from GitHub');
+    expect(refresh.disabled).toBe(true);
+    expect(screen.getByText('Refreshing…')).toBeTruthy();
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/refresh');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+    await act(() => finishRefresh({ ok: true, json: async () => ({ changed: false }) }));
+    expect(await screen.findByText('No code or author discussion changes found.')).toBeTruthy();
+    expect(row.classList.contains('compact-closed')).toBe(true);
+    expect(screen.queryByText('Manage authorization')).toBeNull();
+
+    await showSnapshot(source, [{ ...observed, context: context({ state: 'open' }) }]);
+    expect(screen.getByText('by @alice · Open')).toBeTruthy();
+    expect(row.classList.contains('compact-closed')).toBe(false);
+    expect(row.querySelector('.request-row')).toBeTruthy();
+    expect(row.querySelector('.request-details')).toBeTruthy();
+    expect(row.querySelector('.next-step')).toBeTruthy();
+    expect(within(menu).getByText('Read private draft')).toBeTruthy();
+    expect(within(menu).getByText('Check review readiness')).toBeTruthy();
+    await clickMaterialButton(user, row, 'Show details');
+    expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
+    await clickMaterialButton(user, row, 'Manage authorization');
+    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    expect(within(panel).getByText(observed.head_sha)).toBeTruthy();
+    expect(within(panel).getByText('Authorize one round')).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('offers the next action and starts only the currently confirmed model', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('review-platform-session', 'saved-token');

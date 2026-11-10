@@ -65,7 +65,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Render agent-authored draft content as plain text.
 - Handle Material Web menu actions through `close-menu` for mouse and keyboard activation.
   Treat Escape as dismissal and guard disabled custom-element actions.
-- Keep confirmation panels reachable for actions offered on compact PR rows,
+- Keep GitHub refresh and action confirmation panels reachable on compact PR rows,
   and cover those signed-in flows in UI tests.
 - Show button explanations in tooltips available on hover and keyboard focus,
   including for disabled buttons; keep them within the viewport and outside clipping containers.
