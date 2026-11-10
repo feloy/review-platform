@@ -1432,16 +1432,16 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("nested")).unwrap();
+        let executable = directory.path().join("bin/openshell");
+        std::fs::create_dir(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "executable fixture").unwrap();
         let config =
             ReviewConfig::from_json(&bytes, &directory.path().join("nested/../config.json"))
                 .unwrap();
+        // Windows may retain a short directory name while canonicalization expands it.
         assert_eq!(
-            config.execution.openshell(),
-            directory
-                .path()
-                .canonicalize()
-                .unwrap()
-                .join("bin/openshell")
+            config.execution.openshell().canonicalize().unwrap(),
+            executable.canonicalize().unwrap()
         );
     }
 

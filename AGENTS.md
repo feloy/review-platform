@@ -37,6 +37,8 @@ add a dependency or abstraction when a current feature needs it.
   Describe the file's purpose and boundary instead of repeating what individual lines do.
 - Format with `cargo fmt`; keep `cargo clippy --all-targets -- -D warnings` and `cargo test` passing.
   Add tests for behavior and security invariants, especially authorization, review freshness, and publication decisions.
+- Compare canonical paths of existing fixtures when testing resolved filesystem locations across platforms.
+  Windows may use short directory names and verbatim prefixes for the same location.
 
 ## Reviewing Rust proposals
 
