@@ -309,6 +309,28 @@ describe('sign-in link', () => {
     expect(sessionStorage.getItem('review-platform-session')).toBe('saved-token');
     expect(window.location.search).toBe('');
   });
+
+  it('exchanges a URL code without showing sign-in after a stored session expires', async () => {
+    sessionStorage.setItem('review-platform-session', 'expired-token');
+    window.history.pushState({}, '', '/?code=url-code');
+    let finishSessionCheck;
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSessionCheck = resolve; }))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ token: 'session-token' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(App);
+
+    expect(screen.queryByLabelText('One-time code')).toBeNull();
+    await act(() => finishSessionCheck({ ok: false, status: 401 }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.queryByLabelText('One-time code')).toBeNull();
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/session');
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer expired-token');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/session');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ code: 'url-code' });
+    await waitFor(() => expect(sessionStorage.getItem('review-platform-session')).toBe('session-token'));
+    expect(window.location.search).toBe('');
+  });
 });
 
 describe('review requests page', () => {

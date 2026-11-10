@@ -35,7 +35,7 @@
     }
   }
 
-  async function checkSession() {
+  async function validateStoredSession() {
     let token = '';
     try { token = sessionStorage.getItem(sessionKey) ?? ''; } catch { /* Storage may be disabled. */ }
     if (token) {
@@ -48,6 +48,10 @@
         storeSession(token);
       }
     }
+  }
+
+  async function checkSession() {
+    await validateStoredSession();
     checkingSession = false;
   }
 
@@ -63,7 +67,7 @@
       });
       if (!response.ok) {
         signInError = response.status === 401
-          ? 'The code is invalid or already used. Restart the GUI for a new code.'
+          ? 'The code is invalid or already used. Restart the GUI for a new sign-in link.'
           : 'Could not sign in. Check the local API and try again.';
         return;
       }
@@ -99,7 +103,7 @@
       });
       if (response.status === 401) {
         storeSession('');
-        signInError = 'Your session ended. If the code was already used, restart the GUI for a new one.';
+        signInError = 'Your session ended. If the code was already used, restart the GUI for a new sign-in link.';
         requestActions[requestId] = { pending: false, message: '', error: true };
         return false;
       }
@@ -237,8 +241,9 @@
   }
 
   async function initializeSession(bootstrapCode) {
-    await checkSession();
+    await validateStoredSession();
     if (!sessionToken) await exchangeCode(bootstrapCode);
+    else checkingSession = false;
   }
 
   onMount(() => {
@@ -307,7 +312,7 @@
   {#if !checkingSession && !sessionToken}
     <section class="sign-in" aria-labelledby="sign-in-heading">
       <h2 id="sign-in-heading">Sign in for actions</h2>
-      <p>Enter the one-time code shown in the terminal running Review Platform.</p>
+      <p>Open the sign-in link shown in the terminal, or paste the value of its <code>code</code> parameter here.</p>
       <form onsubmit={signIn}>
         <label for="sign-in-code">One-time code</label>
         <input id="sign-in-code" type="password" autocomplete="off" required bind:value={signInCode}
