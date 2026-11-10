@@ -79,6 +79,8 @@ a refresh or preparation can save display context even when review inputs are un
 Review start and finish times and confirmed publication times come from saved records.
 A closed PR without pending review work is shown as a compact summary row.
 After signing in, use **Stop managing PR** in that row's menu to open the removal confirmation.
+Use **Refresh from GitHub** in the same menu to check whether the PR has reopened.
+When GitHub reports it as open, the full controls return.
 If a draft, publication, or sandbox cleanup still needs attention,
 the GUI keeps the operational controls and status available.
 

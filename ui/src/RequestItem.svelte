@@ -170,12 +170,12 @@
               <div slot="headline">{action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'Read private draft'}</div>
             </md-menu-item>
           {/if}
+          <md-menu-item type="button" disabled={action?.pending}
+            aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
+            onclose-menu={(event) => selectMenuAction(event, onRefresh)}>
+            <div slot="headline">{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</div>
+          </md-menu-item>
           {#if !compactClosed}
-            <md-menu-item type="button" disabled={action?.pending}
-              aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
-              onclose-menu={(event) => selectMenuAction(event, onRefresh)}>
-              <div slot="headline">{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</div>
-            </md-menu-item>
             <md-menu-item type="button" disabled={action?.pending || !request.discussion}
               aria-expanded={Boolean(inspected)}
               aria-label={`Manage authorization for ${request.repository} #${request.number}`}
