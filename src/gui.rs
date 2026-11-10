@@ -4,7 +4,7 @@ mod context;
 mod drafts;
 mod publications;
 
-use self::context::{Contexts, RequestContext, observation_time, request_context};
+use self::context::{RequestContext, observation_time, record_display_context, request_context};
 use crate::{
     gui_runs::{RunSummary, Runs, StartError},
     preparation_commands::{self, InspectedRules, PrepareError},
@@ -147,7 +147,6 @@ struct AppState {
     inspect_draft: drafts::Inspect,
     publications: Arc<publications::Publications>,
     removing: Mutex<HashSet<PrKey>>,
-    contexts: Arc<Contexts>,
 }
 
 impl AppState {
@@ -476,7 +475,6 @@ fn router_with_runs(
         inspect_draft: crate::draft_commands::inspect,
         publications: Arc::new(publications::Publications::default()),
         removing: Mutex::new(HashSet::new()),
-        contexts: Arc::new(Contexts::default()),
     }))
 }
 
@@ -616,7 +614,7 @@ async fn refresh_request(
         let mut response = (state.refresh)(&state.state_file, &key).map_err(refresh_error)?;
         response.context = response
             .context
-            .and_then(|context| state.contexts.record(&state.state_file, &key, context));
+            .and_then(|context| record_display_context(&state.state_file, &key, context));
         Ok(response)
     })
     .await
@@ -709,12 +707,6 @@ async fn unmanage_request(
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Could not clear GUI publication jobs.",
-            )
-        })?;
-        state.contexts.forget(&key).map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not clear GUI display context.",
             )
         })?;
         Ok(changed)
@@ -815,7 +807,7 @@ async fn run_preparation(
         )?;
         response.context = response
             .context
-            .and_then(|context| state.contexts.record(&state.state_file, &key, context));
+            .and_then(|context| record_display_context(&state.state_file, &key, context));
         Ok(response)
     })
     .await
@@ -1021,7 +1013,6 @@ async fn requests(
         state.state_file.clone(),
         state.runs.clone(),
         state.publications.clone(),
-        state.contexts.clone(),
     )
     .await
     .map(Json)
@@ -1053,7 +1044,6 @@ async fn request_events(
                     state.state_file.clone(),
                     state.runs.clone(),
                     state.publications.clone(),
-                    state.contexts.clone(),
                 )
                 .await
                 .and_then(|list| serde_json::to_string(&list).context("serializing request list"))
@@ -1089,11 +1079,9 @@ async fn read_request_list(
     state_file: PathBuf,
     runs: Arc<Runs>,
     publications: Arc<publications::Publications>,
-    contexts: Arc<Contexts>,
 ) -> Result<RequestList> {
     tokio::task::spawn_blocking(move || {
         let mut list = request_list(&state_file)?;
-        contexts.apply(&mut list)?;
         for request in &mut list.requests {
             request.run = runs.summary(&PrKey::new(&request.repository, request.number)?)?;
             request.publication =
@@ -1575,7 +1563,6 @@ mod tests {
                     state_file.clone(),
                     runs.clone(),
                     Arc::new(publications::Publications::default()),
-                    Arc::new(Contexts::default()),
                 )
                 .await
                 .unwrap();
@@ -1619,7 +1606,6 @@ mod tests {
                 Err(crate::publication_commands::PublishError::Stale)
             })),
             removing: Mutex::new(HashSet::new()),
-            contexts: Arc::new(Contexts::default()),
         });
         let app = router_with_state(state.clone());
         test_runtime().block_on(async {

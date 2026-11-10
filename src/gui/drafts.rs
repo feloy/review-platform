@@ -311,7 +311,6 @@ mod tests {
             inspect_draft,
             publications,
             removing: Mutex::new(Default::default()),
-            contexts: Arc::new(super::super::Contexts::default()),
         }))
     }
 
