@@ -933,7 +933,7 @@ impl ReviewConfig {
         let mut hash = Sha256::new();
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(bytes);
-        let directory_bytes = serde_json::to_vec(&config_directory)?;
+        let directory_bytes = config_directory.as_os_str().as_encoded_bytes();
         hash.update((directory_bytes.len() as u64).to_be_bytes());
         hash.update(directory_bytes);
         let mut models = Vec::with_capacity(raw.models.len());
@@ -1465,6 +1465,33 @@ mod tests {
             a.repositories[0].runners[0].archive.path(),
             b.repositories[0].runners[0].archive.path()
         );
+        assert_eq!(a.repositories[0].prompt, b.repositories[0].prompt);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_configuration_directories_have_distinct_lossless_fingerprints() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory
+            .path()
+            .join(OsString::from_vec(b"config-\x80".to_vec()));
+        let second = directory
+            .path()
+            .join(OsString::from_vec(b"config-\x81".to_vec()));
+        assert!(first.to_str().is_none());
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+
+        // Absolute resource paths isolate hashing from filesystem support for these names.
+        let bytes = serde_json::to_vec(&config_json()).unwrap();
+        let a = ReviewConfig::from_json(&bytes, &first.join("config.json")).unwrap();
+        let unchanged = ReviewConfig::from_json(&bytes, &first.join("config.json")).unwrap();
+        let b = ReviewConfig::from_json(&bytes, &second.join("config.json")).unwrap();
+
+        assert_eq!(a.hash(), unchanged.hash());
+        assert_ne!(a.hash(), b.hash());
         assert_eq!(a.repositories[0].prompt, b.repositories[0].prompt);
     }
 

@@ -129,8 +129,11 @@ The configuration loader resolves relative host paths against the directory cont
 This applies to project prompts, VM archives, runner policies, and the OpenShell executable.
 Runner snapshots retain validated absolute paths;
 VM executable paths remain absolute within the VM.
-The configuration fingerprint includes the absolute configuration directory,
+The configuration fingerprint includes the length-prefixed OS-string bytes of the absolute configuration directory,
 so relocating relative references invalidates model validation.
+This preserves non-UTF-8 directory names without JSON serialization or lossy Unicode conversion.
+Project prompts can be read below such directories;
+resolved runner and archive paths retain their UTF-8 requirements.
 Referenced image and policy files are not canonicalized;
 their existing traversal, symlink, and checksum checks still apply.
 Review Platform fixes the mount targets, TTY and restart behavior,
@@ -156,6 +159,8 @@ The agent may read PR files and GitHub context, but does not execute repository
 code, install dependencies, or run tools against the code under review.
 Builds, tests, linters, and other validation steps run in CI.
 The daemon starts a review only after the current PR commit's CI checks are green.
+PR metadata, commit comparisons, and individual check pages are limited to 8 MiB of response data
+before JSON decoding, with typed errors for oversized responses.
 
 ## Agent instruction boundary
 
@@ -189,6 +194,8 @@ A typed task records the inspected base and effective full or incremental scope.
 Automatic scope selects only the latest confirmed publication for that PR from local history.
 The GitHub adapter verifies ancestry for the recorded reviewed commit;
 divergent or unavailable previous history falls back to a full review.
+Ancestry comparisons request one commit per page;
+GitHub still includes first-page file patches, so the JSON response limit also applies.
 Other lookup failures stop startup before dispatch.
 A signed-in lead can force full scope through the GUI or CLI.
 An unchanged head still permits an incremental review of new discussion.

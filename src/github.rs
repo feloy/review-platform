@@ -21,6 +21,7 @@ use ureq::tls::{RootCerts, TlsConfig};
 
 const API_ROOT: &str = "https://api.github.com";
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
 
 type HttpResponse = ureq::http::Response<ureq::Body>;
 
@@ -193,7 +194,10 @@ impl GithubClient {
         if previous == current {
             return Ok(true);
         }
-        let route = format!("/repos/{}/compare/{previous}...{current}", key.repository());
+        let route = format!(
+            "/repos/{}/compare/{previous}...{current}?per_page=1",
+            key.repository()
+        );
         let resource = format!("comparison for {key}");
         let response = match self.get(&route, "application/vnd.github+json", &resource) {
             Ok(response) => response,
@@ -225,7 +229,7 @@ impl GithubClient {
                 expected_head
             );
             let response = self.get(
-                &route,
+                &format!("{route}?per_page=1"),
                 "application/vnd.github+json",
                 &format!("comparison for {key}"),
             )?;
@@ -352,11 +356,18 @@ fn parse_json<T: DeserializeOwned>(response: HttpResponse, resource: String) -> 
     response
         .into_body()
         .into_reader()
+        .take(MAX_JSON_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|source| GithubError::ReadResponse {
             resource: resource.clone(),
             source,
         })?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(GithubError::JsonResponseTooLarge {
+            resource,
+            limit_mib: MAX_JSON_BYTES / (1024 * 1024),
+        });
+    }
     serde_json::from_slice(&bytes)
         .map_err(|source| GithubError::DecodeResponse { resource, source })
 }
@@ -710,6 +721,41 @@ mod tests {
     }
 
     #[test]
+    fn json_response_at_the_size_limit_is_accepted() {
+        let body = serde_json::json!({"merge_base_commit": {"sha": PREVIOUS_HEAD}}).to_string();
+        let padding = std::io::repeat(b' ').take(MAX_JSON_BYTES - body.len() as u64);
+        let reader = std::io::Cursor::new(body.into_bytes()).chain(padding);
+        let response = HttpResponse::new(ureq::Body::builder().reader(reader));
+        let comparison: ApiComparison = parse_json(response, "comparison".into()).unwrap();
+        assert_eq!(comparison.merge_base_commit.sha.as_str(), PREVIOUS_HEAD);
+    }
+
+    #[test]
+    fn oversized_json_is_rejected_without_reading_the_remaining_body() {
+        struct UnreadBody;
+
+        impl Read for UnreadBody {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read past the response limit"))
+            }
+        }
+
+        let reader = std::io::repeat(b'x')
+            .take(MAX_JSON_BYTES + 1)
+            .chain(UnreadBody);
+        let response = HttpResponse::new(ureq::Body::builder().reader(reader));
+        let error = parse_json::<ApiComparison>(response, "comparison for owner/repo#42".into())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            &error,
+            GithubError::JsonResponseTooLarge { resource, limit_mib: 8 }
+                if resource == "comparison for owner/repo#42"
+        ));
+        assert!(!error.to_string().contains("xxxx"));
+    }
+
+    #[test]
     fn rejects_invalid_token_without_exposing_it() {
         let secret = "test-secret\nmore-secret";
         let client = GithubClient::for_api(API_ROOT.to_owned(), Some(secret.to_owned()));
@@ -766,7 +812,7 @@ mod tests {
         let replies = vec![
             json_reply(pull_route(&key), pr_body(HEAD, BASE)),
             json_reply(
-                compare_route.clone(),
+                format!("{compare_route}?per_page=1"),
                 serde_json::json!({"merge_base_commit": {"sha": PREVIOUS_HEAD}}).to_string(),
             ),
             diff_reply(compare_route, "diff --git a/a b/a\n+new line\n".to_owned()),
@@ -856,7 +902,7 @@ mod tests {
         let body = serde_json::json!({"merge_base_commit": {"sha": HEAD}}).to_string();
         let (url, handle) = serve_many(vec![
             json_reply(pull_route(&key), pr_body(HEAD, BASE)),
-            json_reply(compare_route, body),
+            json_reply(format!("{compare_route}?per_page=1"), body),
         ]);
         let client = GithubClient::for_api(url, Some("test-token".to_owned()));
         let pull = client.pull_request(&key).unwrap();
@@ -876,7 +922,7 @@ mod tests {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let previous = HeadSha::new(PREVIOUS_HEAD).unwrap();
         let head = HeadSha::new(HEAD).unwrap();
-        let route = format!("/repos/owner/repo/compare/{PREVIOUS_HEAD}...{HEAD}");
+        let route = format!("/repos/owner/repo/compare/{PREVIOUS_HEAD}...{HEAD}?per_page=1");
         for (status, merge_base, expected) in [
             ("200 OK", PREVIOUS_HEAD, Some(true)),
             ("200 OK", HEAD, Some(false)),

@@ -44,6 +44,8 @@ pub enum GithubError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("GitHub JSON for {resource} exceeds {limit_mib} MiB; inspect it on GitHub")]
+    JsonResponseTooLarge { resource: String, limit_mib: u64 },
     #[error("invalid GitHub response for {resource}: {detail}")]
     InvalidResponse { resource: String, detail: String },
     #[error("GitHub {kind} changed during pagination ({detail}); retry later")]

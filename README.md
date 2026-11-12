@@ -591,6 +591,8 @@ including when loaded from the JSON state file.
 
   If a requested diff or checks fetch fails, the command prints no partial report.
   Diff output is limited to 8 MiB.
+  PR metadata, commit comparisons, and each page of checks are limited to 8 MiB of JSON response data.
+  Oversized responses report an error; inspect the PR on GitHub.
   CRLF line endings are displayed as LF, while other terminal control characters are escaped.
   If GitHub refuses to generate a diff, possibly because of its file or line limits,
   inspect the PR on GitHub.
@@ -619,6 +621,7 @@ including when loaded from the JSON state file.
   Automatic scope is incremental after the latest confirmed publication for this PR,
   using its reviewed commit after checking ancestry against the current head.
   With no confirmed publication, or after divergent or unavailable previous history, it performs a full review.
+  An oversized ancestry comparison stops startup with an error.
   Author discussion changes at the same head produce an incremental discussion review with no code changes.
   Add `--full-review` to inspect the entire PR regardless of earlier reviews:
 
@@ -821,6 +824,9 @@ Archive, policy, and OpenShell executable paths must be nonempty and cannot cont
 The loaded configuration stores absolute host paths for adapters.
 Its fingerprint includes the configuration directory;
 moving a configuration requires fresh preparation and model validation.
+Directory fingerprinting supports non-UTF-8 names.
+Resolved archive, policy, and OpenShell paths still require UTF-8 names;
+use absolute paths to those resources outside that directory when needed.
 Paths to executables inside the VM, including `hold_command[0]`, remain absolute VM paths.
 
 The CLI matches both the name and email of trailing `Co-authored-by` commit trailers,
