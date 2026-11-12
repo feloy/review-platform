@@ -39,6 +39,8 @@ add a dependency or abstraction when a current feature needs it.
   Add tests for behavior and security invariants, especially authorization, review freshness, and publication decisions.
 - Compare canonical paths of existing fixtures when testing resolved filesystem locations across platforms.
   Windows may use short directory names and verbatim prefixes for the same location.
+- Fingerprint filesystem paths with length-prefixed OS-string bytes,
+  preserving non-UTF-8 names without lossy conversion or JSON serialization.
 
 ## Reviewing Rust proposals
 
@@ -151,6 +153,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Keep trusted tool instructions aligned with the flags; prompts do not enforce access.
 - Validate external input at its boundary and propagate actionable errors.
   Do not make network calls or run agents from pure domain logic or unit tests.
+  Bound GitHub response bodies before decoding;
+  pagination alone does not bound comparison file patches.
 - Use platform trust roots for outbound HTTPS so operator-installed certificates work.
   Keep server certificate verification enabled.
 
