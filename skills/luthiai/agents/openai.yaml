@@ -1,0 +1,3 @@
+interface:
+  display_name: "LuthiAI"
+  short_description: "Configure and operate LuthiAI reviews"
