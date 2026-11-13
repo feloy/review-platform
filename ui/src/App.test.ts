@@ -241,18 +241,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('refresh all open PRs', () => {
-  it('places the button above the list and requires sign-in before refreshing', async () => {
+describe('refresh open PRs', () => {
+  it('places refresh in the header and explains the sign-in requirement on hover and focus', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request()]);
-    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    const button = await clickMaterialButton(user, container, 'Refresh open PRs');
     expect(button.disabled).toBe(true);
-    expect(button.closest('.queue-toolbar').nextElementSibling).toBe(container.querySelector('.queue'));
+    const header = container.querySelector<HTMLElement>('.page-header');
+    expect(header.contains(button)).toBe(true);
+    expect(within(header).getByRole('heading', { name: 'LuthiAI', level: 1 })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Pull requests (1)', level: 2 })).toBeTruthy();
     expect(button.closest('.request-list')).toBeNull();
-    expect(screen.getByText('Sign in to refresh PRs.')).toBeTruthy();
+    const trigger = within(header).getByRole('group', { name: 'Refresh open PRs' });
+    const tooltip = document.getElementById(button.getAttribute('aria-describedby'));
+    expect(tooltip.textContent).toBe('Sign in to refresh PRs.');
+    expect(trigger.tabIndex).toBe(0);
+    await user.hover(trigger);
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
+    await user.unhover(trigger);
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
+    await act(() => trigger.focus());
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
+    await user.keyboard('{Escape}');
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
     button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -263,19 +277,23 @@ describe('refresh all open PRs', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
-    await screen.findByText('Refresh all open PRs');
-    const button = container.querySelector('.queue-toolbar md-filled-button') as MaterialControl;
+    await screen.findByText('Refresh open PRs');
+    const button = container.querySelector('.page-header md-filled-button') as MaterialControl;
+    const tooltip = document.getElementById(button.getAttribute('aria-describedby'));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     expect(button.disabled).toBe(true);
+    expect(tooltip.textContent).toBe('Waiting for the local PR list.');
     for (const snapshot of [[], [request({ context: context({ state: 'closed' }) })]]) {
       await showSnapshot(source, snapshot);
       expect(button.disabled).toBe(true);
+      expect(tooltip.textContent).toBe('No open or unchecked PRs to refresh.');
     }
     await showSnapshot(source, [request()]);
     expect(button.disabled).toBe(false);
+    expect(tooltip.textContent).toBe('Check open and unchecked PRs for changes on GitHub.');
   });
 
-  it('refreshes open and unchecked PRs sequentially, prevents duplicate batches, and keeps live snapshots authoritative', async () => {
+  it('keeps batch progress current and clears the completed summary when the next PR action starts', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishFirst: FinishFetch;
@@ -289,9 +307,9 @@ describe('refresh all open PRs', () => {
     const initial = [request({ context: context() }), request({ number: 16 }), request({ number: 17, context: context({ state: 'closed' }) })];
     await showSnapshot(source, initial);
     await screen.findAllByText('Refresh from GitHub');
-    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    const button = await clickMaterialButton(user, container, 'Refresh open PRs');
     expect(button.disabled).toBe(true);
-    expect(within(container.querySelector('.queue-toolbar')).getByRole('status').textContent).toBe('Refreshing 0 of 2 PRs…');
+    expect(screen.getByText('Refreshing 0 of 2 PRs…').getAttribute('role')).toBe('status');
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/refresh');
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
@@ -301,7 +319,7 @@ describe('refresh all open PRs', () => {
     await showSnapshot(source, [request({ revision: 2 }), ...initial.slice(1), request({ number: 18 })]);
     await act(() => finishFirst({ ok: true, json: async () => ({ changed: true, authorization_cleared: true }) }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
-    expect(within(container.querySelector('.queue-toolbar')).getByRole('status').textContent).toBe('Refreshing 1 of 2 PRs…');
+    expect(screen.getByText('Refreshing 1 of 2 PRs…').getAttribute('role')).toBe('status');
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ repository: 'owner/repo', number: 16 });
     await act(() => finishSecond({ ok: true, json: async () => ({ changed: false }) }));
     expect(await screen.findByText('Refreshed 2 of 2 PRs.')).toBeTruthy();
@@ -309,6 +327,15 @@ describe('refresh all open PRs', () => {
     expect(screen.getByText(/Inspect the changes and allow the review again/)).toBeTruthy();
     expect(button.disabled).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    let finishPreparation: FinishFetch;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finishPreparation = resolve; }));
+    await clickMaterialButton(user, container.querySelector('.request-item'), 'Check review readiness');
+    expect(screen.queryByText('Refreshed 2 of 2 PRs.')).toBeNull();
+    expect(screen.getByText('Preparing…')).toBeTruthy();
+    await act(() => finishPreparation({ ok: false, status: 502, json: async () => ({ error: 'Could not prepare the review.' }) }));
+    expect(await screen.findByText('Could not prepare the review.')).toBeTruthy();
+    expect(container.querySelector('.bulk-refresh-status')).toBeNull();
   });
 
   it.each(['github', 'offline'])('continues after a %s failure and shows both the summary and individual error', async (failure) => {
@@ -322,7 +349,7 @@ describe('refresh all open PRs', () => {
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request(), request({ number: 16 })]);
     await screen.findAllByText('Refresh from GitHub');
-    await clickMaterialButton(user, container, 'Refresh all open PRs');
+    await clickMaterialButton(user, container, 'Refresh open PRs');
     expect(await screen.findByText('Refreshed 1 of 2 PRs. 1 could not be refreshed; see the PR rows for details.')).toBeTruthy();
     const [first, second] = [...container.querySelectorAll('.request-item')] as HTMLElement[];
     expect(within(first).getByText(failure === 'github' ? 'GitHub is unavailable. Try again later.' : 'Could not connect to the local API. Try again.')).toBeTruthy();
@@ -330,7 +357,7 @@ describe('refresh all open PRs', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('stops when the session expires without sending the remaining requests', async () => {
+  it('stops when the session expires and clears the old refresh error when signing in again', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
@@ -339,12 +366,22 @@ describe('refresh all open PRs', () => {
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request(), request({ number: 16 })]);
     await screen.findAllByText('Refresh from GitHub');
-    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    const button = await clickMaterialButton(user, container, 'Refresh open PRs');
     expect(await screen.findByText(/Refresh stopped because your session ended/)).toBeTruthy();
     expect(await screen.findByLabelText('One-time code')).toBeTruthy();
     expect(sessionStorage.getItem('luthiai-session')).toBeNull();
     expect(button.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    let finishSignIn: FinishFetch;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finishSignIn = resolve; }));
+    await user.type(screen.getByLabelText('One-time code'), 'new-code');
+    await clickMaterialButton(user, container.querySelector('.sign-in'), 'Sign in');
+    expect(screen.queryByText(/Refresh stopped because your session ended/)).toBeNull();
+    expect(screen.getByText('Signing in…')).toBeTruthy();
+    await act(() => finishSignIn({ ok: true, json: async () => ({ token: 'new-token' }) }));
+    await waitFor(() => expect(screen.queryByLabelText('One-time code')).toBeNull());
+    expect(container.querySelector('.bulk-refresh-status')).toBeNull();
   });
 
   it('waits for pending row actions and skips PRs removed or closed during the batch', async () => {
@@ -361,12 +398,12 @@ describe('refresh all open PRs', () => {
     await showSnapshot(source, [request(), request({ number: 16 }), request({ number: 17 })]);
     await screen.findAllByText('Refresh from GitHub');
     await clickMaterialButton(user, container.querySelector('.request-item'), 'Refresh from GitHub');
-    const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
+    const button = await clickMaterialButton(user, container, 'Refresh open PRs');
     expect(button.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await act(() => finishRowRefresh({ ok: true, json: async () => ({ changed: false }) }));
     await waitFor(() => expect(button.disabled).toBe(false));
-    await clickMaterialButton(user, container, 'Refresh all open PRs');
+    await clickMaterialButton(user, container, 'Refresh open PRs');
     await showSnapshot(source, [request(), request({ number: 17, context: context({ state: 'closed' }) })]);
     await act(() => finishBatchRefresh({ ok: true, json: async () => ({ changed: false }) }));
     expect(await screen.findByText('Refreshed 1 of 3 PRs. Skipped 2 busy, removed, or closed PRs.')).toBeTruthy();
@@ -484,7 +521,7 @@ describe('review requests page', () => {
     expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
     await openActionsMenu(user, row);
     expect(within(menu).getByText('Hide details')).toBeTruthy();
-    await user.click(screen.getByRole('heading', { name: 'Review requests', level: 1 }));
+    await user.click(screen.getByRole('heading', { name: 'LuthiAI', level: 1 }));
     await waitFor(() => expect(menu.open).toBe(false));
     await waitFor(() => expect(trigger.ariaExpanded).toBe('false'));
   });
@@ -558,7 +595,7 @@ describe('review requests page', () => {
     expect((screen.getByRole('link', { name: title }) as HTMLAnchorElement).href).toBe('https://github.com/owner/repo/pull/15');
     expect(screen.getByText('by @alice · Open')).toBeTruthy();
     expect(screen.getByText('2 minutes ago')).toBeTruthy();
-    expect(screen.getByText(/Local update received/)).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Local updates' })).toBeTruthy();
     expect(screen.getByText(/the author discussion changed/)).toBeTruthy();
     expect(container.querySelector('img')).toBeNull();
     await showSnapshot(source, [request({ context, latest_round: round() })]);
@@ -724,18 +761,30 @@ describe('review requests page', () => {
   });
 
   it('connects to the request stream, shows an empty list, and closes it on unmount', async () => {
-    const { unmount } = render(App);
+    const user = userEvent.setup();
+    const { container, unmount } = render(App);
     const source = FakeEventSource.instances[0];
+    const indicator = container.querySelector('.connection') as HTMLElement;
+    const tooltip = document.getElementById(indicator.getAttribute('aria-describedby'));
 
     expect(source.url).toBe('/api/requests/events');
-    expect(screen.getByText('Connecting to LuthiAI')).toBeTruthy();
+    expect(indicator.textContent.trim()).toBe('Connecting to local updates');
     expect(screen.getByText('Waiting for the local request list…')).toBeTruthy();
+    await user.hover(indicator);
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
+    await user.unhover(indicator);
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
+    await act(() => indicator.focus());
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
 
     await act(() => source.open());
     await showSnapshot(source, []);
-    expect(screen.getByText('Live local updates')).toBeTruthy();
+    expect(indicator.textContent.trim()).toBe('Local updates connected');
+    expect(tooltip.textContent).toBe('Local updates connected. Refresh open PRs to check GitHub for changes.');
+    await user.keyboard('{Escape}');
+    expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
     expect(screen.getByText(/No review requests recorded yet/)).toBeTruthy();
-    expect(screen.getByText(/0 requests/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Pull requests (0)', level: 2 })).toBeTruthy();
     expect(screen.queryByText('Refresh from GitHub')).toBeNull();
     expect(screen.queryByText('Manage authorization')).toBeNull();
     expect(screen.queryByText('Revoke authorization')).toBeNull();
@@ -757,7 +806,7 @@ describe('review requests page', () => {
 
     expect(screen.queryByText('Refresh from GitHub')).toBeNull();
     await user.type(await screen.findByLabelText('One-time code'), 'test-code');
-    const signIn = container.querySelector('md-filled-button');
+    const signIn = container.querySelector('.sign-in md-filled-button');
     await waitFor(() => expect(signIn.shadowRoot.querySelector('button')).toBeTruthy());
     await user.click(signIn.shadowRoot.querySelector('button'));
     await waitFor(() => expect(screen.getByText('Refresh from GitHub')).toBeTruthy());
@@ -790,7 +839,7 @@ describe('review requests page', () => {
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request()]);
     await user.type(await screen.findByLabelText('One-time code'), 'test-code');
-    const signIn = container.querySelector('md-filled-button');
+    const signIn = container.querySelector('.sign-in md-filled-button');
     await user.click(signIn.shadowRoot.querySelector('button'));
     expect(await screen.findByText(/code is invalid or already used/)).toBeTruthy();
     await user.click(signIn.shadowRoot.querySelector('button'));

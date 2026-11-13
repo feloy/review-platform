@@ -1,18 +1,18 @@
 <script>
   import { onMount } from 'svelte';
+  import ButtonHelp from './ButtonHelp.svelte';
   import RequestItem from './RequestItem.svelte';
 
   const connectionLabels = {
-    connecting: 'Connecting to LuthiAI',
-    connected: 'Live local updates',
-    reconnecting: 'Reconnecting to LuthiAI',
+    connecting: 'Connecting to local updates',
+    connected: 'Local updates connected',
+    reconnecting: 'Reconnecting to local updates',
   };
 
   let requests = $state([]);
   let hasSnapshot = $state(false);
   let connection = $state('connecting');
   let error = $state('');
-  let lastReceivedAt = $state(null);
   let sessionToken = $state('');
   let checkingSession = $state(true);
   let signInCode = $state('');
@@ -22,8 +22,20 @@
   let bulkRefresh = $state({ pending: false, message: '', error: false });
   const refreshableRequests = $derived(requests.filter((request) => request.context?.state !== 'closed'));
   const requestActionPending = $derived(Object.values(requestActions).some((action) => action.pending));
+  const refreshDisabled = $derived(!sessionToken || !hasSnapshot || bulkRefresh.pending || requestActionPending || !refreshableRequests.length);
+  const refreshHelp = $derived(checkingSession ? 'Checking your sign-in session.'
+    : !sessionToken ? 'Sign in to refresh PRs.'
+    : !hasSnapshot ? 'Waiting for the local PR list.'
+    : bulkRefresh.pending ? 'A GitHub refresh is already in progress.'
+    : requestActionPending ? 'Wait for the current PR action to finish.'
+    : !refreshableRequests.length ? 'No open or unchecked PRs to refresh.'
+    : 'Check open and unchecked PRs for changes on GitHub.');
 
   const sessionKey = 'luthiai-session';
+
+  function clearCompletedRefresh() {
+    if (!bulkRefresh.pending) bulkRefresh = { pending: false, message: '', error: false };
+  }
 
   function storeSession(token) {
     sessionToken = token;
@@ -57,6 +69,7 @@
 
   async function exchangeCode(code) {
     if (signingIn) return;
+    clearCompletedRefresh();
     signingIn = true;
     signInError = '';
     try {
@@ -95,6 +108,7 @@
 
   async function performAction(requestId, operation, url, options, successMessage, failureMessage) {
     if (requestActions[requestId]?.pending) return false;
+    clearCompletedRefresh();
     requestActions[requestId] = { pending: true, operation, message: '', error: false };
     try {
       const response = await fetch(url, {
@@ -135,7 +149,7 @@
   }
 
   async function refreshAllFromGithub() {
-    if (!sessionToken || !hasSnapshot || bulkRefresh.pending || requestActionPending || !refreshableRequests.length) return;
+    if (refreshDisabled) return;
     const queued = refreshableRequests.map(({ repository, number }) => ({ repository, number }));
     let refreshed = 0;
     let failed = 0;
@@ -271,7 +285,6 @@
         if (!Array.isArray(snapshot.requests)) throw new Error('Invalid request list');
         requests = snapshot.requests;
         hasSnapshot = true;
-        lastReceivedAt = new Date();
         error = '';
       } catch {
         error = 'Could not read the latest request update.';
@@ -287,16 +300,34 @@
 
 <main class="page">
   <header class="page-header">
-    <div>
-      <p class="eyebrow">LuthiAI</p>
-      <h1>Review requests</h1>
-      <p class="intro">See which reviews need your attention and what to do next. Local progress updates automatically; use Refresh from GitHub to check for PR changes.</p>
+    <h1>LuthiAI</h1>
+    <div class="header-actions">
+      <ButtonHelp text={refreshHelp} label="Refresh open PRs" disabled={refreshDisabled}>
+        {#snippet children(descriptionId)}
+          <!-- Material Web handles keyboard activation inside its button shadow DOM. -->
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-filled-button type="button" disabled={refreshDisabled} aria-describedby={descriptionId}
+            onclick={refreshAllFromGithub}>
+            {bulkRefresh.pending ? 'Refreshing PRs…' : 'Refresh open PRs'}
+          </md-filled-button>
+        {/snippet}
+      </ButtonHelp>
+      <ButtonHelp text={`${connectionLabels[connection]}. Refresh open PRs to check GitHub for changes.`} label="Local updates">
+        {#snippet children(descriptionId)}
+          <!-- Keyboard focus exposes the connection explanation. -->
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+          <span class="connection" data-state={connection} role="status" tabindex="0" aria-describedby={descriptionId}>
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span class="visually-hidden">{connectionLabels[connection]}</span>
+          </span>
+        {/snippet}
+      </ButtonHelp>
     </div>
-    <p class="connection" data-state={connection} aria-live="polite">
-      <span class="connection-dot" aria-hidden="true"></span>
-      {connectionLabels[connection]}
-    </p>
   </header>
+
+  {#if bulkRefresh.message}
+    <p class="bulk-refresh-status" class:action-error={bulkRefresh.error} role={bulkRefresh.error ? 'alert' : 'status'}>{bulkRefresh.message}</p>
+  {/if}
 
   {#if connection === 'reconnecting'}
     <p class="error-banner" role="alert">
@@ -328,31 +359,9 @@
     </section>
   {/if}
 
-  <div class="queue-toolbar">
-    <div class="refresh-all-feedback">
-      <p class="secondary">Refresh recorded PRs that are open or haven’t been checked yet.</p>
-      {#if bulkRefresh.message}
-        <p class="bulk-refresh-status" class:action-error={bulkRefresh.error} role={bulkRefresh.error ? 'alert' : 'status'}>{bulkRefresh.message}</p>
-      {:else if !checkingSession && !sessionToken}
-        <p class="secondary">Sign in to refresh PRs.</p>
-      {/if}
-    </div>
-    <!-- Material Web handles keyboard activation inside its button shadow DOM. -->
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <md-filled-button type="button" disabled={!sessionToken || !hasSnapshot || bulkRefresh.pending || requestActionPending || !refreshableRequests.length}
-      onclick={refreshAllFromGithub}>
-      {bulkRefresh.pending ? 'Refreshing PRs…' : 'Refresh all open PRs'}
-    </md-filled-button>
-  </div>
-
   <section class="queue" aria-labelledby="queue-heading">
     <div class="queue-heading">
-      <h2 id="queue-heading">Recorded PRs</h2>
-      {#if hasSnapshot}
-        <p class="queue-meta" aria-live="polite">
-          {requests.length} {requests.length === 1 ? 'request' : 'requests'} · Local update received {lastReceivedAt.toLocaleTimeString()}
-        </p>
-      {/if}
+      <h2 id="queue-heading" aria-live="polite">{hasSnapshot ? `Pull requests (${requests.length})` : 'Pull requests'}</h2>
     </div>
 
     {#if !hasSnapshot}
