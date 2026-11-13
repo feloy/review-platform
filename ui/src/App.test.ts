@@ -765,8 +765,9 @@ describe('review requests page', () => {
     expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
     await clickMaterialButton(user, row, 'Review permissions');
     const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
-    expect(within(panel).getByText(observed.head_sha)).toBeTruthy();
-    expect(within(panel).getByText('Authorize one round')).toBeTruthy();
+    expect(within(panel).getByRole('link', { name: observed.head_sha.slice(0, 7) }).getAttribute('href'))
+      .toBe(`https://github.com/owner/repo/commit/${observed.head_sha}`);
+    expect(within(panel).getByText('Allow one review')).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -931,7 +932,7 @@ describe('review requests page', () => {
     expect(badge.textContent).toBe('0');
     expect(screen.queryByText('Refresh from GitHub')).toBeNull();
     expect(screen.queryByText('Review permissions')).toBeNull();
-    expect(screen.queryByText('Revoke authorization')).toBeNull();
+    expect(screen.queryByText('Revoke permission')).toBeNull();
     expect(screen.queryByText('Stop managing PR')).toBeNull();
 
     unmount();
@@ -1012,8 +1013,8 @@ describe('review requests page', () => {
   });
 
   it.each([
-    ['one_round', 'Authorize one round', 'Authorized for one round.', 'One round'],
-    ['pr_cycle', 'Authorize PR cycle', 'Authorized for the PR cycle.', 'PR cycle'],
+    ['one_round', 'Allow one review', 'Authorized for one round.', 'One round'],
+    ['pr_cycle', 'Allow all reviews for this PR', 'Authorized for the PR cycle.', 'PR cycle'],
   ])('authorizes %s for the displayed inputs and waits for the saved snapshot', async (scope, label, message, badge) => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
@@ -1028,13 +1029,23 @@ describe('review requests page', () => {
     await screen.findByText('Review permissions');
     await clickMaterialButton(user, container, 'Review permissions');
     const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
-    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
-    expect(within(panel).getByText('Input revision').nextElementSibling.textContent).toBe('2');
+    const commit = within(panel).getByRole('link', { name: 'a'.repeat(7) }) as HTMLAnchorElement;
+    expect(commit.href).toBe(`https://github.com/owner/repo/commit/${observed.head_sha}`);
+    expect(commit.title).toBe(observed.head_sha);
+    expect(within(panel).queryByText('Input revision')).toBeNull();
+    expect(within(panel).getByText('Current permission: Not granted.')).toBeTruthy();
     expect((within(panel).getByRole('link', { name: 'PR on GitHub' }) as HTMLAnchorElement).href).toBe('https://github.com/owner/repo/pull/15');
+    const choices = [...panel.querySelectorAll('.panel-actions md-text-button, .panel-actions md-filled-button')];
+    expect(choices.map((button) => button.textContent.trim())).toEqual(['Allow all reviews for this PR', 'Allow one review']);
+    expect(choices[1].tagName).toBe('MD-FILLED-BUTTON');
+    const help = document.getElementById(choices[scope === 'one_round' ? 1 : 0].getAttribute('aria-describedby'));
+    expect(help.textContent).toBe(scope === 'one_round'
+      ? 'Allow one review of this commit and author discussion. New commits or author replies clear unused permission.'
+      : 'Allow this and later reviews of this PR, including after new commits or author replies, until you revoke permission.');
 
     const button = await clickMaterialButton(user, container, label);
     expect(button.disabled).toBe(true);
-    expect(screen.getByText('Saving authorization…')).toBeTruthy();
+    expect(screen.getByText('Saving permission…')).toBeTruthy();
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/authorize');
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
@@ -1051,7 +1062,34 @@ describe('review requests page', () => {
   });
 
   it.each([
+    ['one_round', 'Allow one review', 'pr_cycle', 'Allow all reviews for this PR'],
+    ['pr_cycle', 'Allow all reviews for this PR', 'one_round', 'Allow one review'],
+  ])('disables the current %s permission while allowing a different choice', async (scope, label, nextScope, nextLabel) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('luthiai-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ changed: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ authorization: scope })]);
+    await screen.findByText('Review permissions');
+    await clickMaterialButton(user, container, 'Review permissions');
+    const current = await clickMaterialButton(user, container, label);
+    expect(current.disabled).toBe(true);
+    expect(current.closest('.button-help').getAttribute('aria-disabled')).toBe('true');
+    expect(document.getElementById(current.getAttribute('aria-describedby')).textContent).toBe('This permission is already set.');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    expect(within(panel).getByRole('group', { name: 'Revoke permission' }).hasAttribute('aria-disabled')).toBe(false);
+    expect(within(panel).getByRole('group', { name: nextLabel }).hasAttribute('aria-disabled')).toBe(false);
+    await clickMaterialButton(user, panel, nextLabel);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).scope).toBe(nextScope);
+    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+  });
+
+  it.each([
     { head_sha: 'b'.repeat(40), revision: 3 },
+    { head_sha: 'a'.repeat(7) + 'b'.repeat(33) },
     { revision: 3 },
   ])('keeps the inspected inputs fixed when a snapshot changes to %o', async (change) => {
     const user = userEvent.setup();
@@ -1067,17 +1105,18 @@ describe('review requests page', () => {
     const updated = { ...observed, ...change };
     await showSnapshot(source, [updated]);
     const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
-    expect(within(panel).getByText('a'.repeat(40))).toBeTruthy();
-    expect(within(panel).getByText('Input revision').nextElementSibling.textContent).toBe('2');
-    expect(screen.getByRole('alert').textContent).toContain('Inputs changed');
+    const commit = within(panel).getByRole('link', { name: 'a'.repeat(7) }) as HTMLAnchorElement;
+    expect(commit.href).toBe(`https://github.com/owner/repo/commit/${observed.head_sha}`);
+    expect(commit.title).toBe(observed.head_sha);
+    expect(screen.getByRole('alert').textContent).toContain('The PR changed');
     await clickMaterialButton(user, container, 'Allow review');
-    expect(within(panel).getByText('Input revision').nextElementSibling.textContent).toBe('2');
-    const disabled = await clickMaterialButton(user, container, 'Authorize PR cycle');
+    expect(commit.href).toBe(`https://github.com/owner/repo/commit/${observed.head_sha}`);
+    const disabled = await clickMaterialButton(user, container, 'Allow all reviews for this PR');
     expect(disabled.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
     await clickMaterialButton(user, container, 'Close permissions');
     await clickMaterialButton(user, container, 'Review permissions');
-    await clickMaterialButton(user, container, 'Authorize PR cycle');
+    await clickMaterialButton(user, container, 'Allow all reviews for this PR');
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
       head_sha: updated.head_sha, revision: updated.revision,
     });
@@ -1086,8 +1125,9 @@ describe('review requests page', () => {
   it('requires a discussion baseline for authorization but permits revocation without it', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
+    let finishRevocation: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ changed: true }) });
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRevocation = resolve; }));
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request({ authorization: 'pr_cycle' })]);
@@ -1095,15 +1135,36 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Review permissions');
     expect(screen.getByText('Refresh from GitHub before allowing a review.')).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Authorize owner/repo #15' })).toBeTruthy();
-    expect((await clickMaterialButton(user, container, 'Authorize one round')).disabled).toBe(true);
-    expect((await clickMaterialButton(user, container, 'Authorize PR cycle')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, container, 'Allow one review')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, container, 'Allow all reviews for this PR')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
-    await clickMaterialButton(user, container, 'Revoke authorization');
+    const revoke = await clickMaterialButton(user, container, 'Revoke permission');
+    expect(revoke.disabled).toBe(true);
+    expect(screen.getByRole('region', { name: 'Authorize owner/repo #15' })).toBeTruthy();
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/revoke');
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+    await act(() => finishRevocation({ ok: true, json: async () => ({ changed: true }) }));
     expect(await screen.findByText('Authorization revoked.')).toBeTruthy();
-    expect(screen.getByText('Current permission: PR cycle.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+  });
+
+  it('keeps the permissions panel open when revocation fails', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('luthiai-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'Could not revoke permission.' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request({ authorization: 'pr_cycle' })]);
+    await screen.findByText('Review permissions');
+    await clickMaterialButton(user, container, 'Review permissions');
+    await clickMaterialButton(user, container, 'Revoke permission');
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not revoke permission.');
+    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    expect(within(panel).getByText('Current permission: All reviews for this PR.')).toBeTruthy();
+    expect((await clickMaterialButton(user, container, 'Close permissions')).disabled).toBe(false);
+    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
   });
 
   it.each(['open', 'closed'])('stops managing a %s PR and removes it when the live snapshot updates', async (state) => {
@@ -1201,12 +1262,12 @@ describe('review requests page', () => {
     await showSnapshot(FakeEventSource.instances[0], [request({ discussion: { issue_comments: 1, review_comments: 0, review_bodies: 0 } })]);
     await screen.findByText('Review permissions');
     await clickMaterialButton(user, container, 'Review permissions');
-    await clickMaterialButton(user, container, 'Authorize one round');
+    await clickMaterialButton(user, container, 'Allow one review');
     expect(await screen.findByText(/Review inputs changed/)).toBeTruthy();
     expect(screen.getByText('Awaiting lead')).toBeTruthy();
-    await clickMaterialButton(user, container, 'Authorize one round');
+    await clickMaterialButton(user, container, 'Allow one review');
     expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
-    await clickMaterialButton(user, container, 'Authorize one round');
+    await clickMaterialButton(user, container, 'Allow one review');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
     expect(sessionStorage.getItem('luthiai-session')).toBeNull();
     expect(screen.queryByText('Review permissions')).toBeNull();

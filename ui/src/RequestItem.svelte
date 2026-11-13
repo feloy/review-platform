@@ -4,6 +4,7 @@
   import DraftPanel from './DraftPanel.svelte';
   import TimeAgo from './TimeAgo.svelte';
   import ButtonHelp from './ButtonHelp.svelte';
+  import Panel from './Panel.svelte';
   import { reviewSituation } from './request-status.js';
   import { tick } from 'svelte';
 
@@ -99,13 +100,20 @@
   const inputsChanged = $derived(inspected &&
     (inspected.head_sha !== request.head_sha || inspected.revision !== request.revision));
   const permissionDisabled = $derived(action?.pending || inputsChanged || !inspected?.discussion);
-  const permissionHelp = $derived(inputsChanged ? 'Close this panel and inspect the current PR inputs before allowing a review.'
-    : !inspected?.discussion ? 'Refresh from GitHub to observe the author discussion first.'
-    : 'Changed inputs can clear permission for one round and model validation.');
+  const oneReviewDisabled = $derived(permissionDisabled || request.authorization === 'one_round');
+  const allReviewsDisabled = $derived(permissionDisabled || request.authorization === 'pr_cycle');
+  const permissionHelp = $derived(action?.pending ? 'Wait for the current action to finish.'
+    : inputsChanged ? 'Close this panel and inspect the updated PR before allowing a review.'
+    : !inspected?.discussion ? 'Refresh from GitHub first.' : null);
 
   async function authorize(scope) {
-    if (!inspected?.discussion || inputsChanged || action?.pending) return;
+    if (!inspected?.discussion || inputsChanged || action?.pending || request.authorization === scope) return;
     if (await onAuthorize(inspected, scope)) openPanel(null);
+  }
+
+  async function revokePermission() {
+    if (action?.pending) return;
+    if (await onRevoke()) openPanel(null);
   }
 
   async function removeRequest() {
@@ -156,6 +164,12 @@
     awaiting_lead: 'Awaiting lead',
     one_round: 'One round',
     pr_cycle: 'PR cycle',
+  };
+
+  const permissionLabels = {
+    awaiting_lead: 'Not granted',
+    one_round: 'One review',
+    pr_cycle: 'All reviews for this PR',
   };
 
   const roundLabels = {
@@ -302,50 +316,50 @@
     {/if}
     {#if signedIn}
     {#if panel === 'permissions' && inspected}
-      <section class="authorization-panel" aria-label={`Authorize ${request.repository} #${request.number}`}>
-        <header class="panel-heading">
-          <h3>Review permissions</h3>
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <md-text-button disabled={action?.pending} onclick={() => openPanel(null)}>Close permissions</md-text-button>
-        </header>
+      <Panel title="Review permissions" label={`Authorize ${request.repository} #${request.number}`}
+        closeLabel="Close permissions" closeDisabled={action?.pending} onClose={() => openPanel(null)}>
         <p>Inspect the <a href={`https://github.com/${request.repository}/pull/${request.number}`}
-          target="_blank" rel="noopener noreferrer">PR on GitHub</a> before authorizing these inputs.</p>
-        <dl class="detail-list">
-          <div><dt>Head</dt><dd><code>{inspected.head_sha}</code></dd></div>
-          <div><dt>Input revision</dt><dd>{inspected.revision}</dd></div>
-        </dl>
-        <p>One round permits a single review of these inputs. PR cycle keeps authorization active for later commits and author replies.</p>
-        <p>Current permission: {authorizationLabels[request.authorization] ?? 'Unknown'}.</p>
+          target="_blank" rel="noopener noreferrer">PR on GitHub</a> at commit <a
+          href={`https://github.com/${request.repository}/commit/${inspected.head_sha}`}
+          title={inspected.head_sha} target="_blank" rel="noopener noreferrer"><code>{inspected.head_sha.slice(0, 7)}</code></a>
+          before granting permission.</p>
+        <p>Current permission: {permissionLabels[request.authorization] ?? 'Unknown'}.</p>
+        <p class="note" role="note">Note: Granting permission does not start a review.</p>
+        <p class="note" role="note">Note: To change or revoke permission later, open the three-dots menu and choose “Review permissions”.</p>
         {#if !inspected.discussion}<p class="warning">Refresh from GitHub before allowing a review.</p>{/if}
         {#if inputsChanged}
-          <p class="action-error" role="alert">Inputs changed. Close this panel and inspect the current head and revision before authorizing.</p>
+          <p class="action-error" role="alert">The PR changed. Close this panel and inspect it again before granting permission.</p>
         {/if}
-        <div class="authorization-buttons">
-          <ButtonHelp text={permissionHelp} label="Authorize one round" disabled={permissionDisabled}>
+        {#if action?.pending && action.operation === 'authorize'}
+          <p role="status">Saving permission…</p>
+        {/if}
+        {#snippet actions()}
+          {#if request.authorization !== 'awaiting_lead' || request.validated_model}
+            <ButtonHelp text="Prevent new reviews and clear the confirmed model. Saved drafts are kept." label="Revoke permission" disabled={action?.pending}>
+            {#snippet children(descriptionId)}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <md-text-button disabled={action?.pending} aria-describedby={descriptionId} onclick={revokePermission}>Revoke permission</md-text-button>
+            {/snippet}
+            </ButtonHelp>
+          {/if}
+          <ButtonHelp text={permissionHelp ?? (request.authorization === 'pr_cycle' ? 'This permission is already set.' : 'Allow this and later reviews of this PR, including after new commits or author replies, until you revoke permission.')} label="Allow all reviews for this PR" disabled={allReviewsDisabled}>
           {#snippet children(descriptionId)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <md-filled-button disabled={permissionDisabled} aria-describedby={descriptionId} onclick={() => authorize('one_round')}>
-            Authorize one round
-          </md-filled-button>
-          {/snippet}
-          </ButtonHelp>
-          <ButtonHelp text={permissionHelp} label="Authorize PR cycle" disabled={permissionDisabled}>
-          {#snippet children(descriptionId)}
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <md-text-button disabled={permissionDisabled} aria-describedby={descriptionId} onclick={() => authorize('pr_cycle')}>
-            Authorize PR cycle
+          <md-text-button disabled={allReviewsDisabled} aria-describedby={descriptionId} onclick={() => authorize('pr_cycle')}>
+            Allow all reviews for this PR
           </md-text-button>
           {/snippet}
           </ButtonHelp>
-          {#if request.authorization !== 'awaiting_lead' || request.validated_model}
-            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <md-text-button disabled={action?.pending} onclick={onRevoke}>Revoke authorization</md-text-button>
-          {/if}
-        </div>
-        {#if action?.pending && action.operation === 'authorize'}
-          <p role="status">Saving authorization…</p>
-        {/if}
-      </section>
+          <ButtonHelp text={permissionHelp ?? (request.authorization === 'one_round' ? 'This permission is already set.' : 'Allow one review of this commit and author discussion. New commits or author replies clear unused permission.')} label="Allow one review" disabled={oneReviewDisabled}>
+          {#snippet children(descriptionId)}
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-filled-button disabled={oneReviewDisabled} aria-describedby={descriptionId} onclick={() => authorize('one_round')}>
+            Allow one review
+          </md-filled-button>
+          {/snippet}
+          </ButtonHelp>
+        {/snippet}
+      </Panel>
     {/if}
     {#if panel === 'preparation' && preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
