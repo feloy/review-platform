@@ -232,10 +232,7 @@ reach a model provider during review.
 
 ## Review authority
 
-New publication seals use the LuthiAI footer.
-Draft verification also accepts the former Review Platform footer
-only when the exact saved body, hash, round, and original artifact still match.
-Existing seals are retained without rewriting the approved text.
+Publication seals use the LuthiAI footer.
 
 The agent can recommend approval in its review text,
 but that recommendation does not grant formal GitHub approval.
