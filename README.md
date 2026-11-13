@@ -113,6 +113,7 @@ The GUI runs at `http://localhost:8080` and guides you through reviews and draft
 Ask your assistant to register the PRs you want to review.
 
 Use **Refresh open PRs** in the header to check open and unchecked PRs for GitHub changes.
+Waiting PRs show a disabled **Queued for refresh** button, which changes to **Refreshing…** when their turn starts.
 The connection indicator reports local live updates;
 hover over it or focus it with the keyboard for details.
 

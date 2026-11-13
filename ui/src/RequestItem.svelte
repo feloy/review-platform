@@ -7,7 +7,7 @@
   import { reviewSituation } from './request-status.js';
   import { tick } from 'svelte';
 
-  let { request, signedIn, checkingSession, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
+  let { request, signedIn, checkingSession, action, refreshQueued = false, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
   let panel = $state(null);
   const detailsId = $props.id();
@@ -46,6 +46,11 @@
   }
 
   async function nextAction() {
+    if (refreshLabel) return;
+    if (situation.action === 'progress') {
+      openPanel('progress');
+      return;
+    }
     if (!signedIn || action?.pending) return;
     switch (situation.action) {
       case 'refresh': await onRefresh(); break;
@@ -74,9 +79,12 @@
     inspected = { ...request };
   }
 
-  const primaryLabel = $derived(action?.pending && situation.action !== 'progress'
-    ? ({ refresh: 'Refreshing…', prepare: 'Checking…', 'view-draft': 'Loading draft…', run: 'Starting review…' }[action.operation] ?? situation.label)
-    : situation.label);
+  const refreshLabel = $derived(refreshQueued ? 'Queued for refresh'
+    : action?.pending && action.operation === 'refresh' ? 'Refreshing…' : null);
+  const primaryDisabled = $derived(Boolean(refreshLabel) || situation.action !== 'progress' && action?.pending);
+  const primaryLabel = $derived(refreshLabel ?? (action?.pending && situation.action !== 'progress'
+    ? ({ prepare: 'Checking…', 'view-draft': 'Loading draft…', run: 'Starting review…' }[action.operation] ?? situation.label)
+    : situation.label));
   const hasDraft = $derived(['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']
     .includes(request.latest_round?.status));
   const managementBlocked = $derived(
@@ -191,7 +199,7 @@
         positioning="popover" anchor-corner="end-end" menu-corner="start-end"
         aria-label={`Actions for ${request.repository} #${request.number}`}
         onopening={() => menuOpen = true} onclosing={() => menuOpen = false}>
-          <md-menu-item type="button" disabled={action?.pending}
+          <md-menu-item type="button" disabled={action?.pending || refreshQueued}
             aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
             onclose-menu={(event) => selectMenuAction(event, onRefresh)}>
             <div slot="headline">{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</div>
@@ -239,21 +247,22 @@
       {#if situation.secondaryAction === 'checks'}
         <a class="secondary-link" href={checksUrl} target="_blank" rel="noopener noreferrer">View checks on GitHub</a>
       {/if}
-      {#if situation.action === 'github' || situation.action === 'checks' || situation.action === 'receipt'}
+      {#if !refreshLabel && (situation.action === 'github' || situation.action === 'checks' || situation.action === 'receipt')}
         <ButtonHelp text={situation.message} label={situation.label}>
           {#snippet children(descriptionId)}
             <a class="primary-link" aria-describedby={descriptionId} href={situation.action === 'checks' ? checksUrl : situation.action === 'receipt' ? request.latest_round?.receipt?.url ?? pullUrl : pullUrl} target="_blank" rel="noopener noreferrer">{situation.label}</a>
           {/snippet}
         </ButtonHelp>
-      {:else if situation.action === 'progress' || situation.action && signedIn}
-        <ButtonHelp text={situation.message} label={situation.label} disabled={situation.action !== 'progress' && action?.pending}>
+      {:else if refreshLabel || situation.action === 'progress' || situation.action && signedIn}
+        <ButtonHelp text={refreshQueued ? 'Waiting for earlier PRs to refresh.' : refreshLabel ? 'Fetching the latest PR inputs from GitHub.' : situation.message}
+          label={refreshLabel ?? situation.label} disabled={primaryDisabled}>
           {#snippet children(descriptionId)}
             <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <md-filled-button disabled={situation.action !== 'progress' && action?.pending} aria-describedby={descriptionId}
-              aria-expanded={situation.action === 'progress' ? panel === 'progress' : undefined}
-              aria-controls={situation.action === 'progress' ? `${detailsId}-progress` : undefined}
-              onclick={() => situation.action === 'progress' ? openPanel('progress') : nextAction()}>{primaryLabel}</md-filled-button>
+            <md-filled-button disabled={primaryDisabled} aria-describedby={descriptionId}
+              aria-expanded={!refreshLabel && situation.action === 'progress' ? panel === 'progress' : undefined}
+              aria-controls={!refreshLabel && situation.action === 'progress' ? `${detailsId}-progress` : undefined}
+              onclick={nextAction}>{primaryLabel}</md-filled-button>
           {/snippet}
         </ButtonHelp>
       {:else if situation.action && !checkingSession}
