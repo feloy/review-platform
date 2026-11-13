@@ -2,7 +2,7 @@
 
 use crate::storage;
 use anyhow::Result;
-use review_platform::{
+use luthiai::{
     DisplayContextOutcome, InputRevision, PrKey, PullDisplay, PullDisplayState, RefreshOutcome,
     RequestDisplayContext,
     github::{PullRequest, PullRequestState, checks::CheckSummary},
@@ -87,7 +87,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use review_platform::{
+    use luthiai::{
         HeadSha, ObservedDiscussion, State,
         config::{ModelId, PromptHash},
         preparation::Readiness,
@@ -140,7 +140,7 @@ mod tests {
         Ok(PreparationResponse {
             head_sha: context.head_sha().clone(),
             revision: context.revision(),
-            authorization: review_platform::Authorization::AwaitingLead,
+            authorization: luthiai::Authorization::AwaitingLead,
             configuration_sha256: PromptHash::new("a".repeat(64)).unwrap(),
             checks: CheckSummary::Green,
             readiness: Readiness::AwaitingAuthorization,

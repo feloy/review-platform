@@ -24,7 +24,7 @@ End-user installation and workflow documentation lives in [README.md](README.md)
   publish or reject drafts, validate or change the daemon's proposed model,
   and monitor reviews.
   It may be a CLI, terminal UI, or graphical UI.
-- **OpenShell gateway**: Runs independently of Review Platform.
+- **OpenShell gateway**: Runs independently of LuthiAI.
   Its operator manages gateway access, provider profiles, provider credentials, and rotation.
 - **OpenShell sandbox**: Runs a selected agent, such as Claude or Codex, from the VM archive configured for that repository and agent,
   with instructions and named providers selected by the daemon.
@@ -115,12 +115,12 @@ rectangles show other actions, rounded boxes show waits, and diamonds show decis
 
 ## OpenShell gateway and sandboxes
 
-Review Platform connects to an existing gateway selected explicitly in its configuration.
+LuthiAI connects to an existing gateway selected explicitly in its configuration.
 It does not start or stop the gateway, change its configuration,
 create or update providers, or rotate their credentials.
 The gateway operator configures a compatible model provider and a GitHub provider
 whose policy enforces read-only REST access for the reviewing agent.
-For each round, Review Platform checks authenticated gateway access and the expected
+For each round, LuthiAI checks authenticated gateway access and the expected
 named providers, then creates, monitors, and removes its own sandbox.
 
 The trusted configuration names the driver and supplies the verified VM image,
@@ -136,7 +136,7 @@ Project prompts can be read below such directories;
 resolved runner and archive paths retain their UTF-8 requirements.
 Referenced image and policy files are not canonicalized;
 their existing traversal, symlink, and checksum checks still apply.
-Review Platform fixes the mount targets, TTY and restart behavior,
+LuthiAI fixes the mount targets, TTY and restart behavior,
 and each agent adapter's command rules in code.
 The runner accepts only a configured `vm` driver for now and checks that the gateway supports it.
 It reports `podman` as unsupported or an unknown driver as invalid
@@ -222,7 +222,7 @@ Publishing, rejecting, or recovering an existing draft does not require the gate
 | **Prompt injection** | Treat PR files, comments, and commit messages as untrusted. The daemon's system instruction tells the agent to follow only daemon-provided review instructions. |
 | **GitHub access** | Give the agent read-only access through an operator-configured OpenShell provider. Keep credentials used to post reviews under daemon control. |
 | **Gateway and VM archives** | Authenticate access to the explicitly selected, operator-managed gateway. Require its expected providers before dispatch. Let only authorized operators configure archives, require SHA-256 checksums, and verify a private copy before execution. Pin any OCI source images by digest. |
-| **Secrets and rotation** | Protect GitHub and model credentials in storage and logs. The gateway operator rotates provider credentials; Review Platform never manages them. |
+| **Secrets and rotation** | Protect GitHub and model credentials in storage and logs. The gateway operator rotates provider credentials; LuthiAI never manages them. |
 | **Review freshness** | Bind CI results and each draft to the PR commit and author comments reviewed. Flag a draft if either changes before the lead publishes it. |
 | **Identity and resource use** | Verify author requests and lead decisions. Limit repeated runs when author comments trigger reviews during PR-wide authorization. Treat model co-author information as a hint for the lead to validate. |
 | **Draft publication** | Show the lead the exact text that will be posted. Record who published or rejected it; a rejected draft stays off the PR. |
@@ -231,6 +231,11 @@ The source code is public, but an accidentally committed secret could still
 reach a model provider during review.
 
 ## Review authority
+
+New publication seals use the LuthiAI footer.
+Draft verification also accepts the former Review Platform footer
+only when the exact saved body, hash, round, and original artifact still match.
+Existing seals are retained without rewriting the approved text.
 
 The agent can recommend approval in its review text,
 but that recommendation does not grant formal GitHub approval.
@@ -281,15 +286,15 @@ image environment, read-only mounts, private output retrieval,
 and sandbox cleanup without calling a model:
 
 ```sh
-REVIEW_PLATFORM_LIVE_VM_CONFIG=/absolute/path/to/private-config.json \
+LUTHIAI_LIVE_VM_CONFIG=/absolute/path/to/private-config.json \
   cargo test --test live_vm -- --ignored
 ```
 
 The config must point to an existing VM tar, its `.config.json` metadata,
 and a policy with correct checksums.
-Set `REVIEW_PLATFORM_LIVE_VM_DIR` when the gateway requires test paths
+Set `LUTHIAI_LIVE_VM_DIR` when the gateway requires test paths
 on a particular host directory.
-Set `REVIEW_PLATFORM_LIVE_VM_REPOSITORY` when the configuration does not
+Set `LUTHIAI_LIVE_VM_REPOSITORY` when the configuration does not
 include the test's default `owner/repo` repository.
 The test checks the executable and CLI flags for the first resolved agent,
 so a configuration selecting Codex exercises its VM image as well.

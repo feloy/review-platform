@@ -1,7 +1,7 @@
 //! Shared, read-only private draft inspection and GitHub freshness checks.
 
 use crate::{review_commands::round_path, storage};
-use review_platform::{
+use luthiai::{
     PrKey, State,
     github::GithubClient,
     publication::SealedBody,
@@ -89,14 +89,15 @@ pub fn read_verified(
     {
         return Err(DraftError::ArtifactMismatch);
     }
-    let seal = SealedBody::new(draft.comments(), id.as_str(), artifact_hash);
-    if record.sealed_body().is_some_and(|recorded| {
-        recorded.body() != seal.body()
-            || recorded.hash() != seal.hash()
-            || recorded.artifact_hash() != seal.artifact_hash()
-    }) {
-        return Err(DraftError::SealChanged);
-    }
+    let seal = match record.sealed_body() {
+        Some(recorded) => {
+            if !recorded.matches_draft(draft.comments(), id.as_str(), &artifact_hash) {
+                return Err(DraftError::SealChanged);
+            }
+            recorded.clone()
+        }
+        None => SealedBody::new(draft.comments(), id.as_str(), artifact_hash),
+    };
     Ok(InspectedDraft {
         record: record.clone(),
         draft,

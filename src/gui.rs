@@ -24,7 +24,7 @@ use axum::{
 };
 use futures_util::{Stream, stream};
 use include_dir::{Dir, include_dir};
-use review_platform::{
+use luthiai::{
     Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, ModelValidationError,
     PrKey, RefreshOutcome, StateError,
     config::{AgentId, ModelId, PromptHash},
@@ -108,12 +108,12 @@ struct RoundSummary {
     agent: String,
     failure: Option<FailureKind>,
     freshness: Option<Freshness>,
-    receipt: Option<review_platform::publication::PublicationReceipt>,
+    receipt: Option<luthiai::publication::PublicationReceipt>,
     created_at: u64,
     dispatched_at: Option<u64>,
     finished_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    task: Option<review_platform::prompt_builder::ReviewTask>,
+    task: Option<luthiai::prompt_builder::ReviewTask>,
 }
 
 #[derive(Serialize)]
@@ -320,7 +320,7 @@ struct RunRequest {
     revision: InputRevision,
     rules: InspectedRules,
     #[serde(default)]
-    review_mode: review_platform::prompt_builder::ReviewMode,
+    review_mode: luthiai::prompt_builder::ReviewMode,
 }
 
 #[derive(Serialize)]
@@ -409,7 +409,7 @@ pub fn run(state_override: Option<PathBuf>, config_override: Option<PathBuf>) ->
         let listener = tokio::net::TcpListener::bind(ADDRESS)
             .await
             .context("binding GUI to 127.0.0.1:8080")?;
-        println!("Review Platform GUI: http://localhost:8080/?code={bootstrap}");
+        println!("LuthiAI GUI: http://localhost:8080/?code={bootstrap}");
         let session = Session {
             bootstrap: Some(bootstrap),
             token,
@@ -976,13 +976,13 @@ fn refresh_error(error: request_commands::RefreshError) -> (StatusCode, Json<Api
             | GithubError::TokenNotUtf8,
         ) => api_error(
             StatusCode::BAD_GATEWAY,
-            "Check REVIEW_PLATFORM_GITHUB_TOKEN_RO and restart the GUI.",
+            "Check LUTHIAI_GITHUB_TOKEN_RO and restart the GUI.",
         ),
         RefreshError::Github(
             GithubError::AuthenticationRequired { .. } | GithubError::PermissionDenied { .. },
         ) => api_error(
             StatusCode::BAD_GATEWAY,
-            "Check GitHub read access and REVIEW_PLATFORM_GITHUB_TOKEN_RO.",
+            "Check GitHub read access and LUTHIAI_GITHUB_TOKEN_RO.",
         ),
         RefreshError::Github(GithubError::RateLimited) => api_error(
             StatusCode::BAD_GATEWAY,
@@ -1010,14 +1010,14 @@ fn refresh_error(error: request_commands::RefreshError) -> (StatusCode, Json<Api
 
 async fn api_info() -> impl IntoResponse {
     Json(ApiInfo {
-        name: "Review Platform API",
+        name: "LuthiAI API",
         version: 1,
     })
 }
 
 async fn hello() -> impl IntoResponse {
     Json(Greeting {
-        message: "Hello from the Review Platform API!",
+        message: "Hello from the LuthiAI API!",
     })
 }
 
@@ -1244,7 +1244,7 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use futures_util::StreamExt;
-    use review_platform::{
+    use luthiai::{
         AuthorizationScope, CommentFingerprint, CommentHash, HeadSha, InputRevision,
         ObservedDiscussion, PrKey, State,
     };
@@ -1325,7 +1325,7 @@ mod tests {
 
     #[test]
     fn run_scope_accepts_only_typed_lead_preferences() {
-        use review_platform::prompt_builder::ReviewMode;
+        use luthiai::prompt_builder::ReviewMode;
         let mut body = validation_body();
         assert_eq!(
             serde_json::from_value::<RunRequest>(body.clone())
@@ -1350,14 +1350,14 @@ mod tests {
 
     #[test]
     fn signed_in_run_delivers_the_selected_scope_to_the_server_job() {
-        use review_platform::prompt_builder::ReviewMode;
+        use luthiai::prompt_builder::ReviewMode;
         fn check_mode(
             _: &Path,
             _: &Path,
             key: &PrKey,
             inspected: &review_commands::InspectedRun,
             _: Arc<std::sync::atomic::AtomicBool>,
-            _: &mut dyn FnMut(&review_platform::review::RoundId),
+            _: &mut dyn FnMut(&luthiai::review::RoundId),
         ) -> Result<(), review_commands::RunError> {
             let expected = if key.number() == 15 {
                 ReviewMode::Auto
@@ -1416,7 +1416,7 @@ mod tests {
         key: &PrKey,
         inspected: &review_commands::InspectedRun,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-        started: &mut dyn FnMut(&review_platform::review::RoundId),
+        started: &mut dyn FnMut(&luthiai::review::RoundId),
     ) -> Result<(), review_commands::RunError> {
         use review_commands::{InspectionError, RunError};
         assert_eq!(config_file, state_file.with_extension("config.json"));
@@ -1449,7 +1449,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             if phase == "begin" {
-                started(&review_platform::review::RoundId::new("r-gui").unwrap());
+                started(&luthiai::review::RoundId::new("r-gui").unwrap());
             }
         }
         Ok(())
@@ -2112,17 +2112,15 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             (
-                PrepareError::Config(
-                    review_platform::config::ConfigError::RepositoryNotConfigured(
-                        "private/repo".into(),
-                    ),
-                ),
+                PrepareError::Config(luthiai::config::ConfigError::RepositoryNotConfigured(
+                    "private/repo".into(),
+                )),
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
             (
-                PrepareError::Archive(review_platform::archive::ArchiveError::NotRegular(
-                    PathBuf::from("/private/secret.tar"),
-                )),
+                PrepareError::Archive(luthiai::archive::ArchiveError::NotRegular(PathBuf::from(
+                    "/private/secret.tar",
+                ))),
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
             (

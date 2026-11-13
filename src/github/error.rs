@@ -6,22 +6,20 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GithubError {
-    #[error("REVIEW_PLATFORM_GITHUB_TOKEN_RO must be UTF-8")]
+    #[error("LUTHIAI_GITHUB_TOKEN_RO must be UTF-8")]
     TokenNotUtf8,
-    #[error("REVIEW_PLATFORM_GITHUB_TOKEN_RO contains invalid header characters")]
+    #[error("LUTHIAI_GITHUB_TOKEN_RO contains invalid header characters")]
     InvalidTokenHeader,
-    #[error(
-        "GitHub requires authentication to read {resource}; set REVIEW_PLATFORM_GITHUB_TOKEN_RO"
-    )]
+    #[error("GitHub requires authentication to read {resource}; set LUTHIAI_GITHUB_TOKEN_RO")]
     AuthenticationRequired { resource: String },
-    #[error("GitHub rejected REVIEW_PLATFORM_GITHUB_TOKEN_RO; check the token and try again")]
+    #[error("GitHub rejected LUTHIAI_GITHUB_TOKEN_RO; check the token and try again")]
     InvalidCredentials,
-    #[error("GitHub API rate limit reached; set REVIEW_PLATFORM_GITHUB_TOKEN_RO or retry later")]
+    #[error("GitHub API rate limit reached; set LUTHIAI_GITHUB_TOKEN_RO or retry later")]
     RateLimited,
     #[error("GitHub {resource} was not found or is not accessible")]
     NotFound { resource: String },
     #[error(
-        "GitHub denied access to {resource}; check read permissions on REVIEW_PLATFORM_GITHUB_TOKEN_RO"
+        "GitHub denied access to {resource}; check read permissions on LUTHIAI_GITHUB_TOKEN_RO"
     )]
     PermissionDenied { resource: String },
     #[error("GitHub returned HTTP {status} while inspecting {resource}")]

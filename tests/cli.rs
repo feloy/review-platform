@@ -1,8 +1,8 @@
 //! CLI integration tests for persisted decisions and platform file paths.
 
-use review_platform::publication::{PublicationHash, PublicationReceipt, SealedBody};
-use review_platform::review::RoundId;
-use review_platform::{HeadSha, ObservedDiscussion, PrKey, State};
+use luthiai::publication::{PublicationHash, PublicationReceipt, SealedBody};
+use luthiai::review::RoundId;
+use luthiai::{HeadSha, ObservedDiscussion, PrKey, State};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -11,7 +11,7 @@ const HEAD_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HEAD_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn run_output(state_file: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .arg("--state-file")
         .arg(state_file)
         .args(args)
@@ -40,11 +40,11 @@ fn run_failing(state_file: &Path, args: &[&str]) -> String {
 }
 
 fn show_draft_offline(state_file: &Path) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let output = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .arg("--state-file")
         .arg(state_file)
         .args(["show-draft", "owner/repo", "42", "--round", "r-draft"])
-        .env("REVIEW_PLATFORM_GITHUB_TOKEN_RO", "bad\nheader")
+        .env("LUTHIAI_GITHUB_TOKEN_RO", "bad\nheader")
         .output()
         .unwrap();
     assert!(
@@ -70,7 +70,7 @@ fn observe_empty_discussion(state_file: &Path, head: &str) -> u64 {
 fn config_path_uses_platform_config_independently_of_state_override() {
     let dir = tempfile::tempdir().unwrap();
     let state_file = dir.path().join("state.json");
-    let expected = directories::ProjectDirs::from("", "", "review-platform")
+    let expected = directories::ProjectDirs::from("", "", "luthiai")
         .unwrap()
         .config_dir()
         .join("config.json");
@@ -79,7 +79,7 @@ fn config_path_uses_platform_config_independently_of_state_override() {
     assert!(!state_file.exists());
 
     let override_path = dir.path().join("operator-config.json");
-    let output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let output = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .args([
             "--config-file",
             override_path.to_str().unwrap(),
@@ -262,7 +262,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
         .hash()
         .to_string();
     let displayed = show_draft_offline(&state_file);
-    assert!(displayed.contains("Finding\n\n_Agent review via Review Platform (round r-draft)._"));
+    assert!(displayed.contains("Finding\n\n_Agent review via LuthiAI (round r-draft)._"));
     assert!(displayed.contains(&format!("--body-hash {body_hash}")));
     assert!(displayed.contains("Publish command:"));
     assert!(displayed.contains("freshness: unknown"));
@@ -301,7 +301,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
         .finish_publication_attempt(
             &round_id,
             attempt,
-            review_platform::publication::AttemptOutcome::Unknown,
+            luthiai::publication::AttemptOutcome::Unknown,
             6,
         )
         .unwrap();
@@ -328,7 +328,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
     recovered.validate().unwrap();
     assert_eq!(
         recovered.round(&round_id).unwrap().status(),
-        review_platform::review::RoundStatus::AwaitingDecision
+        luthiai::review::RoundStatus::AwaitingDecision
     );
     assert!(show_draft_offline(&uncertain_file).contains("Publish command:"));
 
@@ -398,7 +398,7 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
         "repositories": []
     });
     std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
-    let missing_token = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let missing_token = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .arg("--state-file")
         .arg(&state_file)
         .arg("--config-file")
@@ -412,14 +412,14 @@ fn reject_draft_preserves_the_artifact_and_later_authorization() {
             "--body-hash",
             &body_hash,
         ])
-        .env_remove("REVIEW_PLATFORM_GITHUB_TOKEN_RW")
+        .env_remove("LUTHIAI_GITHUB_TOKEN_RW")
         .output()
         .unwrap();
     assert!(!missing_token.status.success());
     assert!(
         String::from_utf8(missing_token.stderr)
             .unwrap()
-            .contains("REVIEW_PLATFORM_GITHUB_TOKEN_RW")
+            .contains("LUTHIAI_GITHUB_TOKEN_RW")
     );
     assert_eq!(std::fs::read(&draft_file).unwrap(), draft);
     assert_eq!(std::fs::read(&agent_file).unwrap(), original);
@@ -577,8 +577,8 @@ fn oversized_draft_stays_sealed_and_rejectable_without_a_publish_command() {
             vec![],
             4
         ),
-        Err(review_platform::review::RoundStateError::Publication(
-            review_platform::publication::PublicationStateError::BodyTooLong { .. }
+        Err(luthiai::review::RoundStateError::Publication(
+            luthiai::publication::PublicationStateError::BodyTooLong { .. }
         ))
     ));
     let error = run_failing(
@@ -615,7 +615,7 @@ fn oversized_draft_stays_sealed_and_rejectable_without_a_publish_command() {
 #[cfg(unix)]
 #[test]
 fn recovery_preserves_a_saved_draft_when_sandbox_stop_fails() {
-    use review_platform::review::{RoundId, RoundStatus, read_saved_draft};
+    use luthiai::review::{RoundId, RoundStatus, read_saved_draft};
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
@@ -692,7 +692,7 @@ fn recovery_preserves_a_saved_draft_when_sandbox_stop_fails() {
     )
     .unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let result = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .args(["--state-file", state_file.to_str().unwrap()])
         .args(["--config-file", config_file.to_str().unwrap()])
         .args(["recover-review", "owner/repo", "42"])
@@ -886,11 +886,11 @@ fn refresh_requires_a_request_and_failed_fetch_preserves_the_state_file() {
     run(&state_file, &["request", "owner/repo", "42", HEAD_A]);
     let before = std::fs::read(&state_file).unwrap();
     let secret = "secret\nwith-newline";
-    let output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let output = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .arg("--state-file")
         .arg(&state_file)
         .args(["refresh", "owner/repo", "42"])
-        .env("REVIEW_PLATFORM_GITHUB_TOKEN_RO", secret)
+        .env("LUTHIAI_GITHUB_TOKEN_RO", secret)
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -983,7 +983,7 @@ fn state_path_resolves_relative_override_without_reading_state() {
     let state_file = dir.path().join("broken.json");
     std::fs::write(&state_file, "not JSON").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let output = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .current_dir(dir.path())
         .args(["--state-file", "broken.json", "state-path"])
         .output()
@@ -1014,8 +1014,8 @@ fn state_path_resolves_relative_override_without_reading_state() {
 #[test]
 fn default_state_file_uses_xdg_state_home() {
     let dir = tempfile::tempdir().unwrap();
-    let state_file = dir.path().join("review-platform/state.json");
-    let path_output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let state_file = dir.path().join("luthiai/state.json");
+    let path_output = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .env("XDG_STATE_HOME", dir.path())
         .arg("state-path")
         .output()
@@ -1027,7 +1027,7 @@ fn default_state_file_uses_xdg_state_home() {
     );
     assert!(!state_file.exists());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_review-platform"))
+    let output = Command::new(env!("CARGO_BIN_EXE_luthiai"))
         .env("XDG_STATE_HOME", dir.path())
         .args(["request", "owner/repo", "42", HEAD_A])
         .output()

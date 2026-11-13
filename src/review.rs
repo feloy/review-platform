@@ -25,7 +25,7 @@ pub const OUTPUT_SCHEMA: &str = r#"{
   "required": ["status", "comments", "lead_advice"],
   "additionalProperties": false
 }"#;
-pub const OUTPUT_MARKER: &str = "REVIEW_PLATFORM_OUTPUT_PENDING";
+pub const OUTPUT_MARKER: &str = "LUTHIAI_OUTPUT_PENDING";
 pub const AGENT_OUTPUT_LIMIT: u64 = 1024 * 1024;
 const SAVED_DRAFT_LIMIT: u64 = 66 * 1024 * 1024;
 
@@ -507,13 +507,10 @@ impl RoundRecord {
                 && (self.dispatched_at.is_none() || self.cleanup_pending || self.incomplete_log))
             || (matches!(self.status, RoundStatus::Failed | RoundStatus::Interrupted)
                 && (self.finished_at.is_none() || self.failure.is_none()))
-            || self.sealed_body.as_ref().is_some_and(|seal| {
-                !seal.validate()
-                    || !seal.body().ends_with(&format!(
-                        "_Agent review via Review Platform (round {})._",
-                        self.id
-                    ))
-            })
+            || self
+                .sealed_body
+                .as_ref()
+                .is_some_and(|seal| !seal.validate_for_round(self.id.as_str()))
             || (!self.attempts.is_empty() && self.sealed_body.is_none())
             || self.attempts.iter().any(|attempt| {
                 self.sealed_body.as_ref().is_none_or(|seal| {

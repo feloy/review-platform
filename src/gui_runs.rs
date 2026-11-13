@@ -4,7 +4,7 @@ use crate::{
     gui_diagnostics,
     review_commands::{InspectedRun, RunError},
 };
-use review_platform::{PrKey, review::RoundId};
+use luthiai::{PrKey, review::RoundId};
 use serde::Serialize;
 use std::{
     collections::HashMap,

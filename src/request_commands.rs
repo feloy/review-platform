@@ -1,7 +1,7 @@
 //! Shared PR management, refresh, and lead authorization commands for the CLI and UI.
 
 use crate::{review_commands, storage};
-use review_platform::{
+use luthiai::{
     AuthorizationScope, HeadSha, InputRevision, PrKey, RefreshOutcome, StateError,
     github::{GithubClient, GithubError, PullRequest, discussion::PullObservation},
     review::RoundId,
