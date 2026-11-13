@@ -32,6 +32,8 @@ pub enum OpenShellError {
     },
     #[error("OpenShell {0} failed; check gateway authentication, connectivity, and operator logs")]
     Failed(&'static str),
+    #[error("OpenShell sandbox name exceeds the 19-character limit")]
+    SandboxNameTooLong,
     #[error("gateway does not report vm driver support")]
     VmUnavailable,
     #[error("required provider {0} is unavailable")]
@@ -345,6 +347,9 @@ impl<'a> OpenShell<'a> {
     ) -> Result<Vec<OsString>, OpenShellError> {
         if self.config.driver() != Driver::Vm {
             return Err(OpenShellError::PodmanUnsupported);
+        }
+        if round.sandbox().len() > 19 {
+            return Err(OpenShellError::SandboxNameTooLong);
         }
         let driver = serde_json::json!({"vm":{"mounts":[
             {"type":"bind","source":mounts.checkout,"target":sandbox_layout::CHECKOUT_TARGET,"read_only":true},
@@ -670,7 +675,7 @@ mod tests {
         let key = PrKey::new("owner/repo", 42).unwrap();
         let choice = config.review_models_for(&key).unwrap();
         let record = RoundRecord::new(
-            RoundId::new("r-test").unwrap(),
+            RoundId::new("r-VgdQi9").unwrap(),
             key,
             HeadSha::new("a".repeat(40)).unwrap(),
             InputRevision::new(2).unwrap(),
@@ -714,6 +719,9 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
+        assert!(args.windows(2).any(|items| {
+            items[0] == "--name" && items[1] == "luthiai-kztwiuljhe" && items[1].len() <= 19
+        }));
         assert!(args.contains(&"--no-auto-providers".to_owned()));
         assert!(!args.contains(&"--auto-providers".to_owned()));
         assert_eq!(
@@ -760,6 +768,34 @@ mod tests {
             mounts["vm"]["mounts"][2]["target"],
             sandbox_layout::OUTPUT_TARGET
         );
+        let oversized = RoundRecord::new(
+            RoundId::new("r-abcdefghijklmn").unwrap(),
+            record.key().clone(),
+            record.head_sha().clone(),
+            record.revision(),
+            record.discussion().clone(),
+            &choice[0],
+            1,
+        );
+        let before = fs::read(&calls).unwrap();
+        assert!(matches!(
+            shell.create(
+                &oversized,
+                choice[0].agent().runner(),
+                &StagedArchive::for_test(
+                    PathBuf::from("/tmp/archive.tar"),
+                    std::collections::BTreeMap::new(),
+                ),
+                &policy,
+                &SandboxMounts::new(
+                    Path::new("/tmp/src"),
+                    Path::new("/tmp/instructions"),
+                    Path::new("/tmp/output"),
+                ),
+            ),
+            Err(OpenShellError::SandboxNameTooLong)
+        ));
+        assert_eq!(fs::read(&calls).unwrap(), before);
         let mut conflicting = raw.clone();
         conflicting["agents"][0]["runner"]["environment"] = serde_json::json!({"PATH":"/bin"});
         let conflicting = ReviewConfig::from_json(

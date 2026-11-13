@@ -54,6 +54,33 @@ impl RoundId {
 
 fn sandbox_name(id: &RoundId) -> String {
     const PREFIX: &str = "luthiai-";
+    const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    // The fixed r- prefix adds no identity. Base32 preserves case-sensitive
+    // suffixes and fits six generated characters within OpenShell's 19-byte limit.
+    let suffix = &id.as_str().as_bytes()[2..];
+    let mut name = String::with_capacity(PREFIX.len() + (suffix.len() * 8).div_ceil(5));
+    name.push_str(PREFIX);
+    let mut pending = 0u16;
+    let mut bits = 0;
+    for &byte in suffix {
+        pending = (pending << 8) | u16::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            name.push(char::from(BASE32[usize::from((pending >> bits) & 31)]));
+        }
+    }
+    if bits != 0 {
+        name.push(char::from(
+            BASE32[usize::from((pending << (5 - bits)) & 31)],
+        ));
+    }
+    name
+}
+
+fn previous_sandbox_name(id: &RoundId) -> String {
+    // Preserve recorded identities for inspecting and cleaning up pre-fix rounds.
+    const PREFIX: &str = "luthiai-";
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut name = String::with_capacity(PREFIX.len() + id.as_str().len() * 2);
     name.push_str(PREFIX);
@@ -496,7 +523,8 @@ impl RoundRecord {
         self.incomplete_log = incomplete_log;
     }
     pub(crate) fn validate(&self) -> Result<(), RoundStateError> {
-        if self.sandbox != sandbox_name(&self.id)
+        if (self.sandbox != sandbox_name(&self.id)
+            && self.sandbox != previous_sandbox_name(&self.id))
             || self.created_at == 0
             || (self.status == RoundStatus::Starting && self.dispatched_at.is_some())
             || (self.status == RoundStatus::Running && self.dispatched_at.is_none())
@@ -849,17 +877,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sandbox_names_are_lowercase_and_preserve_round_id_uniqueness() {
+    fn sandbox_names_fit_openshell_and_preserve_case_sensitive_round_ids() {
         let upper = RoundId::new("r-YHmnDT").unwrap();
         let lower = RoundId::new("r-yhmndt").unwrap();
         let upper_name = sandbox_name(&upper);
-        assert_eq!(upper_name, "luthiai-722d59486d6e4454");
+        assert_eq!(upper_name, "luthiai-lfeg23sekq");
         assert_ne!(upper_name, sandbox_name(&lower));
         assert!(
             upper_name
                 .bytes()
                 .all(|byte| { byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' })
         );
+        for suffix in ["VgdQi9", "000000", "zzzzzz", "ZZZZZZ", "------"] {
+            let name = sandbox_name(&RoundId::new(format!("r-{suffix}")).unwrap());
+            assert!(name.starts_with("luthiai-"));
+            assert!(name.len() <= 19);
+            assert!(!name.contains("--"));
+        }
     }
     #[test]
     fn strict_agent_contract_preserves_private_and_public_text() {

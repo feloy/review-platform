@@ -137,6 +137,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Bind configuration fingerprints to that directory and preserve referenced-file traversal, symlink, and checksum checks.
   Keep executable paths inside the VM absolute.
   Keep review mount targets, access modes, and mandatory lifecycle restrictions fixed in code.
+  Keep generated sandbox names within OpenShell's 19-character limit
+  while preserving case-sensitive round identities.
   Read the driver type from configuration; support only `vm` for now
   and report `podman` as unsupported or unknown names as invalid
   before creating a sandbox.
