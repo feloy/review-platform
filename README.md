@@ -706,8 +706,6 @@ The rename to LuthiAI changes the default directories to `luthiai`
 and the environment-variable prefix to `LUTHIAI_`.
 Existing files are not moved automatically.
 Use `--state-file` and `--config-file` to keep using their existing locations.
-Previously sealed publication bodies retain their original footer and hash;
-new bodies use LuthiAI.
 
 The state file and configuration file have separate schema versions.
 The current state schema is version 8.

@@ -125,7 +125,7 @@ impl SealedBody {
         self.validate() && self.comments_for_round(round_id).is_some()
     }
 
-    /// Verify saved comments without changing a body sealed before the project rename.
+    /// Verify the exact saved comments, round, and original artifact.
     pub fn matches_draft(
         &self,
         comments: &str,
@@ -138,11 +138,9 @@ impl SealedBody {
     }
 
     fn comments_for_round(&self, round_id: &str) -> Option<&str> {
-        ["LuthiAI", "Review Platform"].into_iter().find_map(|name| {
-            self.body.strip_suffix(&format!(
-                "\n\n_Agent review via {name} (round {round_id})._"
-            ))
-        })
+        self.body.strip_suffix(&format!(
+            "\n\n_Agent review via LuthiAI (round {round_id})._"
+        ))
     }
 }
 
@@ -429,27 +427,35 @@ mod tests {
     }
 
     #[test]
-    fn draft_verification_accepts_both_footers_only_with_matching_saved_inputs() {
+    fn draft_verification_requires_matching_saved_inputs() {
         let comments = "Finding with a trailing newline\n";
         let artifact_hash = PublicationHash::of(b"artifact");
-        for name in ["LuthiAI", "Review Platform"] {
-            let body = format!("{comments}\n\n_Agent review via {name} (round r-test)._");
-            let mut seal = SealedBody {
-                hash: PublicationHash::of(body.as_bytes()),
-                body,
-                artifact_hash: artifact_hash.clone(),
-            };
-            assert!(seal.validate_for_round("r-test"));
-            assert!(seal.matches_draft(comments, "r-test", &artifact_hash));
-            assert!(!seal.matches_draft(comments.trim_end(), "r-test", &artifact_hash));
-            assert!(!seal.matches_draft(comments, "r-other", &artifact_hash));
-            assert!(!seal.matches_draft(comments, "r-test", &PublicationHash::of(b"changed")));
-            assert!(!seal.validate_for_round("r-other"));
+        let mut seal = SealedBody::new(comments, "r-test", artifact_hash.clone());
+        assert!(seal.validate_for_round("r-test"));
+        assert!(seal.matches_draft(comments, "r-test", &artifact_hash));
+        assert!(!seal.matches_draft(comments.trim_end(), "r-test", &artifact_hash));
+        assert!(!seal.matches_draft(comments, "r-other", &artifact_hash));
+        assert!(!seal.matches_draft(comments, "r-test", &PublicationHash::of(b"changed")));
+        assert!(!seal.validate_for_round("r-other"));
 
-            seal.hash = PublicationHash::of(b"changed");
-            assert!(!seal.validate_for_round("r-test"));
-            assert!(!seal.matches_draft(comments, "r-test", &artifact_hash));
-        }
+        seal.hash = PublicationHash::of(b"changed");
+        assert!(!seal.validate_for_round("r-test"));
+        assert!(!seal.matches_draft(comments, "r-test", &artifact_hash));
+    }
+
+    #[test]
+    fn legacy_footer_is_rejected_even_with_matching_comments_artifact_and_body_hash() {
+        let comments = "Finding";
+        let artifact_hash = PublicationHash::of(b"artifact");
+        let body = format!("{comments}\n\n_Agent review via Review Platform (round r-test)._");
+        let seal = SealedBody {
+            hash: PublicationHash::of(body.as_bytes()),
+            body,
+            artifact_hash: artifact_hash.clone(),
+        };
+        assert!(seal.validate());
+        assert!(!seal.validate_for_round("r-test"));
+        assert!(!seal.matches_draft(comments, "r-test", &artifact_hash));
     }
 
     #[test]

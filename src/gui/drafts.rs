@@ -1191,38 +1191,29 @@ mod tests {
     }
 
     #[test]
-    fn pre_rename_seals_keep_their_exact_body_and_hash_through_inspection_and_rejection() {
+    fn legacy_footer_fails_state_and_draft_verification_without_rewriting_saved_text() {
         let directory = tempfile::tempdir().unwrap();
         let path = fixture(directory.path());
         let body = format!("{COMMENTS}\n\n_Agent review via Review Platform (round r-draft)._");
         let hash = PublicationHash::of(body.as_bytes());
         let mut state: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        state["rounds"][0]["sealed_body"]["body"] = body.clone().into();
+        state["rounds"][0]["sealed_body"]["body"] = body.into();
         state["rounds"][0]["sealed_body"]["hash"] = hash.to_string().into();
-        state["rounds"][0]["cleanup_pending"] = false.into();
         fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
         let original = fs::read(&path).unwrap();
         let key = PrKey::new("owner/repo", 15).unwrap();
         let id = RoundId::new("r-draft").unwrap();
-        let inspected = offline_inspect(&path, &key, &id).unwrap();
-        assert_eq!(inspected.seal().body(), body);
-        assert_eq!(inspected.seal().hash(), &hash);
-        assert_eq!(fs::read(&path).unwrap(), original);
-
-        let request = rejection_body(&path);
-        runtime().block_on(async {
-            let response = app(path.clone(), None, offline_inspect)
-                .oneshot(post_rejection(&request))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-        });
-        let saved = storage::load(&path).unwrap();
-        let round = saved.round(&id).unwrap();
-        assert_eq!(round.status(), RoundStatus::Rejected);
-        assert_eq!(round.sealed_body().unwrap().body(), body);
-        assert_eq!(round.sealed_body().unwrap().hash(), &hash);
+        let state: State = serde_json::from_value(state).unwrap();
+        assert_eq!(
+            state.validate(),
+            Err(luthiai::StateError::InvalidRound(id.to_string()))
+        );
+        assert!(matches!(
+            draft_commands::read_verified(&path, &state, &key, &id),
+            Err(DraftError::SealChanged)
+        ));
+        assert_eq!(fs::read(path).unwrap(), original);
     }
 
     #[test]
