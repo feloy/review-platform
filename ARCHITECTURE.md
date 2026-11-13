@@ -145,6 +145,9 @@ Interrupted reviews require `recover-review`; uncertain publication requires `re
 Neither recovery automatically reruns the reviewer or retries the post.
 
 Decision panels retain the inputs the lead inspected across live updates.
+Each PR shows one primary workflow action, with technical state behind Details.
+Progress and recovery instructions open in a separate activity panel without expanding the PR metadata.
+Opening an action panel closes the previous panel without retargeting an inspected decision.
 Authorization binds to the recorded head and revision;
 model validation also binds to the inspected authorization and configuration.
 Draft decisions bind to the round and publication body hash,

@@ -116,6 +116,16 @@ Use **Refresh open PRs** in the header to check open and unchecked PRs for GitHu
 The connection indicator reports local live updates;
 hover over it or focus it with the keyboard for details.
 
+Each PR row shows its title, one review status, and the next action.
+The footer shows CI results and when GitHub was last checked.
+Use **Details** for recorded inputs, permission, model, discussion counts, and round metadata.
+**Show progress** and **View issue** open a separate panel for review activity and recovery instructions.
+Past activity remains available through **Review activity** in Details.
+The **⋮** menu contains refresh, review permissions, and stop managing.
+Only one decision panel opens at a time; it keeps the inputs you inspected fixed across live updates.
+Use the **Close …** button at the top right of each panel to dismiss it.
+Closed PRs without outstanding work use a compact identity row.
+
 The GUI has no persistent state of its own:
 requests, review history, and drafts are stored in local files.
 Restarting `luthiai gui` preserves saved work and provides a new sign-in link.

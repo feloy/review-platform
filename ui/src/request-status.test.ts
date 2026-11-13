@@ -13,8 +13,8 @@ const preparation = {
 describe('review next steps', () => {
   it('keeps the running review primary after one-round permission is consumed', () => {
     const situation = reviewSituation({ ...request, authorization: 'awaiting_lead', latest_round: { status: 'running' } });
-    expect(situation.title).toBe('Review in progress');
-    expect(situation.action).toBeUndefined();
+    expect(situation.title).toBe('Reviewing…');
+    expect(situation.action).toBe('progress');
   });
 
   it('allows reading a saved draft while its runner finishes cleanup', () => {
@@ -27,7 +27,7 @@ describe('review next steps', () => {
   it.each(['publishing', 'publication_unknown'])('requires recovery for a saved %s outcome without an active publisher', (status) => {
     const situation = reviewSituation({ ...request, latest_round: { status } });
     expect(situation.message).toContain('Check GitHub');
-    expect(situation.action).toBeNull();
+    expect(situation.action).toBe('progress');
   });
 
   it('does not propose starting until fresh preparation and the selected model match saved validation', () => {
