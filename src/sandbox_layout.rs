@@ -1,4 +1,7 @@
-//! Fixed paths shared by OpenShell mounts and the review agent command.
+//! Fixed sandbox paths and limits shared by review records and execution adapters.
+
+/// Maximum ASCII sandbox-name length accepted by OpenShell 0.1.7.
+pub(crate) const OPENSHELL_SANDBOX_NAME_LIMIT: usize = 19;
 
 pub const WORKDIR_TARGET: &str = "/sandbox";
 pub const CHECKOUT_TARGET: &str = "/sandbox/src";
