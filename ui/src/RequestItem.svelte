@@ -160,12 +160,6 @@
     if (result && signedIn && panel === 'draft') draft = result;
   }
 
-  const authorizationLabels = {
-    awaiting_lead: 'Awaiting lead',
-    one_round: 'One round',
-    pr_cycle: 'PR cycle',
-  };
-
   const permissionLabels = {
     awaiting_lead: 'Not granted',
     one_round: 'One review',
@@ -316,7 +310,7 @@
     {/if}
     {#if signedIn}
     {#if panel === 'permissions' && inspected}
-      <Panel title="Review permissions" label={`Authorize ${request.repository} #${request.number}`}
+      <Panel title="Review permissions" label={`Review permissions for ${request.repository} #${request.number}`}
         closeLabel="Close permissions" closeDisabled={action?.pending} onClose={() => openPanel(null)}>
         <p>Inspect the <a href={`https://github.com/${request.repository}/pull/${request.number}`}
           target="_blank" rel="noopener noreferrer">PR on GitHub</a> at commit <a
@@ -401,7 +395,7 @@
       <dl class="detail-list">
         <div><dt>Head</dt><dd><a href={`https://github.com/${request.repository}/commit/${request.head_sha}`} target="_blank" rel="noopener noreferrer"><code>{request.head_sha}</code></a></dd></div>
         <div><dt>Input revision</dt><dd>{request.revision}</dd></div>
-        <div><dt>Permission</dt><dd>{authorizationLabels[request.authorization] ?? 'Unknown'}</dd></div>
+        <div><dt>Permission</dt><dd>{permissionLabels[request.authorization] ?? 'Unknown'}</dd></div>
       </dl>
       {#if request.context?.head_changed || request.context?.discussion_changed}
         <p class="observed-change">Last GitHub check: {request.context.head_changed && request.context.discussion_changed ? 'the PR commit and author discussion changed' : request.context.head_changed ? 'the PR commit changed' : 'the author discussion changed'}.</p>

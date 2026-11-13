@@ -187,14 +187,14 @@
       head_sha: request.head_sha,
       revision: request.revision,
       scope,
-    }, () => scope === 'one_round' ? 'Authorized for one round.' : 'Authorized for the PR cycle.',
-    'Could not authorize the review.');
+    }, () => scope === 'one_round' ? 'Permission granted for one review.' : 'Permission granted for all reviews of this PR.',
+    'Could not grant review permission.');
   }
 
   function revoke(request, requestId) {
     return performRequestAction(requestId, 'revoke',
       { repository: request.repository, number: request.number },
-      () => 'Authorization revoked.', 'Could not revoke authorization.');
+      () => 'Permission revoked.', 'Could not revoke permission.');
   }
 
   function unmanage(request, requestId) {
