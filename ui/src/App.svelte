@@ -361,7 +361,10 @@
 
   <section class="queue" aria-labelledby="queue-heading">
     <div class="queue-heading">
-      <h2 id="queue-heading" aria-live="polite">{hasSnapshot ? `Pull requests (${requests.length})` : 'Pull requests'}</h2>
+      <h2 id="queue-heading" aria-live="polite">
+        Pull requests
+        {#if hasSnapshot}<md-gb-badge class="pr-count">{requests.length}</md-gb-badge>{/if}
+      </h2>
     </div>
 
     {#if !hasSnapshot}

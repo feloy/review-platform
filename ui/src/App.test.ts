@@ -2,6 +2,7 @@ import '@material/web/button/text-button.js';
 import '@material/web/button/filled-button.js';
 import '@material/web/divider/divider.js';
 import '@material/web/iconbutton/icon-button.js';
+import '@material/web/labs/gb/components/badge/md-gb-badge.js';
 import '@material/web/menu/menu.js';
 import '@material/web/menu/menu-item.js';
 import '@material/web/progress/linear-progress.js';
@@ -253,7 +254,7 @@ describe('refresh open PRs', () => {
     const header = container.querySelector<HTMLElement>('.page-header');
     expect(header.contains(button)).toBe(true);
     expect(within(header).getByRole('heading', { name: 'LuthiAI', level: 1 })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'Pull requests (1)', level: 2 })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Pull requests 1', level: 2 })).toBeTruthy();
     expect(button.closest('.request-list')).toBeNull();
     const trigger = within(header).getByRole('group', { name: 'Refresh open PRs' });
     const tooltip = document.getElementById(button.getAttribute('aria-describedby'));
@@ -777,6 +778,7 @@ describe('review requests page', () => {
     expect(source.url).toBe('/api/requests/events');
     expect(indicator.textContent.trim()).toBe('Connecting to local updates');
     expect(screen.getByText('Waiting for the local request list…')).toBeTruthy();
+    expect(container.querySelector('md-gb-badge')).toBeNull();
     await user.hover(indicator);
     expect(tooltip.hasAttribute('data-test-popover-open')).toBe(true);
     await user.unhover(indicator);
@@ -791,7 +793,10 @@ describe('review requests page', () => {
     await user.keyboard('{Escape}');
     expect(tooltip.hasAttribute('data-test-popover-open')).toBe(false);
     expect(screen.getByText(/No review requests recorded yet/)).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'Pull requests (0)', level: 2 })).toBeTruthy();
+    const heading = screen.getByRole('heading', { name: 'Pull requests 0', level: 2 });
+    const badge = heading.querySelector('md-gb-badge');
+    await waitFor(() => expect(badge.shadowRoot.querySelector('.badge-large')).toBeTruthy());
+    expect(badge.textContent).toBe('0');
     expect(screen.queryByText('Refresh from GitHub')).toBeNull();
     expect(screen.queryByText('Manage authorization')).toBeNull();
     expect(screen.queryByText('Revoke authorization')).toBeNull();
