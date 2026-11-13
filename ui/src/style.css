@@ -361,11 +361,17 @@ h2 {
   color: #5b5963;
 }
 
+.note {
+  color: #5b5963;
+  font-style: italic;
+}
+
 .warning {
   color: #a45e00;
   font-weight: 600;
 }
 
+.panel,
 .authorization-panel,
 .preparation-panel,
 .progress-panel,
@@ -377,6 +383,11 @@ h2 {
   background: #f8f9fd;
 }
 
+.panel {
+  padding-top: 8px;
+}
+
+.panel p,
 .authorization-panel p,
 .preparation-panel p,
 .progress-panel p,
@@ -386,14 +397,20 @@ h2 {
   line-height: 1.5;
 }
 
+.panel a,
 .authorization-panel a {
   color: var(--md-sys-color-primary);
 }
 
-.authorization-buttons {
+.authorization-buttons,
+.panel-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.panel-actions {
+  justify-content: flex-end;
 }
 
 .model-choice {
@@ -544,6 +561,7 @@ h3 {
     padding-left: 20px;
   }
 
+  .panel,
   .authorization-panel,
   .preparation-panel,
   .progress-panel,
@@ -551,6 +569,10 @@ h3 {
     margin-right: 12px;
     margin-left: 12px;
     padding: 16px;
+  }
+
+  .panel {
+    padding-top: 8px;
   }
 
   .request-details {
