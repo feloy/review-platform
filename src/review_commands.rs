@@ -863,7 +863,10 @@ fn new_round_dir(state_path: &Path) -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
     }
-    let directory = Builder::new().prefix("r-").tempdir_in(&root)?;
+    let directory = Builder::new()
+        .prefix("r-")
+        .rand_bytes(6)
+        .tempdir_in(&root)?;
     Ok(directory.keep())
 }
 
@@ -1165,7 +1168,7 @@ mod tests {
                 "id": "r-test",
                 "key": {"repository": "owner/repo", "number": 42},
                 "status": "running",
-                "sandbox": "luthiai-722d74657374",
+                "sandbox": "luthiai-orsxg5a",
                 "head_sha": "a".repeat(40),
                 "revision": 2,
                 "discussion": {"author_id": 7, "comments": []},
@@ -1277,7 +1280,7 @@ mod tests {
                 "id": "r-draft",
                 "key": {"repository": "owner/repo", "number": 42},
                 "status": "draft_available",
-                "sandbox": "luthiai-722d6472616674",
+                "sandbox": "luthiai-mrzgcztu",
                 "head_sha": "a".repeat(40),
                 "revision": 2,
                 "discussion": {"author_id": 7, "comments": []},

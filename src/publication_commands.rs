@@ -706,7 +706,7 @@ mod tests {
             "schema_version":8,
             "requests":[{"key":key, "head_sha":"a".repeat(40), "authorization":"awaiting_lead", "revision":2,
                 "discussion":{"author_id":7,"comments":[]}, "model_validation":null}],
-            "rounds":[{"id":id,"key":key,"status":"awaiting_decision", "sandbox":"luthiai-722d7075626c697368",
+            "rounds":[{"id":id,"key":key,"status":"awaiting_decision", "sandbox":"luthiai-ob2we3djonua",
                 "head_sha":"a".repeat(40),"revision":2,"discussion":{"author_id":7,"comments":[]},
                 "model":"model-alpha","agent":"claude","gateway":"gateway","workspace":"default","driver":"vm",
                 "model_provider":"model-provider","github_provider":"github-ro","prompt_sha256":"a".repeat(64),
