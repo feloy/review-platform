@@ -351,7 +351,7 @@ mod tests {
             "requests":[{"key":{"repository":"owner/repo","number":15}, "head_sha":"a".repeat(40),
                 "authorization":"awaiting_lead", "revision":2, "discussion":{"author_id":7,"comments":[]}, "model_validation":null}],
             "rounds":[{"id":"r-draft", "key":{"repository":"owner/repo","number":15}, "status":"awaiting_decision",
-                "sandbox":"rp-722d6472616674", "head_sha":"a".repeat(40), "revision":2,
+                "sandbox":"luthiai-722d6472616674", "head_sha":"a".repeat(40), "revision":2,
                 "discussion":{"author_id":7,"comments":[]}, "model":"model-alpha", "agent":"claude",
                 "gateway":"gateway", "workspace":"default", "driver":"vm", "model_provider":"model-provider",
                 "github_provider":"github-ro", "prompt_sha256":"a".repeat(64), "format_sha256":"b".repeat(64),
@@ -801,7 +801,7 @@ mod tests {
         let mut raw = serde_json::to_value(&state).unwrap();
         let mut prior = raw["rounds"][0].clone();
         prior["id"] = "r-prior".into();
-        prior["sandbox"] = "rp-r-prior".into();
+        prior["sandbox"] = "luthiai-722d7072696f72".into();
         prior["status"] = "failed".into();
         prior["failure"] = "preflight".into();
         prior["sealed_body"] = serde_json::Value::Null;

@@ -2386,7 +2386,7 @@ mod tests {
                 "id": "r-publish",
                 "key": {"repository":"owner/repo","number":42},
                 "status": "awaiting_decision",
-                "sandbox": "rp-722d7075626c697368",
+                "sandbox": "luthiai-722d7075626c697368",
                 "head_sha": HEAD_A,
                 "revision": 2,
                 "discussion": {"author_id":7,"comments":[]},
@@ -2415,6 +2415,25 @@ mod tests {
         .unwrap();
         state.validate().unwrap();
         state
+    }
+
+    #[test]
+    fn persisted_round_rejects_legacy_and_mismatched_sandbox_names() {
+        let saved = serde_json::to_value(state_with_saved_draft()).unwrap();
+        for sandbox in [
+            "rp-722d7075626c697368",
+            "rp-r-publish",
+            "luthiai-r-publish",
+            "luthiai-722d6f74686572",
+        ] {
+            let mut raw = saved.clone();
+            raw["rounds"][0]["sandbox"] = sandbox.into();
+            let state: State = serde_json::from_value(raw).unwrap();
+            assert_eq!(
+                state.validate(),
+                Err(StateError::InvalidRound("r-publish".into()))
+            );
+        }
     }
 
     fn state_with_confirmed_publication() -> State {
@@ -2487,7 +2506,7 @@ mod tests {
         // A more recent private draft is neither the default baseline nor evidence of publication.
         let mut later = serde_json::to_value(&state_with_saved_draft().rounds[0]).unwrap();
         later["id"] = "r-later".into();
-        later["sandbox"] = "rp-r-later".into();
+        later["sandbox"] = "luthiai-722d6c61746572".into();
         let mut later: RoundRecord = serde_json::from_value(later).unwrap();
         later = later.with_task(ReviewTask::new(head(HEAD_B), incremental.clone()));
         state.rounds.push(later);
