@@ -1,7 +1,7 @@
 # Working in LuthiAI
 
 Read `README.md` and `ARCHITECTURE.md` before changing behavior.
-The README defines human setup and the GUI workflow.
+The README defines human setup and the overall review workflow.
 `skills/luthiai/` defines agent-facing setup and CLI usage of the installed application.
 The architecture document defines the system design and security boundaries.
 Keep the implementation small and runnable as it grows;
@@ -172,7 +172,10 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 
 ## Changes and commits
 
-- Document human setup, GUI usage, and current limitations in `README.md`.
+- Document human setup, GUI launch and sign-in, essential operational behavior,
+  and current limitations in `README.md`.
+  Keep GUI controls and states self-explanatory through concise labels and contextual help.
+  Do not add README walkthroughs or inventories of GUI controls, panels, or status labels.
   Keep detailed configuration, agent-facing CLI workflows, and command details in `skills/luthiai/`.
   Document contributor architecture, development commands, and security boundaries
   in `ARCHITECTURE.md`.
