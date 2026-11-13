@@ -702,11 +702,6 @@ On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
 
-The rename to LuthiAI changes the default directories to `luthiai`
-and the environment-variable prefix to `LUTHIAI_`.
-Existing files are not moved automatically.
-Use `--state-file` and `--config-file` to keep using their existing locations.
-
 The state file and configuration file have separate schema versions.
 The current state schema is version 8.
 Versions 5 through 7 are upgraded in memory and saved as version 8 on the next mutation;
