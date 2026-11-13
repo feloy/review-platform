@@ -2,9 +2,9 @@
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires REVIEW_PLATFORM_LIVE_VM_CONFIG and an existing VM gateway"]
+#[ignore = "requires LUTHIAI_LIVE_VM_CONFIG and an existing VM gateway"]
 fn local_vm_mounts_draft_retrieval_and_cleanup() {
-    use review_platform::{
+    use luthiai::{
         HeadSha, InputRevision, ObservedDiscussion, PrKey, agent, archive,
         config::{AgentKind, ReviewConfig},
         openshell::{OpenShell, SandboxMounts},
@@ -18,21 +18,21 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
     use std::os::unix::fs::OpenOptionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let config_path = std::env::var("REVIEW_PLATFORM_LIVE_VM_CONFIG")
-        .expect("set REVIEW_PLATFORM_LIVE_VM_CONFIG to a private schema 7 config");
+    let config_path = std::env::var("LUTHIAI_LIVE_VM_CONFIG")
+        .expect("set LUTHIAI_LIVE_VM_CONFIG to a private schema 7 config");
     let config = ReviewConfig::from_json(
         &fs::read(&config_path).unwrap(),
         std::path::Path::new(&config_path),
     )
     .unwrap();
-    let repository = std::env::var("REVIEW_PLATFORM_LIVE_VM_REPOSITORY")
-        .unwrap_or_else(|_| "owner/repo".to_owned());
+    let repository =
+        std::env::var("LUTHIAI_LIVE_VM_REPOSITORY").unwrap_or_else(|_| "owner/repo".to_owned());
     let key = PrKey::new(repository, 1).unwrap();
     let choices = config.review_models_for(&key).unwrap();
     let shell = OpenShell::new(config.execution());
     shell.preflight_gateway().unwrap();
     shell.preflight_runner(choices[0].agent().runner()).unwrap();
-    let test_dir = std::env::var_os("REVIEW_PLATFORM_LIVE_VM_DIR")
+    let test_dir = std::env::var_os("LUTHIAI_LIVE_VM_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     let root = tempfile::tempdir_in(test_dir).unwrap();

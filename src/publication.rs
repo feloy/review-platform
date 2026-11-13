@@ -82,7 +82,7 @@ pub struct SealedBody {
 impl SealedBody {
     pub fn new(comments: &str, round_id: &str, artifact_hash: PublicationHash) -> Self {
         let body = format!(
-            "{}\n\n_Agent review via Review Platform (round {})._",
+            "{}\n\n_Agent review via LuthiAI (round {})._",
             comments, round_id
         );
         let hash = PublicationHash::of(body.as_bytes());
@@ -119,6 +119,30 @@ impl SealedBody {
 
     pub fn validate(&self) -> bool {
         !self.body.is_empty() && self.hash == PublicationHash::of(self.body.as_bytes())
+    }
+
+    pub(crate) fn validate_for_round(&self, round_id: &str) -> bool {
+        self.validate() && self.comments_for_round(round_id).is_some()
+    }
+
+    /// Verify saved comments without changing a body sealed before the project rename.
+    pub fn matches_draft(
+        &self,
+        comments: &str,
+        round_id: &str,
+        artifact_hash: &PublicationHash,
+    ) -> bool {
+        self.validate()
+            && self.artifact_hash() == artifact_hash
+            && self.comments_for_round(round_id) == Some(comments)
+    }
+
+    fn comments_for_round(&self, round_id: &str) -> Option<&str> {
+        ["LuthiAI", "Review Platform"].into_iter().find_map(|name| {
+            self.body.strip_suffix(&format!(
+                "\n\n_Agent review via {name} (round {round_id})._"
+            ))
+        })
     }
 }
 
@@ -398,10 +422,34 @@ mod tests {
         let seal = SealedBody::new(comments, "r-test", PublicationHash::of(b"artifact"));
         assert_eq!(
             seal.body(),
-            "Finding with a trailing newline\n\n\n_Agent review via Review Platform (round r-test)._"
+            "Finding with a trailing newline\n\n\n_Agent review via LuthiAI (round r-test)._"
         );
         assert_eq!(seal.hash(), &PublicationHash::of(seal.body().as_bytes()));
         assert!(seal.validate());
+    }
+
+    #[test]
+    fn draft_verification_accepts_both_footers_only_with_matching_saved_inputs() {
+        let comments = "Finding with a trailing newline\n";
+        let artifact_hash = PublicationHash::of(b"artifact");
+        for name in ["LuthiAI", "Review Platform"] {
+            let body = format!("{comments}\n\n_Agent review via {name} (round r-test)._");
+            let mut seal = SealedBody {
+                hash: PublicationHash::of(body.as_bytes()),
+                body,
+                artifact_hash: artifact_hash.clone(),
+            };
+            assert!(seal.validate_for_round("r-test"));
+            assert!(seal.matches_draft(comments, "r-test", &artifact_hash));
+            assert!(!seal.matches_draft(comments.trim_end(), "r-test", &artifact_hash));
+            assert!(!seal.matches_draft(comments, "r-other", &artifact_hash));
+            assert!(!seal.matches_draft(comments, "r-test", &PublicationHash::of(b"changed")));
+            assert!(!seal.validate_for_round("r-other"));
+
+            seal.hash = PublicationHash::of(b"changed");
+            assert!(!seal.validate_for_round("r-test"));
+            assert!(!seal.matches_draft(comments, "r-test", &artifact_hash));
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
-# Review Platform
+# LuthiAI
 
-Review Platform coordinates AI reviews of pull requests in public GitHub repositories.
+LuthiAI (pronounced “Luthier”) coordinates AI reviews of pull requests in GitHub repositories.
 A lead developer runs its daemon for one or more repositories,
 on their own machine or in the cloud.
 Any PR author can request a review, but the lead must authorize it.
@@ -31,7 +31,7 @@ From the repository root, compile and install the CLI:
 # Compile and install the current CLI.
 cargo install --path . --locked --force
 # Check the available commands.
-review-platform --help
+luthiai --help
 ```
 
 Cargo installs the executable in its binary directory, which must be on `PATH`.
@@ -183,7 +183,7 @@ stale or unknown freshness requires reopening the draft and inspecting fresh inp
 Publication runs in the server, survives browser disconnects, and rejects duplicate GUI starts during preflight.
 Live updates show progress, safe preflight failures, and the saved GitHub receipt.
 The GUI uses its effective configuration file and the server's read and write GitHub credentials.
-Set `publisher_login` and `REVIEW_PLATFORM_GITHUB_TOKEN_RW` before launching the GUI.
+Set `publisher_login` and `LUTHIAI_GITHUB_TOKEN_RW` before launching the GUI.
 
 Stopping the server waits for its blocking publication work; it does not cancel a dispatched post.
 If publication is interrupted or its outcome is uncertain, inspect GitHub and use `recover-publication` through the CLI.
@@ -200,7 +200,7 @@ If the runner lock cannot be inspected, it reports that cleanup status is unavai
 Review workflow operations remain available through the CLI while the GUI grows.
 
 ```sh
-review-platform gui
+luthiai gui
 # Open the one-time sign-in link shown in the terminal to enable actions.
 # Inspect the current local request list.
 curl http://localhost:8080/api/requests
@@ -372,25 +372,25 @@ Authorize one round using the head and revision shown by `status`.
 
 ```sh
 # Inspect the live PR, diff, and checks.
-review-platform github-pr owner/repo 42 --diff --checks
+luthiai github-pr owner/repo 42 --diff --checks
 # Record the head you inspected.
-review-platform request owner/repo 42 HEAD_SHA
+luthiai request owner/repo 42 HEAD_SHA
 # Record the author's current discussion.
-review-platform refresh owner/repo 42
+luthiai refresh owner/repo 42
 # Read the head and input revision.
-review-platform status owner/repo 42
+luthiai status owner/repo 42
 # Authorize one round for those inputs.
-review-platform authorize owner/repo 42 --scope one-round --head HEAD_SHA --revision REVISION
+luthiai authorize owner/repo 42 --scope one-round --head HEAD_SHA --revision REVISION
 # See the proposed model and readiness.
-review-platform prepare-review owner/repo 42
+luthiai prepare-review owner/repo 42
 # Validate the chosen model.
-review-platform prepare-review owner/repo 42 --model MODEL_ID --head HEAD_SHA --revision REVISION
+luthiai prepare-review owner/repo 42 --model MODEL_ID --head HEAD_SHA --revision REVISION
 # Check the configured gateway and providers.
-review-platform gateway status
+luthiai gateway status
 # Run the authorized review.
-review-platform run-review owner/repo 42 --head HEAD_SHA --revision REVISION
+luthiai run-review owner/repo 42 --head HEAD_SHA --revision REVISION
 # Inspect the saved private draft.
-review-platform show-draft owner/repo 42 --round ROUND_ID
+luthiai show-draft owner/repo 42 --round ROUND_ID
 ```
 
 The first `prepare-review` shows the proposed model and checks.
@@ -408,25 +408,25 @@ so authorize the new inputs before validating a model and running again.
 
 ```sh
 # Inspect the previous private draft.
-review-platform show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+luthiai show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
 # Record the lead's rejection of that draft.
-review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID --body-hash PREVIOUS_BODY_SHA256
+luthiai reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID --body-hash PREVIOUS_BODY_SHA256
 # Inspect changes since the previous head and check CI.
-review-platform github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
+luthiai github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
 # Record the new head or author discussion.
-review-platform refresh owner/repo 42
+luthiai refresh owner/repo 42
 # Read the new head and input revision.
-review-platform status owner/repo 42
+luthiai status owner/repo 42
 # Authorize one round for the new inputs.
-review-platform authorize owner/repo 42 --scope one-round --head NEW_HEAD_SHA --revision NEW_REVISION
+luthiai authorize owner/repo 42 --scope one-round --head NEW_HEAD_SHA --revision NEW_REVISION
 # See the proposed model and readiness.
-review-platform prepare-review owner/repo 42
+luthiai prepare-review owner/repo 42
 # Validate a model for the new inputs.
-review-platform prepare-review owner/repo 42 --model MODEL_ID --head NEW_HEAD_SHA --revision NEW_REVISION
+luthiai prepare-review owner/repo 42 --model MODEL_ID --head NEW_HEAD_SHA --revision NEW_REVISION
 # Run the newly authorized review.
-review-platform run-review owner/repo 42 --head NEW_HEAD_SHA --revision NEW_REVISION
+luthiai run-review owner/repo 42 --head NEW_HEAD_SHA --revision NEW_REVISION
 # Inspect the new private draft.
-review-platform show-draft owner/repo 42 --round NEW_ROUND_ID
+luthiai show-draft owner/repo 42 --round NEW_ROUND_ID
 ```
 
 `--since` requires the earlier head to be an ancestor of the new head.
@@ -439,7 +439,7 @@ in the new PR sequence above with:
 
 ```sh
 # Authorize the PR cycle for the inspected inputs.
-review-platform authorize owner/repo 42 --scope pr-cycle --head HEAD_SHA --revision REVISION
+luthiai authorize owner/repo 42 --scope pr-cycle --head HEAD_SHA --revision REVISION
 ```
 
 After a later commit or author reply, inspect and decide on the earlier draft.
@@ -450,28 +450,28 @@ Copy `PREVIOUS_BODY_SHA256` from `show-draft`.
 
 ```sh
 # Inspect the previous private draft.
-review-platform show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
+luthiai show-draft owner/repo 42 --round PREVIOUS_ROUND_ID
 # Record the lead's rejection of that draft.
-review-platform reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID --body-hash PREVIOUS_BODY_SHA256
+luthiai reject-draft owner/repo 42 --round PREVIOUS_ROUND_ID --body-hash PREVIOUS_BODY_SHA256
 # Inspect changes since the previous head and check CI.
-review-platform github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
+luthiai github-pr owner/repo 42 --since PREVIOUS_HEAD_SHA --checks
 # Record the new head or author discussion.
-review-platform refresh owner/repo 42
+luthiai refresh owner/repo 42
 # Confirm the PR-cycle scope and new revision.
-review-platform status owner/repo 42
+luthiai status owner/repo 42
 # See the proposed model and readiness.
-review-platform prepare-review owner/repo 42
+luthiai prepare-review owner/repo 42
 # Validate a model for the new inputs.
-review-platform prepare-review owner/repo 42 --model MODEL_ID --head NEW_HEAD_SHA --revision NEW_REVISION
+luthiai prepare-review owner/repo 42 --model MODEL_ID --head NEW_HEAD_SHA --revision NEW_REVISION
 # Run a new round under PR-cycle authorization.
-review-platform run-review owner/repo 42 --head NEW_HEAD_SHA --revision NEW_REVISION
+luthiai run-review owner/repo 42 --head NEW_HEAD_SHA --revision NEW_REVISION
 # Inspect the new private draft.
-review-platform show-draft owner/repo 42 --round NEW_ROUND_ID
+luthiai show-draft owner/repo 42 --round NEW_ROUND_ID
 ```
 
 ### CLI commands
 
-Run each command as `review-platform COMMAND` after installing the CLI.
+Run each command as `luthiai COMMAND` after installing the CLI.
 `REPOSITORY` means `owner/repo`, `PR` is a positive pull request number,
 `HEAD_SHA` is a 40- or 64-character hexadecimal commit ID,
 and `REVISION` is the positive local input revision shown by `status`.
@@ -626,7 +626,7 @@ including when loaded from the JSON state file.
   Add `--full-review` to inspect the entire PR regardless of earlier reviews:
 
   ```sh
-  review-platform run-review owner/repo 42 --head HEAD_SHA --revision REVISION --full-review
+  luthiai run-review owner/repo 42 --head HEAD_SHA --revision REVISION --full-review
   ```
 
   The daemon records the base commit and effective scope and makes the previous commit available in the checkout.
@@ -694,13 +694,20 @@ Without overrides, the CLI uses the per-user locations for each platform:
 
 | Platform | Default state file | Default config file |
 | --- | --- | --- |
-| Linux | `$XDG_STATE_HOME/review-platform/state.json` | `$XDG_CONFIG_HOME/review-platform/config.json` |
-| macOS | `~/Library/Application Support/review-platform/state.json` | `~/Library/Application Support/review-platform/config.json` |
-| Windows | `%LOCALAPPDATA%\review-platform\data\state.json` | `%APPDATA%\review-platform\config\config.json` |
+| Linux | `$XDG_STATE_HOME/luthiai/state.json` | `$XDG_CONFIG_HOME/luthiai/config.json` |
+| macOS | `~/Library/Application Support/luthiai/state.json` | `~/Library/Application Support/luthiai/config.json` |
+| Windows | `%LOCALAPPDATA%\luthiai\data\state.json` | `%APPDATA%\luthiai\config\config.json` |
 
 On Linux, an unset or relative `XDG_STATE_HOME` uses `~/.local/state` instead.
 An unset or relative `XDG_CONFIG_HOME` uses `~/.config` instead.
 The CLI creates the application directory when it first saves state.
+
+The rename to LuthiAI changes the default directories to `luthiai`
+and the environment-variable prefix to `LUTHIAI_`.
+Existing files are not moved automatically.
+Use `--state-file` and `--config-file` to keep using their existing locations.
+Previously sealed publication bodies retain their original footer and hash;
+new bodies use LuthiAI.
 
 The state file and configuration file have separate schema versions.
 The current state schema is version 8.
@@ -710,9 +717,9 @@ Existing private draft artifacts are left unchanged.
 A global `request_revision_floor` prevents reuse of discarded input revisions
 without retaining removed PR identities or review history.
 
-For project-local files, pass both `--state-file .review-platform/state.json`
-and `--config-file .review-platform/config.json`.
-Git ignores the `.review-platform/` directory.
+For project-local files, pass both `--state-file .luthiai/state.json`
+and `--config-file .luthiai/config.json`.
+Git ignores the `.luthiai/` directory.
 Keep the state file private to the lead operator.
 
 ### Review configuration
@@ -880,7 +887,7 @@ The example checksums are placeholders and will fail verification.
 The policy checksum is SHA-256 of the policy file;
 the two VM image checksums cover the rootfs tar and its OCI metadata separately.
 
-Review Platform extracts `config.Env` from the verified metadata
+LuthiAI extracts `config.Env` from the verified metadata
 and declares those non-secret values with OpenShell `--env` arguments.
 The combined sandbox environment is limited to 64 KiB.
 The Claude image must define an absolute `CLAUDE_CODE_EXECUTABLE` path there.
@@ -920,7 +927,7 @@ The gateway operator starts the gateway with VM driver support,
 enables the trusted VM mount configuration,
 and configures a model provider compatible with the validated model
 and a GitHub provider restricted to read-only REST access.
-Review Platform checks authenticated access and named provider availability,
+LuthiAI checks authenticated access and named provider availability,
 and rejects a write-capable GitHub policy when the gateway exposes one.
 The operator remains responsible for provider policy and credential rotation.
 
@@ -948,7 +955,7 @@ It tells Claude to treat other shell commands as denied.
 If a compound call is denied, it tells Claude to retry as a standalone granted command.
 Claude Code may still allow some reads and simple shell commands outside the explicit `--allowedTools` entries.
 The wildcard Git and GitHub Bash grants do not restrict every read or write option.
-This is a known limitation tracked in [issue #13](https://github.com/feloy/review-platform/issues/13).
+This is a known limitation tracked in [issue #13](https://github.com/luthiai/luthiai/issues/13).
 
 The Codex adapter requires Codex CLI 0.159.3 or newer with sandbox-mode support.
 It uses `codex exec --json --ephemeral --ignore-user-config --ignore-rules --strict-config`.
@@ -972,7 +979,7 @@ missing endpoint configuration fails before sandbox creation, with no public-ser
 The filesystem policy blocks writes;
 it does not restrict shell execution to a command allowlist,
 so the input-boundary design is tracked in
-[issue #13](https://github.com/feloy/review-platform/issues/13).
+[issue #13](https://github.com/luthiai/luthiai/issues/13).
 The trusted instructions prohibit executing repository code, installing dependencies, or running tests.
 See the official [Codex CLI reference](https://developers.openai.com/codex/cli/reference/)
 and [configuration reference](https://developers.openai.com/codex/config-reference/).
@@ -1014,11 +1021,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for its configuration and command.
 
 `github-pr`, `refresh`, and `prepare-review` read public GitHub pull requests without a token.
 For private repositories or a higher GitHub API rate limit,
-set `REVIEW_PLATFORM_GITHUB_TOKEN_RO` to a token with pull request, contents,
+set `LUTHIAI_GITHUB_TOKEN_RO` to a token with pull request, contents,
 checks, and commit statuses read access.
 The CLI uses this token only for GitHub reads.
 
-To publish, set `REVIEW_PLATFORM_GITHUB_TOKEN_RW` to a separate token
+To publish, set `LUTHIAI_GITHUB_TOKEN_RW` to a separate token
 with pull-request write permission and set `publisher_login` in the private configuration
 to the GitHub account expected to own that token.
 The CLI verifies the account through `GET /user` before publication.
@@ -1062,7 +1069,7 @@ Changes made and reverted between observations may be missed.
 When a confirmed publication uses the PR author's GitHub account,
 GitHub observations exclude only that recorded review ID from author-comment triggers,
 including preparation's final recheck.
-The visible footer alone never identifies a Review Platform publication.
+The visible footer alone never identifies a LuthiAI publication.
 Closed and draft PRs can be refreshed; refreshing grants no permission to run a review.
 
 Round startup fetches fresh inputs and checks before creating a sandbox

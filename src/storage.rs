@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use review_platform::{PrKey, State};
+use luthiai::{PrKey, State};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -217,13 +217,13 @@ fn absolute_path(path: PathBuf, option: &str) -> Result<PathBuf> {
 }
 
 fn default_config_path() -> Result<PathBuf> {
-    let project_dirs = ProjectDirs::from("", "", "review-platform")
+    let project_dirs = ProjectDirs::from("", "", "luthiai")
         .context("cannot determine the user config directory; provide --config-file PATH")?;
     Ok(project_dirs.config_dir().join("config.json"))
 }
 
 fn default_path() -> Result<PathBuf> {
-    let project_dirs = ProjectDirs::from("", "", "review-platform")
+    let project_dirs = ProjectDirs::from("", "", "luthiai")
         .context("cannot determine the user state directory; provide --state-file PATH")?;
     let directory = project_dirs
         .state_dir()

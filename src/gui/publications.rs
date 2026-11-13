@@ -4,7 +4,7 @@ use crate::{
     gui_diagnostics,
     publication_commands::{self, PublicationReport, PublishError},
 };
-use review_platform::{
+use luthiai::{
     PrKey,
     publication::{PublicationHash, PublicationStateError},
     review::{Freshness, RoundId, RoundStateError},

@@ -2,7 +2,7 @@
 
 use crate::{draft_commands, escape_terminal_controls, storage};
 use anyhow::{Context, Result};
-use review_platform::{
+use luthiai::{
     PrKey, RefreshOutcome, RejectOutcome, State,
     config::{ConfigError, ReviewConfig},
     github::{
@@ -181,7 +181,7 @@ pub fn show_draft(
         println!("\nPublication unavailable: {error}");
     } else if record.status() == RoundStatus::AwaitingDecision {
         println!(
-            "\nPublish command:\nreview-platform publish-draft {} {} --round {} --body-hash {}",
+            "\nPublish command:\nluthiai publish-draft {} {} --round {} --body-hash {}",
             key.repository(),
             key.number(),
             id,
@@ -193,7 +193,7 @@ pub fn show_draft(
         RoundStatus::Publishing | RoundStatus::PublicationUnknown
     ) {
         println!(
-            "\nRecovery command:\nreview-platform recover-publication {} {} --round {}",
+            "\nRecovery command:\nluthiai recover-publication {} {} --round {}",
             key.repository(),
             key.number(),
             id
@@ -679,7 +679,7 @@ pub fn recover_publication(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use review_platform::HeadSha;
+    use luthiai::HeadSha;
     use std::fs;
 
     fn fixture(directory: &Path) -> (PathBuf, PrKey, RoundId, PublicationHash) {

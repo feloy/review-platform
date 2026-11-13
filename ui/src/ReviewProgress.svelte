@@ -21,7 +21,7 @@
 {#if round?.status === 'publication_unknown' || (round?.status === 'publishing' && publication?.status !== 'active')}
   <p class="action-note warning" role="alert">Publication needs recovery. Check GitHub before deciding again; the GUI will not retry the post.</p>
   <p class="action-note">Recover publication through the CLI:
-    <code>review-platform recover-publication {request.repository} {request.number} --round {round.id}</code>
+    <code>luthiai recover-publication {request.repository} {request.number} --round {round.id}</code>
   </p>
 {/if}
 {#if round?.receipt}
@@ -60,7 +60,7 @@
   <p class="action-note">Private draft ready.
     {#if signedIn}Choose “Read private draft” to inspect it here, or use the CLI:
     {:else}Sign in to view it here, or inspect it through the CLI:{/if}
-    <code>review-platform show-draft {request.repository} {request.number} --round {round.id}</code>
+    <code>luthiai show-draft {request.repository} {request.number} --round {round.id}</code>
   </p>
   {#if round.freshness === 'stale' || round.freshness === 'unknown'}
     <p class="action-note warning">Draft freshness is {round.freshness}. Recheck PR inputs before publishing. The draft can still be rejected.</p>
@@ -68,6 +68,6 @@
 {/if}
 {#if round?.cleanup_status === 'needs_attention'}
   <p class="action-note">Recover the sandbox through the CLI:
-    <code>review-platform recover-review {request.repository} {request.number}</code>
+    <code>luthiai recover-review {request.repository} {request.number}</code>
   </p>
 {/if}

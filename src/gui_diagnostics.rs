@@ -1,7 +1,7 @@
 //! Local GUI job diagnostics, separate from browser-safe progress summaries.
 
 use crate::escape_terminal_field;
-use review_platform::{PrKey, review::RoundId};
+use luthiai::{PrKey, review::RoundId};
 use std::{error::Error, io::Write};
 
 pub fn report(job: &str, key: &PrKey, id: Option<&RoundId>, error: &(dyn Error + 'static)) {
@@ -68,9 +68,7 @@ mod tests {
         publication_commands::PublishError,
         review_commands::{InspectionError, RunError},
     };
-    use review_platform::{
-        config::ConfigError, github::publisher::PublisherError, review::ArtifactError,
-    };
+    use luthiai::{config::ConfigError, github::publisher::PublisherError, review::ArtifactError};
 
     fn message(error: &(dyn Error + 'static)) -> String {
         failure_message(
@@ -104,10 +102,7 @@ mod tests {
     #[test]
     fn publication_failures_keep_actionable_causes_and_escape_terminal_controls() {
         for (error, expected) in [
-            (
-                PublisherError::MissingToken,
-                "REVIEW_PLATFORM_GITHUB_TOKEN_RW",
-            ),
+            (PublisherError::MissingToken, "LUTHIAI_GITHUB_TOKEN_RW"),
             (
                 PublisherError::WrongPublisher {
                     expected: "publisher".into(),

@@ -199,7 +199,7 @@ function draft(overrides: Partial<DraftSnapshot> = {}): DraftSnapshot {
     key: { repository: 'owner/repo', number: 15 }, round_id: 'r-example', head_sha: 'a'.repeat(40), revision: 1,
     publisher_login: 'review-bot',
     decision: 'awaiting_decision', model: 'model-alpha', agent: 'claude', verdict: 'ACCEPT_WITH_NITS', freshness: 'fresh',
-    publication_body: "# Finding\n<script>alert('draft')</script>\n\n_Agent review via Review Platform (round r-example)._",
+    publication_body: "# Finding\n<script>alert('draft')</script>\n\n_Agent review via LuthiAI (round r-example)._",
     publication_body_sha256: 'd'.repeat(64), lead_advice: '<img src=x onerror=alert(1)> Private advice', ...overrides,
   };
 }
@@ -258,7 +258,7 @@ describe('refresh all open PRs', () => {
   });
 
   it('waits for the list and disables refreshing when no open or unchecked PRs remain', async () => {
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
@@ -277,7 +277,7 @@ describe('refresh all open PRs', () => {
 
   it('refreshes open and unchecked PRs sequentially, prevents duplicate batches, and keeps live snapshots authoritative', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishFirst: FinishFetch;
     let finishSecond: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
@@ -313,7 +313,7 @@ describe('refresh all open PRs', () => {
 
   it.each(['github', 'offline'])('continues after a %s failure and shows both the summary and individual error', async (failure) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true });
     if (failure === 'github') fetchMock.mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({ error: 'GitHub is unavailable. Try again later.' }) });
     else fetchMock.mockRejectedValueOnce(new Error('offline'));
@@ -332,7 +332,7 @@ describe('refresh all open PRs', () => {
 
   it('stops when the session expires without sending the remaining requests', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: false, status: 401 });
     vi.stubGlobal('fetch', fetchMock);
@@ -342,14 +342,14 @@ describe('refresh all open PRs', () => {
     const button = await clickMaterialButton(user, container, 'Refresh all open PRs');
     expect(await screen.findByText(/Refresh stopped because your session ended/)).toBeTruthy();
     expect(await screen.findByLabelText('One-time code')).toBeTruthy();
-    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(sessionStorage.getItem('luthiai-session')).toBeNull();
     expect(button.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('waits for pending row actions and skips PRs removed or closed during the batch', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishRowRefresh: FinishFetch;
     let finishBatchRefresh: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
@@ -386,14 +386,14 @@ describe('sign-in link', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/session');
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ code: 'url-code' });
     expect(window.location.search).toBe('');
-    await waitFor(() => expect(sessionStorage.getItem('review-platform-session')).toBe('session-token'));
+    await waitFor(() => expect(sessionStorage.getItem('luthiai-session')).toBe('session-token'));
     await waitFor(() => expect(screen.queryByLabelText('One-time code')).toBeNull());
     await showSnapshot(FakeEventSource.instances[0], [request()]);
     expect(await screen.findByText('Refresh from GitHub')).toBeTruthy();
   });
 
   it('restores a valid session instead of exchanging an already used URL code', async () => {
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     window.history.pushState({}, '', '/?code=url-code');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
@@ -408,12 +408,12 @@ describe('sign-in link', () => {
     expect(button).toBeTruthy();
     await waitFor(() => expect(screen.queryByLabelText('One-time code')).toBeNull());
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(sessionStorage.getItem('review-platform-session')).toBe('saved-token');
+    expect(sessionStorage.getItem('luthiai-session')).toBe('saved-token');
     expect(window.location.search).toBe('');
   });
 
   it('exchanges a URL code without showing sign-in after a stored session expires', async () => {
-    sessionStorage.setItem('review-platform-session', 'expired-token');
+    sessionStorage.setItem('luthiai-session', 'expired-token');
     window.history.pushState({}, '', '/?code=url-code');
     let finishSessionCheck: FinishFetch;
     const fetchMock = vi.fn()
@@ -430,7 +430,7 @@ describe('sign-in link', () => {
     expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer expired-token');
     expect(fetchMock.mock.calls[1][0]).toBe('/api/session');
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ code: 'url-code' });
-    await waitFor(() => expect(sessionStorage.getItem('review-platform-session')).toBe('session-token'));
+    await waitFor(() => expect(sessionStorage.getItem('luthiai-session')).toBe('session-token'));
     expect(window.location.search).toBe('');
   });
 });
@@ -440,7 +440,7 @@ describe('review requests page', () => {
     [preparedRequest(), 'Check review readiness'],
     [request({ latest_round: round({ status: 'awaiting_decision' }) }), 'Read private draft'],
   ])('uses the same action label in the menu and next step for %o', async (snapshot, label) => {
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [snapshot]);
@@ -452,7 +452,7 @@ describe('review requests page', () => {
   });
 
   it('shows the sign-in link only when its target is available after session checking', async () => {
-    sessionStorage.setItem('review-platform-session', 'expired-token');
+    sessionStorage.setItem('luthiai-session', 'expired-token');
     let finishSessionCheck: FinishFetch;
     vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finishSessionCheck = resolve; })));
     render(App);
@@ -491,7 +491,7 @@ describe('review requests page', () => {
 
   it('keeps row menus independent and refreshes the PR whose menu was selected', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ changed: false }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -511,7 +511,7 @@ describe('review requests page', () => {
 
   it('opens the menu with arrow keys, navigates enabled actions, and restores focus on Escape', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request()]);
@@ -600,7 +600,7 @@ describe('review requests page', () => {
 
   it('refreshes a compact closed PR and restores full controls when an open snapshot arrives', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishRefresh: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
@@ -652,7 +652,7 @@ describe('review requests page', () => {
 
   it('offers the next action and starts only the currently confirmed model', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({ readiness: 'ready', validated_model: 'model-alpha' }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ accepted: true }) });
@@ -674,7 +674,7 @@ describe('review requests page', () => {
 
   it('shows button help on hover and keyboard focus, including for disabled actions', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation() });
     vi.stubGlobal('fetch', fetchMock);
@@ -709,7 +709,7 @@ describe('review requests page', () => {
 
   it('explains that a missing publishing account blocks publication while keeping rejection available', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ publisher_login: null }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -728,7 +728,7 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
 
     expect(source.url).toBe('/api/requests/events');
-    expect(screen.getByText('Connecting to Review Platform')).toBeTruthy();
+    expect(screen.getByText('Connecting to LuthiAI')).toBeTruthy();
     expect(screen.getByText('Waiting for the local request list…')).toBeTruthy();
 
     await act(() => source.open());
@@ -763,7 +763,7 @@ describe('review requests page', () => {
     await waitFor(() => expect(screen.getByText('Refresh from GitHub')).toBeTruthy());
     expect(fetchMock.mock.calls[0][0]).toBe('/api/session');
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ code: 'test-code' });
-    expect(sessionStorage.getItem('review-platform-session')).toBe('session-token');
+    expect(sessionStorage.getItem('luthiai-session')).toBe('session-token');
     expect(screen.getByText(/Changed inputs can clear one-round authorization/)).toBeTruthy();
 
     const refresh = await clickMaterialButton(user, container, 'Refresh from GitHub');
@@ -799,11 +799,11 @@ describe('review requests page', () => {
     expect(await screen.findByText('GitHub rate limit reached. Try again later.')).toBeTruthy();
     await clickMaterialButton(user, container, 'Refresh from GitHub');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
-    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(sessionStorage.getItem('luthiai-session')).toBeNull();
   });
 
   it('restores a valid tab session and discards one from a previous server launch', async () => {
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const { unmount } = render(App);
@@ -814,7 +814,7 @@ describe('review requests page', () => {
     fetchMock.mockResolvedValueOnce({ ok: false, status: 401 });
     render(App);
     expect(await screen.findByLabelText('One-time code')).toBeTruthy();
-    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(sessionStorage.getItem('luthiai-session')).toBeNull();
   });
 
   it.each([
@@ -822,7 +822,7 @@ describe('review requests page', () => {
     ['pr_cycle', 'Authorize PR cycle', 'Authorized for the PR cycle.', 'PR cycle'],
   ])('authorizes %s for the displayed inputs and waits for the saved snapshot', async (scope, label, message, badge) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishAuthorization: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishAuthorization = resolve; }));
@@ -861,7 +861,7 @@ describe('review requests page', () => {
     { revision: 3 },
   ])('keeps the inspected inputs fixed when a snapshot changes to %o', async (change) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ changed: true }) });
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
@@ -889,7 +889,7 @@ describe('review requests page', () => {
 
   it('requires a discussion baseline for authorization but permits revocation without it', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ changed: true }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -910,7 +910,7 @@ describe('review requests page', () => {
 
   it.each(['open', 'closed'])('stops managing a %s PR and removes it when the live snapshot updates', async (state) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishRemoval: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishRemoval = resolve; }));
@@ -949,7 +949,7 @@ describe('review requests page', () => {
     { latest_round: round({ status: 'publishing', cleanup_pending: false }) },
   ])('disables management removal while work needs attention: %o', async (overrides) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
@@ -962,7 +962,7 @@ describe('review requests page', () => {
 
   it.each(['open', 'closed'])('cancels removal of a %s PR without sending a deletion request', async (state) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
@@ -978,7 +978,7 @@ describe('review requests page', () => {
 
   it('keeps the PR visible and reports a management removal conflict', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'Finish cleanup before stopping management.' }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -993,7 +993,7 @@ describe('review requests page', () => {
 
   it('reports authorization conflicts and connection errors and clears an expired session', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'Review inputs changed. Inspect the current head and revision before authorizing again.' }) })
       .mockRejectedValueOnce(new Error('offline'))
@@ -1010,14 +1010,14 @@ describe('review requests page', () => {
     expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
     await clickMaterialButton(user, container, 'Authorize one round');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
-    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(sessionStorage.getItem('luthiai-session')).toBeNull();
     expect(screen.queryByText('Manage authorization')).toBeNull();
     expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
   });
 
   it('prepares a review and validates a different model for the inspected inputs and rules', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishPreparation: FinishFetch;
     let finishValidation: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
@@ -1076,7 +1076,7 @@ describe('review requests page', () => {
     ['pull_closed', 'green', 'the PR is closed'],
   ])('shows %s as a blocker and disables model and scope selection', async (readiness, checks, readiness_message) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({ readiness, checks, readiness_message }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -1101,7 +1101,7 @@ describe('review requests page', () => {
     ['checks_unknown', 'unknown'], ['no_checks', 'no_results'],
   ])('refreshes %s from the visible preparation panel without reopening the row menu', async (readiness, checks) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishRefresh: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({ readiness, checks }) })
@@ -1139,7 +1139,7 @@ describe('review requests page', () => {
 
   it.each(['github', 'offline'])('keeps failed %s readiness refreshes visible and requires a successful retry before running', async (failure) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const ready = preparation({ readiness: 'ready', validated_model: 'model-alpha' });
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => ready });
@@ -1171,7 +1171,7 @@ describe('review requests page', () => {
     { head_sha: 'b'.repeat(40), revision: 3 }, { revision: 3 }, { authorization: 'pr_cycle' },
   ])('keeps preparation fixed and prevents validation after %o', async (change) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation() })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation(change) });
@@ -1197,7 +1197,7 @@ describe('review requests page', () => {
 
   it('requires new preparation after a model validation conflict', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation() })
       .mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'Configuration changed. Prepare again.' }) });
@@ -1217,7 +1217,7 @@ describe('review requests page', () => {
 
   it('uses the validated model as the default and explains a co-author hint match', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({
         readiness: 'ready', readiness_message: 'ready to run', resolved_model: 'model-beta',
@@ -1246,7 +1246,7 @@ describe('review requests page', () => {
 
   it('reports preparation errors and clears an expired session', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: false, status: 422, json: async () => ({ error: 'Check review configuration.' }) })
       .mockRejectedValueOnce(new Error('offline'))
@@ -1262,12 +1262,12 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Check review readiness');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
     expect(screen.queryByText('Check review readiness')).toBeNull();
-    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(sessionStorage.getItem('luthiai-session')).toBeNull();
   });
 
   it.each(['auto', 'full'])('runs the validated selection with %s scope for frozen inputs and prevents duplicate clicks', async (reviewMode) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let acceptRun: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({
@@ -1318,7 +1318,7 @@ describe('review requests page', () => {
     { latest_round: round({ status: 'failed', cleanup_status: 'needs_attention' }) },
   ])('disables running after live state changes to %o', async (change) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({
         readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-alpha',
@@ -1342,7 +1342,7 @@ describe('review requests page', () => {
 
   it('requires a new preparation after a rejected run request', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => preparation({
         readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-alpha',
@@ -1374,12 +1374,12 @@ describe('review requests page', () => {
       run: { status: 'running', round_id: 'r-example' } })]);
     expect(screen.getAllByText('Draft ready').length).toBeGreaterThan(0);
     expect(screen.getByText('Finishing cleanup…')).toBeTruthy();
-    expect(screen.getByText(/review-platform show-draft owner\/repo 15 --round r-example/)).toBeTruthy();
+    expect(screen.getByText(/luthiai show-draft owner\/repo 15 --round r-example/)).toBeTruthy();
     expect(screen.getByText(/Draft freshness is stale/)).toBeTruthy();
     await showSnapshot(source, [request({ latest_round: round({ status: 'awaiting_decision', cleanup_status: 'needs_attention' }),
       run: { status: 'failed', round_id: 'r-example', failure: 'execution' } })]);
     expect(screen.getByRole('alert').textContent).toContain('The private draft was saved');
-    expect(screen.getByText(/review-platform recover-review owner\/repo 15/)).toBeTruthy();
+    expect(screen.getByText(/luthiai recover-review owner\/repo 15/)).toBeTruthy();
     await showSnapshot(source, [request({ run: { status: 'failed', round_id: null, failure: 'stale_preparation' } })]);
     expect(screen.getByRole('alert').textContent).toContain('Prepare and inspect the review again');
     await showSnapshot(source, [request({ latest_round: round({ status: 'failed', failure: 'timeout', cleanup_pending: false, cleanup_status: 'complete' }),
@@ -1392,7 +1392,7 @@ describe('review requests page', () => {
 
   it('loads a private draft only on request and renders its exact contents as text', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishDraft: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishDraft = resolve; }));
@@ -1428,7 +1428,7 @@ describe('review requests page', () => {
     ['unknown', 'Current PR freshness could not be verified. Recheck GitHub before publishing. You can still reject this draft.'],
   ])('allows inspecting a draft with %s freshness and explains its limits', async (freshness, message) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness, lead_advice: '' }) }));
     const { container } = render(App);
@@ -1443,7 +1443,7 @@ describe('review requests page', () => {
 
   it('keeps the requested round fixed during loading and live updates until explicitly reopened', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishDraft: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockImplementationOnce(() => new Promise((resolve) => { finishDraft = resolve; }))
@@ -1472,7 +1472,7 @@ describe('review requests page', () => {
 
   it.each(['stale', 'unknown'])('confirms the displayed draft with %s freshness and waits for SSE after rejection', async (freshness) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishReject: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness }) })
@@ -1523,7 +1523,7 @@ describe('review requests page', () => {
 
   it('confirms the inspected publication hash, starts once, and shows the receipt from SSE', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     let finishPublication: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() })
@@ -1575,7 +1575,7 @@ describe('review requests page', () => {
 
   it.each(['stale', 'unknown'])('blocks publication for %s freshness while leaving rejection available', async (freshness) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ freshness }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -1594,7 +1594,7 @@ describe('review requests page', () => {
     { latest_round: round({ id: 'r-new', status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) },
   ])('invalidates publication confirmation across live input changes: %j', async (change) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() });
     vi.stubGlobal('fetch', fetchMock);
@@ -1616,7 +1616,7 @@ describe('review requests page', () => {
 
   it.each(['publishing', 'publication_unknown'])('shows recovery guidance for persisted %s without posting or allowing another decision', async (status) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft({ decision: status }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -1624,7 +1624,7 @@ describe('review requests page', () => {
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status, cleanup_pending: false, cleanup_status: 'complete' }) })]);
     await screen.findAllByText('Read private draft');
     expect(screen.getByText(/Publication needs recovery/)).toBeTruthy();
-    expect(screen.getByText(/review-platform recover-publication owner\/repo 15 --round r-example/)).toBeTruthy();
+    expect(screen.getByText(/luthiai recover-publication owner\/repo 15 --round r-example/)).toBeTruthy();
     await clickMaterialButton(user, container, 'Read private draft');
     await screen.findByText(draft().lead_advice);
     expect(screen.queryByText('Publish draft')).toBeNull();
@@ -1651,7 +1651,7 @@ describe('review requests page', () => {
     [true, 'in_progress'], [true, 'needs_attention'], [true, 'unknown'], [false, 'unknown'],
   ])('gates rejection until cleanup is complete (%s, %s)', async (cleanup_pending, cleanup_status) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() });
     vi.stubGlobal('fetch', fetchMock);
@@ -1674,7 +1674,7 @@ describe('review requests page', () => {
     { id: 'r-new' }, { status: 'publishing' }, { cleanup_pending: true, cleanup_status: 'in_progress' },
   ])('invalidates an open rejection confirmation when the round changes: %j', async (change) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() });
     vi.stubGlobal('fetch', fetchMock);
@@ -1700,7 +1700,7 @@ describe('review requests page', () => {
 
   it.each([409, 401, 'offline', 'already_rejected'])('handles rejection result %s without losing private contents unless the session ends', async (result) => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() });
     if (result === 'offline') fetchMock.mockRejectedValueOnce(new Error('offline'));
@@ -1720,7 +1720,7 @@ describe('review requests page', () => {
     if (result === 401) {
       expect(screen.queryByText(draft().lead_advice)).toBeNull();
       expect(screen.queryByRole('region', { name: 'Confirm draft rejection' })).toBeNull();
-      expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+      expect(sessionStorage.getItem('luthiai-session')).toBeNull();
     } else {
       expect(screen.getByText(draft().lead_advice)).toBeTruthy();
       if (result !== 'already_rejected') expect(screen.getByText('Confirm rejection')).toBeTruthy();
@@ -1729,7 +1729,7 @@ describe('review requests page', () => {
 
   it('removes old draft contents before reporting integrity or connection failures', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() })
       .mockResolvedValueOnce({ ok: false, status: 422, json: async () => ({ error: 'Could not verify the private draft.' }) })
@@ -1749,7 +1749,7 @@ describe('review requests page', () => {
 
   it('clears private contents and draft controls when the lead session expires', async () => {
     const user = userEvent.setup();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true, json: async () => draft() })
       .mockResolvedValueOnce({ ok: false, status: 401 }));
@@ -1763,7 +1763,7 @@ describe('review requests page', () => {
     expect(screen.queryByRole('region', { name: 'Private draft for owner/repo #15' })).toBeNull();
     expect(screen.queryByText(draft().lead_advice)).toBeNull();
     expect(screen.queryByText('Read private draft')).toBeNull();
-    expect(sessionStorage.getItem('review-platform-session')).toBeNull();
+    expect(sessionStorage.getItem('luthiai-session')).toBeNull();
   });
 
   it('offers draft inspection only to signed-in leads and only for completed drafts', async () => {
@@ -1771,7 +1771,7 @@ describe('review requests page', () => {
     await showSnapshot(FakeEventSource.instances[0], [request({ latest_round: round({ status: 'awaiting_decision' }) })]);
     expect(screen.queryByText('Read private draft')).toBeNull();
     unmount();
-    sessionStorage.setItem('review-platform-session', 'saved-token');
+    sessionStorage.setItem('luthiai-session', 'saved-token');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     render(App);

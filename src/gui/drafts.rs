@@ -12,7 +12,7 @@ use axum::{
     extract::{Path as UrlPath, Query, State as HttpState},
     http::{HeaderMap, StatusCode},
 };
-use review_platform::{
+use luthiai::{
     HeadSha, InputRevision, PrKey, RejectOutcome,
     config::{AgentId, ModelId, ReviewConfig},
     publication::PublicationHash,
@@ -155,7 +155,7 @@ pub(super) struct DraftResponse {
     publication_body: String,
     publication_body_sha256: PublicationHash,
     lead_advice: String,
-    receipt: Option<review_platform::publication::PublicationReceipt>,
+    receipt: Option<luthiai::publication::PublicationReceipt>,
     publisher_login: Option<String>,
     inspected_at: Option<u64>,
 }
@@ -244,7 +244,7 @@ mod tests {
         http::{Request, header},
     };
     use futures_util::StreamExt;
-    use review_platform::{State, publication::SealedBody};
+    use luthiai::{State, publication::SealedBody};
     use std::{
         fs,
         path::PathBuf,
@@ -433,7 +433,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         Err(publication_commands::PublishError::Publisher(
-            review_platform::github::publisher::PublisherError::WrongPublisher {
+            luthiai::github::publisher::PublisherError::WrongPublisher {
                 expected: "publisher".into(),
                 actual: "PRIVATE_ADAPTER_DETAIL".into(),
             },
@@ -469,7 +469,7 @@ mod tests {
             state.record_publication(
                 id,
                 attempt,
-                review_platform::publication::PublicationReceipt::new(
+                luthiai::publication::PublicationReceipt::new(
                     std::num::NonZeroU64::new(71).unwrap(),
                     "https://github.com/owner/repo/pull/15#pullrequestreview-71".into(),
                     "publisher".into(),
@@ -990,7 +990,7 @@ mod tests {
                 &key,
                 &HeadSha::new("a".repeat(40)).unwrap(),
                 InputRevision::new(2).unwrap(),
-                review_platform::AuthorizationScope::PrCycle,
+                luthiai::AuthorizationScope::PrCycle,
             )
             .unwrap();
         let discussion = state.get(&key).unwrap().discussion().unwrap().clone();
@@ -1143,7 +1143,7 @@ mod tests {
             let body = to_bytes(response.into_body(), 8192).await.unwrap();
             let inspected: serde_json::Value = serde_json::from_slice(&body).unwrap();
             let expected_body =
-                format!("{COMMENTS}\n\n_Agent review via Review Platform (round r-draft)._");
+                format!("{COMMENTS}\n\n_Agent review via LuthiAI (round r-draft)._");
             assert_eq!(inspected["publication_body"], expected_body);
             assert_eq!(
                 inspected["publication_body_sha256"],
@@ -1191,6 +1191,41 @@ mod tests {
     }
 
     #[test]
+    fn pre_rename_seals_keep_their_exact_body_and_hash_through_inspection_and_rejection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = fixture(directory.path());
+        let body = format!("{COMMENTS}\n\n_Agent review via Review Platform (round r-draft)._");
+        let hash = PublicationHash::of(body.as_bytes());
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        state["rounds"][0]["sealed_body"]["body"] = body.clone().into();
+        state["rounds"][0]["sealed_body"]["hash"] = hash.to_string().into();
+        state["rounds"][0]["cleanup_pending"] = false.into();
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let original = fs::read(&path).unwrap();
+        let key = PrKey::new("owner/repo", 15).unwrap();
+        let id = RoundId::new("r-draft").unwrap();
+        let inspected = offline_inspect(&path, &key, &id).unwrap();
+        assert_eq!(inspected.seal().body(), body);
+        assert_eq!(inspected.seal().hash(), &hash);
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let request = rejection_body(&path);
+        runtime().block_on(async {
+            let response = app(path.clone(), None, offline_inspect)
+                .oneshot(post_rejection(&request))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+        let saved = storage::load(&path).unwrap();
+        let round = saved.round(&id).unwrap();
+        assert_eq!(round.status(), RoundStatus::Rejected);
+        assert_eq!(round.sealed_body().unwrap().body(), body);
+        assert_eq!(round.sealed_body().unwrap().hash(), &hash);
+    }
+
+    #[test]
     fn inspection_does_not_save_a_missing_seal_or_reuse_recorded_freshness() {
         let directory = tempfile::tempdir().unwrap();
         let path = fixture(directory.path());
@@ -1220,7 +1255,7 @@ mod tests {
 
     #[test]
     fn inspection_forwards_confirmed_publication_ids_to_the_freshness_check() {
-        use review_platform::publication::PublicationReceipt;
+        use luthiai::publication::PublicationReceipt;
         use std::num::NonZeroU64;
         let directory = tempfile::tempdir().unwrap();
         let path = fixture(directory.path());
@@ -1381,7 +1416,7 @@ mod tests {
                 "agent_bytes" | "both_files" => assert!(matches!(error, DraftError::SealChanged)),
                 "missing_file" => assert!(matches!(
                     error,
-                    DraftError::Artifact(review_platform::review::ArtifactError::Read { .. })
+                    DraftError::Artifact(luthiai::review::ArtifactError::Read { .. })
                 )),
                 _ => unreachable!(),
             }

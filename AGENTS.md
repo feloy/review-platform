@@ -1,4 +1,4 @@
-# Working in Review Platform
+# Working in LuthiAI
 
 Read `README.md` and `ARCHITECTURE.md` before changing behavior.
 The README defines the user workflow.

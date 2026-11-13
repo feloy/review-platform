@@ -586,6 +586,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "luthiai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "directories",
+ "futures-util",
+ "getrandom 0.4.3",
+ "include_dir",
+ "libc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "ureq",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -692,32 +718,6 @@ checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
  "thiserror",
-]
-
-[[package]]
-name = "review-platform"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "directories",
- "futures-util",
- "getrandom 0.4.3",
- "include_dir",
- "libc",
- "rustix",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook",
- "subtle",
- "tempfile",
- "thiserror",
- "tokio",
- "tower",
- "ureq",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

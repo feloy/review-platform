@@ -2,7 +2,7 @@
 
 use crate::{preparation_commands::InspectedRules, storage};
 use anyhow::{Context, Result};
-use review_platform::{
+use luthiai::{
     Authorization, HeadSha, InputRevision, PrKey, RefreshOutcome, State, StateError,
     agent::{self, AgentRunError},
     archive, checkout,
@@ -92,7 +92,7 @@ impl InspectedRun {
 #[derive(Debug, Error)]
 pub enum InspectionError {
     #[error(transparent)]
-    Config(#[from] review_platform::config::ConfigError),
+    Config(#[from] luthiai::config::ConfigError),
     #[error(transparent)]
     State(#[from] StateError),
     #[error("authorization or configuration changed; prepare and inspect the review again")]
@@ -421,7 +421,7 @@ fn execute_review(
     let operation = (|| -> Result<(
         Freshness,
         Option<OpenShellError>,
-        review_platform::publication::SealedBody,
+        luthiai::publication::SealedBody,
     )> {
         let staged_image = archive::stage_archive(
             choice.archive(),
@@ -587,7 +587,7 @@ fn execute_review(
             .final_response
             .as_deref()
             .context("successful review did not provide a final response")?;
-        review_platform::review::write_agent_output(
+        luthiai::review::write_agent_output(
             &output.join(sandbox_layout::OUTPUT_FILE_NAME),
             final_response,
         )?;
@@ -599,13 +599,13 @@ fn execute_review(
             &round_dir.join("draft.json"),
             agent_log.clone(),
         )?;
-        let draft = review_platform::review::read_saved_draft(&round_dir.join("draft.json"))?;
-        let (agent, artifact_hash) = review_platform::review::read_agent_output_with_hash(
+        let draft = luthiai::review::read_saved_draft(&round_dir.join("draft.json"))?;
+        let (agent, artifact_hash) = luthiai::review::read_agent_output_with_hash(
             &output.join(sandbox_layout::OUTPUT_FILE_NAME),
             String::new(),
         )?;
         let final_response_hash =
-            review_platform::publication::PublicationHash::of(final_response.as_bytes());
+            luthiai::publication::PublicationHash::of(final_response.as_bytes());
         anyhow::ensure!(
             artifact_hash == final_response_hash,
             "saved agent artifact differs from the captured final response"
@@ -616,7 +616,7 @@ fn execute_review(
                 && draft.lead_advice() == agent.lead_advice(),
             "saved draft differs from the original agent artifact"
         );
-        let seal = review_platform::publication::SealedBody::new(
+        let seal = luthiai::publication::SealedBody::new(
             draft.comments(),
             id.as_str(),
             artifact_hash,
@@ -905,7 +905,7 @@ fn save_output_after_stop_attempt(
     draft_path: &Path,
     agent_log: String,
 ) -> Result<Option<OpenShellError>> {
-    let draft = review_platform::review::read_agent_output(output_path, agent_log)?;
+    let draft = luthiai::review::read_agent_output(output_path, agent_log)?;
     save_draft(draft_path, &draft)?;
     Ok(stop_result.err())
 }
@@ -950,7 +950,7 @@ mod tests {
     fn inspected_run(configuration_sha256: &PromptHash) -> InspectedRun {
         InspectedRun::new(
             ModelSelection::new(
-                review_platform::config::ModelId::new("model-alpha").unwrap(),
+                luthiai::config::ModelId::new("model-alpha").unwrap(),
                 HeadSha::new("a".repeat(40)).unwrap(),
                 InputRevision::new(2).unwrap(),
             ),
@@ -1042,7 +1042,7 @@ mod tests {
                 }
                 "selected_model" => {
                     decision.selection = ModelSelection::new(
-                        review_platform::config::ModelId::new("model-beta").unwrap(),
+                        luthiai::config::ModelId::new("model-beta").unwrap(),
                         HeadSha::new("a".repeat(40)).unwrap(),
                         InputRevision::new(2).unwrap(),
                     )
@@ -1222,7 +1222,7 @@ mod tests {
             stop_error,
             Some(OpenShellError::Failed("sandbox stop"))
         ));
-        let saved = review_platform::review::read_saved_draft(&draft).unwrap();
+        let saved = luthiai::review::read_saved_draft(&draft).unwrap();
         assert_eq!(saved.comments(), "Saved finding");
         assert_eq!(saved.lead_advice(), "Private advice");
         assert_eq!(saved.review_log(), "Review log");

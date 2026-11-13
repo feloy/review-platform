@@ -130,7 +130,7 @@ struct ApiComparison {
 
 impl GithubClient {
     pub fn new() -> GithubResult<Self> {
-        let token = match std::env::var("REVIEW_PLATFORM_GITHUB_TOKEN_RO") {
+        let token = match std::env::var("LUTHIAI_GITHUB_TOKEN_RO") {
             Ok(token) if !token.is_empty() => Some(token),
             Ok(_) | Err(std::env::VarError::NotPresent) => None,
             Err(std::env::VarError::NotUnicode(_)) => return Err(GithubError::TokenNotUtf8),
@@ -144,7 +144,7 @@ impl GithubClient {
             .timeout_per_read(Some(Duration::from_secs(15)))
             .max_redirects(0)
             .http_status_as_error(false)
-            .user_agent(concat!("review-platform/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("luthiai/", env!("CARGO_PKG_VERSION")))
             .tls_config(
                 TlsConfig::builder()
                     .root_certs(RootCerts::PlatformVerifier)
@@ -1346,7 +1346,7 @@ mod tests {
     #[test]
     fn confirmed_publication_id_is_excluded_but_a_copied_footer_still_triggers() {
         let key = PrKey::new("owner/repo", 42).unwrap();
-        let body = "Finding\n\n_Agent review via Review Platform (round r-one)._";
+        let body = "Finding\n\n_Agent review via LuthiAI (round r-one)._";
         let reviews = vec![
             serde_json::json!({"id": 41, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),
             serde_json::json!({"id": 42, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),
@@ -1733,7 +1733,7 @@ mod tests {
     #[test]
     fn preparation_rechecks_with_the_original_confirmed_review_exclusions() {
         let key = PrKey::new("owner/repo", 42).unwrap();
-        let body = "Finding\n\n_Agent review via Review Platform (round r-one)._";
+        let body = "Finding\n\n_Agent review via LuthiAI (round r-one)._";
         let reviews = vec![
             serde_json::json!({"id": 41, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),
             serde_json::json!({"id": 42, "user": {"id": 7}, "body": body, "state": "COMMENTED"}),

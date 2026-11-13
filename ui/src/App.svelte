@@ -3,9 +3,9 @@
   import RequestItem from './RequestItem.svelte';
 
   const connectionLabels = {
-    connecting: 'Connecting to Review Platform',
+    connecting: 'Connecting to LuthiAI',
     connected: 'Live local updates',
-    reconnecting: 'Reconnecting to Review Platform',
+    reconnecting: 'Reconnecting to LuthiAI',
   };
 
   let requests = $state([]);
@@ -23,7 +23,7 @@
   const refreshableRequests = $derived(requests.filter((request) => request.context?.state !== 'closed'));
   const requestActionPending = $derived(Object.values(requestActions).some((action) => action.pending));
 
-  const sessionKey = 'review-platform-session';
+  const sessionKey = 'luthiai-session';
 
   function storeSession(token) {
     sessionToken = token;
@@ -288,7 +288,7 @@
 <main class="page">
   <header class="page-header">
     <div>
-      <p class="eyebrow">Review Platform</p>
+      <p class="eyebrow">LuthiAI</p>
       <h1>Review requests</h1>
       <p class="intro">See which reviews need your attention and what to do next. Local progress updates automatically; use Refresh from GitHub to check for PR changes.</p>
     </div>

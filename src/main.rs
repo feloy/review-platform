@@ -12,7 +12,7 @@ mod storage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use review_platform::{
+use luthiai::{
     Authorization, AuthorizationScope, CommentSource, HeadSha, InputRevision, PrKey, RecordOutcome,
     RefreshOutcome, StateError, config::ModelId, github, round,
 };
@@ -23,7 +23,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Local operator prototype for Review Platform",
+    about = "Local operator prototype for LuthiAI",
     long_about = "Record PR requests and lead decisions, prepare and run reviews through an existing OpenShell gateway, and inspect, publish, reject, or recover private drafts."
 )]
 struct Cli {
@@ -319,13 +319,10 @@ fn run(cli: Cli) -> Result<()> {
                 println!("  latest round: {} ({})", round.id(), round.status());
                 if let Some(task) = round.task() {
                     match task.scope() {
-                        review_platform::prompt_builder::ReviewScope::Full => {
+                        luthiai::prompt_builder::ReviewScope::Full => {
                             println!("  review scope: full PR")
                         }
-                        review_platform::prompt_builder::ReviewScope::Incremental {
-                            since,
-                            review_id,
-                        } => {
+                        luthiai::prompt_builder::ReviewScope::Incremental { since, review_id } => {
                             println!(
                                 "  review scope: incremental since {since} (published review {review_id})"
                             );
@@ -337,11 +334,11 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 if matches!(
                     round.status(),
-                    review_platform::review::RoundStatus::Publishing
-                        | review_platform::review::RoundStatus::PublicationUnknown
+                    luthiai::review::RoundStatus::Publishing
+                        | luthiai::review::RoundStatus::PublicationUnknown
                 ) {
                     println!(
-                        "  publication recovery: review-platform recover-publication {} {} --round {}",
+                        "  publication recovery: luthiai recover-publication {} {} --round {}",
                         key.repository(),
                         key.number(),
                         round.id()
@@ -377,9 +374,9 @@ fn run(cli: Cli) -> Result<()> {
             full_review,
         } => {
             let mode = if full_review {
-                review_platform::prompt_builder::ReviewMode::Full
+                luthiai::prompt_builder::ReviewMode::Full
             } else {
-                review_platform::prompt_builder::ReviewMode::Auto
+                luthiai::prompt_builder::ReviewMode::Auto
             };
             review_commands::run_review(
                 state_file,
@@ -645,7 +642,7 @@ mod tests {
         for full in [false, true] {
             let head = "a".repeat(40);
             let mut args = vec![
-                "review-platform",
+                "luthiai",
                 "run-review",
                 "owner/repo",
                 "42",

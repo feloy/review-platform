@@ -18,9 +18,9 @@ const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum PublisherError {
-    #[error("set REVIEW_PLATFORM_GITHUB_TOKEN_RW to a token with pull-request write access")]
+    #[error("set LUTHIAI_GITHUB_TOKEN_RW to a token with pull-request write access")]
     MissingToken,
-    #[error("REVIEW_PLATFORM_GITHUB_TOKEN_RW must be UTF-8 without header control characters")]
+    #[error("LUTHIAI_GITHUB_TOKEN_RW must be UTF-8 without header control characters")]
     InvalidToken,
     #[error("publishing requires a configured publisher_login")]
     MissingExpectedLogin,
@@ -199,7 +199,7 @@ pub struct GithubPublisher {
 impl GithubPublisher {
     pub fn new(expected_login: Option<&str>) -> Result<Self, PublisherError> {
         let expected_login = expected_login.ok_or(PublisherError::MissingExpectedLogin)?;
-        let token = match std::env::var("REVIEW_PLATFORM_GITHUB_TOKEN_RW") {
+        let token = match std::env::var("LUTHIAI_GITHUB_TOKEN_RW") {
             Ok(token) if !token.is_empty() => token,
             Ok(_) | Err(std::env::VarError::NotPresent) => {
                 return Err(PublisherError::MissingToken);
@@ -225,7 +225,7 @@ impl GithubPublisher {
             .timeout_per_read(Some(Duration::from_secs(15)))
             .max_redirects(0)
             .http_status_as_error(false)
-            .user_agent(concat!("review-platform/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("luthiai/", env!("CARGO_PKG_VERSION")))
             .tls_config(
                 TlsConfig::builder()
                     .root_certs(RootCerts::PlatformVerifier)
@@ -598,7 +598,7 @@ mod tests {
         use crate::{InputRevision, ObservedDiscussion};
 
         let head = HeadSha::new(HEAD).unwrap();
-        let body = "Finding\n\n_Agent review via Review Platform (round r-test)._";
+        let body = "Finding\n\n_Agent review via LuthiAI (round r-test)._";
         let seal = SealedBody::new("Finding", "r-test", PublicationHash::of(b"agent"));
         let attempt = PublicationAttempt::new(
             NonZeroU64::new(1).unwrap(),
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn posts_the_exact_sealed_body_as_a_comment_on_the_reviewed_commit() {
-        let body = "Finding\n\n_Agent review via Review Platform (round r-test)._";
+        let body = "Finding\n\n_Agent review via LuthiAI (round r-test)._";
         let route = "/repos/owner/repo/pulls/42/reviews?per_page=100&page=1";
         let (url, worker) = serve(vec![
             Reply {

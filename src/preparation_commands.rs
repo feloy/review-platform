@@ -1,7 +1,7 @@
 //! Shared preparation and model-validation orchestration with locked persistence.
 
 use crate::storage;
-use review_platform::{
+use luthiai::{
     Authorization, ModelValidationError, PrKey, RefreshOutcome, ReviewRequest, StateError,
     archive::{self, ArchiveError},
     config::{
@@ -279,7 +279,7 @@ pub fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use review_platform::{AuthorizationScope, HeadSha, InputRevision, ObservedDiscussion, State};
+    use luthiai::{AuthorizationScope, HeadSha, InputRevision, ObservedDiscussion, State};
     use std::num::NonZeroU64;
 
     fn fixture(directory: &Path) -> (PathBuf, PathBuf, PrKey, HeadSha, InspectedRules) {
