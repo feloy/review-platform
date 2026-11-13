@@ -3114,7 +3114,7 @@ mod tests {
                 "id": "r-test",
                 "key": {"repository": "owner/repo", "number": 15},
                 "status": "running",
-                "sandbox": "rp-722d74657374",
+                "sandbox": "luthiai-722d74657374",
                 "head_sha": "a".repeat(40),
                 "revision": 2,
                 "discussion": {"author_id": 7, "comments": []},

@@ -53,9 +53,10 @@ impl RoundId {
 }
 
 fn sandbox_name(id: &RoundId) -> String {
+    const PREFIX: &str = "luthiai-";
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut name = String::with_capacity(3 + id.as_str().len() * 2);
-    name.push_str("rp-");
+    let mut name = String::with_capacity(PREFIX.len() + id.as_str().len() * 2);
+    name.push_str(PREFIX);
     for byte in id.as_str().bytes() {
         name.push(char::from(HEX[(byte >> 4) as usize]));
         name.push(char::from(HEX[(byte & 0x0f) as usize]));
@@ -495,7 +496,7 @@ impl RoundRecord {
         self.incomplete_log = incomplete_log;
     }
     pub(crate) fn validate(&self) -> Result<(), RoundStateError> {
-        if (self.sandbox != sandbox_name(&self.id) && self.sandbox != format!("rp-{}", self.id))
+        if self.sandbox != sandbox_name(&self.id)
             || self.created_at == 0
             || (self.status == RoundStatus::Starting && self.dispatched_at.is_some())
             || (self.status == RoundStatus::Running && self.dispatched_at.is_none())
@@ -852,7 +853,7 @@ mod tests {
         let upper = RoundId::new("r-YHmnDT").unwrap();
         let lower = RoundId::new("r-yhmndt").unwrap();
         let upper_name = sandbox_name(&upper);
-        assert_eq!(upper_name, "rp-722d59486d6e4454");
+        assert_eq!(upper_name, "luthiai-722d59486d6e4454");
         assert_ne!(upper_name, sandbox_name(&lower));
         assert!(
             upper_name
