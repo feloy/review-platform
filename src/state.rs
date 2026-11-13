@@ -2418,26 +2418,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_round_preserves_previous_luthiai_sandbox_identity() {
-        let mut raw = serde_json::to_value(state_with_saved_draft()).unwrap();
-        let previous = "luthiai-722d7075626c697368";
-        raw["rounds"][0]["sandbox"] = previous.into();
-        let state: State = serde_json::from_value(raw).unwrap();
-        state.validate().unwrap();
-        assert_eq!(state.rounds()[0].sandbox(), previous);
-        assert_eq!(
-            serde_json::to_value(state).unwrap()["rounds"][0]["sandbox"],
-            previous
-        );
-    }
-
-    #[test]
     fn persisted_round_rejects_legacy_and_mismatched_sandbox_names() {
         let saved = serde_json::to_value(state_with_saved_draft()).unwrap();
         for sandbox in [
             "rp-722d7075626c697368",
             "rp-r-publish",
             "luthiai-r-publish",
+            "luthiai-722d7075626c697368",
             "luthiai-722d6f74686572",
             "luthiai-n52gqzls",
         ] {

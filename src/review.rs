@@ -78,19 +78,6 @@ fn sandbox_name(id: &RoundId) -> String {
     name
 }
 
-fn previous_sandbox_name(id: &RoundId) -> String {
-    // Preserve recorded identities for inspecting and cleaning up pre-fix rounds.
-    const PREFIX: &str = "luthiai-";
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut name = String::with_capacity(PREFIX.len() + id.as_str().len() * 2);
-    name.push_str(PREFIX);
-    for byte in id.as_str().bytes() {
-        name.push(char::from(HEX[(byte >> 4) as usize]));
-        name.push(char::from(HEX[(byte & 0x0f) as usize]));
-    }
-    name
-}
-
 impl TryFrom<String> for RoundId {
     type Error = RoundStateError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -523,8 +510,7 @@ impl RoundRecord {
         self.incomplete_log = incomplete_log;
     }
     pub(crate) fn validate(&self) -> Result<(), RoundStateError> {
-        if (self.sandbox != sandbox_name(&self.id)
-            && self.sandbox != previous_sandbox_name(&self.id))
+        if self.sandbox != sandbox_name(&self.id)
             || self.created_at == 0
             || (self.status == RoundStatus::Starting && self.dispatched_at.is_some())
             || (self.status == RoundStatus::Running && self.dispatched_at.is_none())
