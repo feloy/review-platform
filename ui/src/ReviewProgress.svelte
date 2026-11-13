@@ -1,22 +1,16 @@
 <script>
   import TimeAgo from './TimeAgo.svelte';
+  import ReviewFailure from './ReviewFailure.svelte';
   let { request } = $props();
   const round = $derived(request.latest_round);
   const run = $derived(request.run);
   const publication = $derived(request.publication?.round_id === round?.id ? request.publication : null);
   const active = $derived(run?.status === 'starting' || run?.status === 'running');
-  const failed = $derived(run?.status === 'failed' && (!run.round_id || run.round_id === round?.id));
-  const failureLabels = {
-    preflight: 'Startup checks failed', checkout: 'Checkout failed', sandbox_create: 'Sandbox creation failed',
-    dispatch: 'Agent dispatch failed', timeout: 'Agent timed out', agent: 'Agent failed',
-    output: 'Draft validation failed', cleanup: 'Sandbox cleanup failed', recovery: 'Review interrupted',
-  };
 </script>
 
+<ReviewFailure {request} />
 {#if publication?.status === 'active'}
   <p class="action-note" role="status">Verifying publisher and PR inputs, then posting to GitHub…</p>
-{:else if publication?.error}
-  <p class="action-note action-error" role="alert">{publication.error}</p>
 {/if}
 {#if round?.status === 'publication_unknown' || (round?.status === 'publishing' && publication?.status !== 'active')}
   <p class="action-note warning" role="alert">Publication needs recovery. Check GitHub before deciding again; the GUI will not retry the post.</p>
@@ -41,20 +35,6 @@
     {#if run.status === 'starting' || run.round_id !== round?.id}Starting review… {/if}
     {run.status === 'starting' ? 'Checking inputs and preparing the review environment.' : 'Reviewer running in the sandbox.'}
   </p>
-{/if}
-{#if failed}
-  <p class="action-note action-error" role="alert">
-    {#if run.failure === 'stale_preparation'}
-      Review inputs, authorization, configuration, or model changed. Prepare and inspect the review again.
-    {:else if round?.id === run.round_id && round?.status === 'awaiting_decision'}
-      The private draft was saved, but the runner reported an error. Check sandbox cleanup before continuing.
-    {:else}
-      The GUI review job failed. Check the round status, GitHub access, gateway, and configuration, then prepare again.
-    {/if}
-  </p>
-{/if}
-{#if round?.failure}
-  <p class="action-note action-error">{failureLabels[round.failure] ?? 'Review failed'}. Prepare again after resolving the failure and any pending cleanup.</p>
 {/if}
 {#if round?.status === 'awaiting_decision'}
   {#if round.freshness === 'stale' || round.freshness === 'unknown'}

@@ -283,8 +283,15 @@
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <md-text-button onclick={() => openPanel(null)}>Close progress</md-text-button>
         </header>
-        <p>{situation.message}</p>
         <ReviewProgress {request} />
+        {#if signedIn && hasDraft}
+          <ButtonHelp text="Inspect the saved private draft without changing its decision." label="Read draft" disabled={action?.pending}>
+            {#snippet children(descriptionId)}
+              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+              <md-text-button disabled={action?.pending} aria-describedby={descriptionId} onclick={viewDraft}>Read draft</md-text-button>
+            {/snippet}
+          </ButtonHelp>
+        {/if}
       </section>
     {/if}
     {#if signedIn}
