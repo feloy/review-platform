@@ -112,6 +112,10 @@ Open the one-time sign-in link printed in the terminal and keep it private.
 The GUI runs at `http://localhost:8080` and guides you through reviews and draft decisions.
 Ask your assistant to register the PRs you want to review.
 
+Use **Refresh open PRs** in the header to check open and unchecked PRs for GitHub changes.
+The connection indicator reports local live updates;
+hover over it or focus it with the keyboard for details.
+
 The GUI has no persistent state of its own:
 requests, review history, and drafts are stored in local files.
 Restarting `luthiai gui` preserves saved work and provides a new sign-in link.
