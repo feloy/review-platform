@@ -587,13 +587,21 @@ describe('review requests page', () => {
   it('shows PR context as text with a GitHub check time distinct from local updates', async () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [request()]);
+    const identity = container.querySelector<HTMLElement>('.request-identity');
+    const fallback = within(identity).getByRole('link', { name: 'owner/repo #15' }) as HTMLAnchorElement;
+    expect(fallback.href).toBe('https://github.com/owner/repo/pull/15');
+    expect(fallback.closest('.pr-title')).toBeTruthy();
+    expect(identity.querySelector('.pr-meta')).toBeNull();
     const title = '<img src=x onerror=alert(1)> Fix login redirect';
     const context = { title, author: 'alice', state: 'open', draft: false,
       head_sha: 'a'.repeat(40), revision: 1, checked_at: Math.floor(Date.now() / 1000) - 120,
       checks: 'green', head_changed: false, discussion_changed: true };
     await showSnapshot(source, [request({ context })]);
     expect((screen.getByRole('link', { name: title }) as HTMLAnchorElement).href).toBe('https://github.com/owner/repo/pull/15');
-    expect(screen.getByText('by @alice · Open')).toBeTruthy();
+    expect(within(identity).getAllByRole('link')).toHaveLength(1);
+    expect(screen.getByText('owner/repo #15 · @alice · Open')).toBeTruthy();
+    expect(identity.querySelector('.pr-meta a')).toBeNull();
     expect(screen.getByText('2 minutes ago')).toBeTruthy();
     expect(screen.getByRole('group', { name: 'Local updates' })).toBeTruthy();
     expect(screen.getByText(/the author discussion changed/)).toBeTruthy();
@@ -609,8 +617,7 @@ describe('review requests page', () => {
       [request({ context: context({ state: 'closed' }) })]);
     const row = container.querySelector('.request-item');
     expect(screen.getByRole('link', { name: 'Fix login redirect' })).toBeTruthy();
-    expect(row.querySelector('.request-name a')?.textContent).toBe('owner/repo #15');
-    expect(screen.getByText('by @alice · Closed')).toBeTruthy();
+    expect(screen.getByText('owner/repo #15 · @alice · Closed')).toBeTruthy();
     expect(screen.queryByText('Pull request closed')).toBeNull();
     expect(row.querySelector('.request-row')).toBeNull();
     expect(row.querySelector('.request-details')).toBeNull();
@@ -671,7 +678,7 @@ describe('review requests page', () => {
     expect(screen.queryByText('Manage authorization')).toBeNull();
 
     await showSnapshot(source, [{ ...observed, context: context({ state: 'open' }) }]);
-    expect(screen.getByText('by @alice · Open')).toBeTruthy();
+    expect(screen.getByText('owner/repo #15 · @alice · Open')).toBeTruthy();
     expect(row.classList.contains('compact-closed')).toBe(false);
     expect(row.querySelector('.request-row')).toBeTruthy();
     expect(row.querySelector('.request-details')).toBeTruthy();
@@ -981,9 +988,9 @@ describe('review requests page', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await act(() => finishRemoval({ ok: true, json: async () => ({ changed: true }) }));
     expect(await screen.findByText(/Management stopped/)).toBeTruthy();
-    expect(screen.getByText('owner/repo')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Fix login redirect' })).toBeTruthy();
     await showSnapshot(source, []);
-    expect(screen.queryByText('owner/repo')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Fix login redirect' })).toBeNull();
     expect(screen.getByText(/No review requests recorded yet/)).toBeTruthy();
   });
 
@@ -1022,7 +1029,7 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Cancel removal');
     expect(screen.queryByText('Confirm removal')).toBeNull();
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(screen.getByText('owner/repo')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Fix login redirect' })).toBeTruthy();
   });
 
   it('keeps the PR visible and reports a management removal conflict', async () => {

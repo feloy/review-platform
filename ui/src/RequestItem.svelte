@@ -135,10 +135,14 @@
 <li class="request-item" class:compact-closed={compactClosed} bind:this={itemElement}>
   <header class="request-heading">
     <div class="request-identity">
-      <p class="field-label">Pull request</p>
-      {#if request.context?.title}<p class="pr-title"><a href={pullUrl} target="_blank" rel="noopener noreferrer">{request.context.title}</a></p>{/if}
-      <p class="request-name"><a href={pullUrl} target="_blank" rel="noopener noreferrer">{request.repository} <span>#{request.number}</span></a></p>
-      {#if request.context}<p class="secondary">by @{request.context.author} · {request.context.state === 'closed' ? 'Closed' : request.context.draft ? 'Draft PR' : 'Open'}</p>{/if}
+      <p class="pr-title">
+        <a href={pullUrl} target="_blank" rel="noopener noreferrer">
+          {#if request.context?.title}{request.context.title}{:else}{request.repository} <span>#{request.number}</span>{/if}
+        </a>
+      </p>
+      {#if request.context}
+        <p class="secondary pr-meta">{request.repository} #{request.number} · @{request.context.author} · {request.context.state === 'closed' ? 'Closed' : request.context.draft ? 'Draft' : 'Open'}</p>
+      {/if}
     </div>
     {#if !compactClosed || signedIn}
       <div class="request-actions">
