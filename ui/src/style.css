@@ -216,7 +216,6 @@ h2 {
   margin: 0 0 9px;
 }
 
-.request-name,
 .round-status {
   margin: 0;
   font-weight: 600;
@@ -224,23 +223,21 @@ h2 {
   overflow-wrap: anywhere;
 }
 
-.request-name span {
+.pr-title span {
   white-space: nowrap;
 }
 
-.request-name a,
 .pr-title a {
   color: inherit;
   text-decoration: none;
 }
 
-.request-name a:hover,
 .pr-title a:hover {
   text-decoration: underline;
 }
 
 .pr-title {
-  margin-bottom: 6px;
+  margin: 0;
   font-size: 1.15rem;
   font-weight: 600;
   line-height: 1.4;
@@ -271,10 +268,6 @@ h2 {
 
 .request-item.compact-closed .request-heading {
   padding-bottom: 22px;
-}
-
-.request-item.compact-closed .pr-title {
-  margin-bottom: 4px;
 }
 
 .next-step {
