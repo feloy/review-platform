@@ -89,6 +89,8 @@ fn command_arguments(
         prompt_path.into(),
         "--output-format".into(),
         "stream-json".into(),
+        "--json-schema".into(),
+        crate::review::OUTPUT_SCHEMA.into(),
         "--verbose".into(),
         "--include-partial-messages".into(),
         "--print".into(),
@@ -202,16 +204,18 @@ impl Renderer {
                 }
             }
             "result" => {
-                if event["is_error"] == true {
+                if event["is_error"] != false || event["subtype"] != "success" {
                     log.append("Claude failed\n")?;
                     return Err(AgentRunError::Unsuccessful);
                 }
-                let response = event["result"]
-                    .as_str()
-                    .filter(|response| !response.is_empty())
-                    .ok_or(AgentRunError::InvalidEvent)?;
+                // With --json-schema, result is commentary; only the separately
+                // validated structured_output object is the review artifact.
+                let response = event
+                    .get("structured_output")
+                    .filter(|response| response.is_object())
+                    .ok_or(AgentRunError::InvalidStructuredOutput)?;
                 self.finished = true;
-                self.final_response = Some(response.to_owned());
+                self.final_response = Some(response.to_string());
                 log.append("Claude finished\n")?;
             }
             _ => {}
@@ -231,6 +235,24 @@ mod tests {
 
     fn capture_stream(mut reader: impl Read, limit: u64, max_turns: u32) -> AgentRun {
         ClaudeAdapter.capture(&mut reader, limit, max_turns)
+    }
+
+    fn review_output() -> Value {
+        serde_json::json!({
+            "status": "ACCEPT_WITH_NITS",
+            "comments": "A finding with \"quotes\".\n\nKeep these Markdown bytes.\r\n",
+            "lead_advice": "Private advice for the lead."
+        })
+    }
+
+    fn successful_result() -> Value {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "The review is complete.",
+            "structured_output": review_output()
+        })
     }
 
     fn test_config_json() -> serde_json::Value {
@@ -280,6 +302,10 @@ mod tests {
         );
         assert_eq!(flag_value(&command, "--permission-mode"), "dontAsk");
         assert_eq!(flag_value(&command, "--tools"), "Read,Bash");
+        assert_eq!(
+            serde_json::from_str::<Value>(flag_value(&command, "--json-schema")).unwrap(),
+            serde_json::from_str::<Value>(crate::review::OUTPUT_SCHEMA).unwrap()
+        );
 
         let checkout = sandbox_layout::CHECKOUT_TARGET;
         // Pin the complete permission surface independently of command construction.
@@ -314,14 +340,22 @@ mod tests {
 
     #[test]
     fn captures_full_dialogue_and_fails_on_bad_utf8_or_limit() {
-        let stream = b"{\"type\":\"stream_event\",\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"file_path\":\"src/lib.rs\"}}]}}\n{\"type\":\"result\",\"result\":\"Final review\"}\n";
-        let capture = capture_stream(&stream[..], 1024, 100);
+        let stream = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":"hello"}}}),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/lib.rs"}}]}}),
+            successful_result()
+        );
+        let capture = capture_stream(stream.as_bytes(), 1024, 100);
         assert!(capture.result.is_ok());
-        assert_eq!(capture.final_response.as_deref(), Some("Final review"));
+        assert_eq!(
+            serde_json::from_str::<Value>(capture.final_response.as_deref().unwrap()).unwrap(),
+            review_output()
+        );
         assert!(capture.log.contains("hello"));
         assert!(capture.log.contains("src/lib.rs"));
         assert_eq!(
-            capture_stream(&stream[..], 3, 100).result,
+            capture_stream(stream.as_bytes(), 3, 100).result,
             Err(AgentRunError::LogTooLarge)
         );
         assert_eq!(
@@ -337,17 +371,87 @@ mod tests {
             capture_stream(&dialogue[..], 1024, 10).result,
             Err(AgentRunError::InvalidEvent)
         );
-        let missing_result = b"{\"type\":\"result\",\"is_error\":false}\n";
+        let mut missing_result = successful_result();
+        missing_result
+            .as_object_mut()
+            .unwrap()
+            .remove("structured_output");
+        missing_result["result"] = review_output().to_string().into();
         assert_eq!(
-            capture_stream(&missing_result[..], 1024, 10).result,
-            Err(AgentRunError::InvalidEvent)
+            capture_stream(missing_result.to_string().as_bytes(), 1024, 10).result,
+            Err(AgentRunError::InvalidStructuredOutput)
         );
     }
 
     #[test]
+    fn captures_structured_review_instead_of_commentary_wrapped_json() {
+        let mut event = successful_result();
+        event["result"] = format!(
+            "Explanatory preamble before the review.\n\n{}",
+            review_output()
+        )
+        .into();
+        let run = capture_stream(event.to_string().as_bytes(), 4096, 10);
+        assert_eq!(run.result, Ok(()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("review-output.json");
+        crate::review::write_agent_output(&artifact, run.final_response.as_deref().unwrap())
+            .unwrap();
+        let draft = crate::review::read_agent_output(&artifact, run.log).unwrap();
+        assert_eq!(draft.status(), crate::review::ReviewStatus::AcceptWithNits);
+        assert_eq!(
+            draft.comments(),
+            review_output()["comments"].as_str().unwrap()
+        );
+        assert_eq!(
+            draft.lead_advice(),
+            review_output()["lead_advice"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_nonobject_structured_output_without_falling_back_to_result_text() {
+        for output in [
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!("{}"),
+            serde_json::json!(true),
+        ] {
+            let mut event = successful_result();
+            event["result"] = review_output().to_string().into();
+            event["structured_output"] = output;
+            let run = capture_stream(event.to_string().as_bytes(), 4096, 10);
+            assert_eq!(run.result, Err(AgentRunError::InvalidStructuredOutput));
+            assert!(run.final_response.is_none());
+        }
+    }
+
+    #[test]
+    fn failed_results_cannot_supply_a_structured_review() {
+        for (subtype, is_error) in [
+            ("error_max_structured_output_retries", true),
+            ("error_during_execution", false),
+            ("success", true),
+        ] {
+            let mut event = successful_result();
+            event["subtype"] = subtype.into();
+            event["is_error"] = is_error.into();
+            let run = capture_stream(event.to_string().as_bytes(), 4096, 10);
+            assert_eq!(run.result, Err(AgentRunError::Unsuccessful));
+            assert!(run.final_response.is_none());
+        }
+    }
+
+    #[test]
     fn repeated_assistant_events_with_one_message_id_count_as_one_turn() {
-        let repeated = b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[]}}\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[]}}\n{\"type\":\"result\",\"result\":\"Final review\"}\n";
-        assert!(capture_stream(repeated.as_slice(), 1024, 1).result.is_ok());
+        let repeated = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({"type":"assistant","message":{"id":"msg-1","content":[]}}),
+            serde_json::json!({"type":"assistant","message":{"id":"msg-1","content":[]}}),
+            successful_result()
+        );
+        assert!(capture_stream(repeated.as_bytes(), 1024, 1).result.is_ok());
         let distinct = b"{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"content\":[]}}\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg-2\",\"content\":[]}}\n";
         assert_eq!(
             capture_stream(distinct.as_slice(), 1024, 1).result,
@@ -434,7 +538,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn successful_run_returns_the_final_result_response() {
+    fn successful_run_returns_the_structured_review() {
         use crate::agent::{AgentInvocation, run};
         use crate::openshell::OpenShell;
         use std::fs;
@@ -446,7 +550,7 @@ mod tests {
         let executable = dir.path().join("fake-openshell");
         fs::write(
             &executable,
-            b"#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"Final review\"}'\n",
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", successful_result()),
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -486,6 +590,9 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         assert_eq!(result.result, Ok(()));
-        assert_eq!(result.final_response.as_deref(), Some("Final review"));
+        assert_eq!(
+            serde_json::from_str::<Value>(result.final_response.as_deref().unwrap()).unwrap(),
+            review_output()
+        );
     }
 }

@@ -363,6 +363,11 @@ The system rules declare their priority and reserve review scope for LuthiAI's t
 Adapters deliver the same composed instructions and task through their existing CLI mechanisms.
 Permissions, mounts, provider policies, and strict output validation enforce the execution boundary.
 
+The Claude adapter supplies the output schema through `--json-schema`
+and captures the successful result event's `structured_output` object.
+Its free-form `result` text may contain commentary and is excluded from the artifact;
+a missing structured object fails the round.
+
 Model validation and round records fingerprint the exact composed prompt in `prompt_sha256`.
 The existing `format_sha256` also covers compiled system and reviewer guidance,
 both task templates and their context rendering, and the canonical output schema.
