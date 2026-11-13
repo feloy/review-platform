@@ -170,6 +170,19 @@ h1 {
   padding: 22px 28px;
 }
 
+.queue-heading h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pr-count {
+  --md-sys-color-error: #b3261e;
+  --md-sys-color-on-error: #fff;
+  --md-sys-shape-corner-full: 9999px;
+  --md-sys-typescale-label-sm: 500 0.6875rem/1rem var(--md-ref-typeface-plain);
+}
+
 h2 {
   margin-bottom: 0;
   font-size: 1.25rem;
