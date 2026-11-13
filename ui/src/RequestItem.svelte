@@ -21,9 +21,6 @@
   let preparation = $state(null);
   let preparationInvalid = $state(false);
   const situation = $derived(reviewSituation(request, preparation, preparationInvalid, selectedModel));
-  const showObservedChecks = $derived(request.context?.checks &&
-    !(request.context.checks === preparation?.checks &&
-      (situation.action === 'checks' || situation.secondaryAction === 'checks')));
   const pullUrl = $derived(`https://github.com/${request.repository}/pull/${request.number}`);
   const checksUrl = $derived(`https://github.com/${request.repository}/commit/${preparation?.head_sha ?? request.head_sha}/checks`);
 
@@ -267,9 +264,9 @@
     <footer class="request-footer">
       <p class="github-observation">
         {#if request.context}
-          {#if showObservedChecks}CI {{ green: 'passed', pending: 'pending', failing: 'failing', unknown: 'unknown', no_results: 'not reported' }[request.context.checks]} · {/if}GitHub checked <TimeAgo value={request.context.checked_at} />
+          GitHub checked <TimeAgo value={request.context.checked_at} />
         {:else}
-          GitHub not checked for these inputs
+          GitHub not checked
         {/if}
       </p>
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
