@@ -23,7 +23,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Local operator prototype for LuthiAI",
+    about = "Local GUI and agent CLI for AI pull request reviews",
     long_about = "Record PR requests and lead decisions, prepare and run reviews through an existing OpenShell gateway, and inspect, publish, reject, or recover private drafts."
 )]
 struct Cli {

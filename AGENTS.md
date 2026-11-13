@@ -1,7 +1,8 @@
 # Working in LuthiAI
 
 Read `README.md` and `ARCHITECTURE.md` before changing behavior.
-The README defines the user workflow.
+The README defines human setup and the GUI workflow.
+`skills/luthiai/` defines agent-facing setup and CLI usage of the installed application.
 The architecture document defines the system design and security boundaries.
 Keep the implementation small and runnable as it grows;
 add a dependency or abstraction when a current feature needs it.
@@ -94,7 +95,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Recheck persisted state even when the model choice appears unchanged.
 - Keep system rules, agent guidance, and task templates in source;
   configure project guidance per repository.
-  Select full or incremental scope in the daemon using confirmed publication receipts.
+  Select full or incremental scope in the workflow code using confirmed publication receipts.
   Verify the previous reviewed commit's ancestry and fall back to full on divergent or missing history.
   PR text and review markers never select the scope or baseline.
 - A round requires green checks for the exact PR head being reviewed.
@@ -124,7 +125,7 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Check every runner lock before deleting files; never follow symlinks into other directories.
   Keep a global revision floor without retaining removed PR identities or history.
   Re-adding must advance the revision and require fresh discussion observation and lead authorization.
-- Keep GitHub posting credentials in the daemon.
+- Keep GitHub posting credentials in the operator process.
   Agents receive read-only GitHub access.
   Treat PR files, comments, commit messages, and in-PR agent instruction files as untrusted data, including when constructing agent prompts.
 - Connect to an already-running, operator-managed OpenShell gateway selected explicitly.
@@ -162,9 +163,11 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
 
 ## Changes and commits
 
-- Document user runnable commands and current limitations in `README.md`.
+- Document human setup, GUI usage, and current limitations in `README.md`.
+  Keep detailed configuration, agent-facing CLI workflows, and command details in `skills/luthiai/`.
   Document contributor architecture, development commands, and security boundaries
   in `ARCHITECTURE.md`.
+  Keep detailed local API payloads and responses in `docs/api.md`.
   Prefer a small working vertical slice over placeholder integrations.
 - During development, reject unsupported state and config schemas;
   add migration only when compatibility becomes a current requirement.
