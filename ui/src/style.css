@@ -262,6 +262,21 @@ h2 {
   padding: 0 28px;
 }
 
+.next-step-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-left: auto;
+}
+
+.secondary-link {
+  color: var(--md-sys-color-primary);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .workflow-status {
   margin: 0;
   padding: 6px 11px;

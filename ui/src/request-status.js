@@ -20,7 +20,7 @@ export function reviewBlocker(request) {
 
 export function reviewSituation(request, preparation, invalid = false, selectedModel = preparation?.resolved_model) {
   const round = request.latest_round;
-  const result = (title, message, action, label, tone = 'neutral') => ({ title, message, action, label, tone });
+  const result = (title, message, action, label, tone = 'neutral', secondaryAction = null) => ({ title, message, action, label, tone, secondaryAction });
   if (request.publication?.status === 'active') return result('Publishing…', 'Publication continues if you close this tab.', 'progress', 'Show progress');
   if (round?.status === 'publication_unknown' || round?.status === 'publishing') return result('Publication uncertain', 'Check GitHub before deciding again. Inspect recovery instructions before continuing.', 'progress', 'View issue', 'warning');
   if (round?.cleanup_status === 'needs_attention') return result('Cleanup required', round.status === 'awaiting_decision' ? 'Your draft is saved. Recover the environment before publishing or rejecting it.' : 'Inspect recovery instructions before continuing.', round.status === 'awaiting_decision' ? 'draft' : 'progress', round.status === 'awaiting_decision' ? 'Read draft' : 'View issue', 'warning');
@@ -35,8 +35,8 @@ export function reviewSituation(request, preparation, invalid = false, selectedM
   if (request.authorization === 'awaiting_lead') return result('Needs permission', 'Inspect the PR, then allow one review or keep permission for later reviews.', 'authorize', 'Allow review', 'attention');
   if (preparation) {
     if (preparationOutdated(request, preparation, invalid)) return result('Needs refresh', 'Check readiness again before choosing a model or starting the review.', 'prepare', 'Refresh readiness', 'attention');
+    if (preparation.readiness === 'checks_pending') return result('CI pending', 'Fetch the latest CI results from GitHub.', 'prepare', 'Recheck CI', 'warning', 'checks');
     const checks = {
-      checks_pending: ['CI pending', 'Checks have not finished. Check readiness again after they complete.'],
       checks_failing: ['CI failing', 'Resolve the failing checks for this commit, then check readiness again.'],
       checks_unknown: ['CI unknown', 'Inspect the checks on GitHub, then check readiness again.'],
       no_checks: ['No CI results', 'A review requires passing checks for this commit. Inspect CI on GitHub, then check readiness again.'],

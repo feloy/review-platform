@@ -21,7 +21,11 @@
   let preparation = $state(null);
   let preparationInvalid = $state(false);
   const situation = $derived(reviewSituation(request, preparation, preparationInvalid, selectedModel));
+  const showObservedChecks = $derived(request.context?.checks &&
+    !(request.context.checks === preparation?.checks &&
+      (situation.action === 'checks' || situation.secondaryAction === 'checks')));
   const pullUrl = $derived(`https://github.com/${request.repository}/pull/${request.number}`);
+  const checksUrl = $derived(`https://github.com/${request.repository}/commit/${preparation?.head_sha ?? request.head_sha}/checks`);
 
   function toggleMenu() {
     if (actionsMenu.open) actionsMenu.close();
@@ -234,10 +238,14 @@
   {#if !compactClosed}
     <section class="next-step" data-tone={situation.tone} aria-label={`Next step for ${request.repository} #${request.number}`}>
       <h3 class="workflow-status" aria-live="polite">{situation.title}</h3>
+      <div class="next-step-actions">
+      {#if situation.secondaryAction === 'checks'}
+        <a class="secondary-link" href={checksUrl} target="_blank" rel="noopener noreferrer">View checks on GitHub</a>
+      {/if}
       {#if situation.action === 'github' || situation.action === 'checks' || situation.action === 'receipt'}
         <ButtonHelp text={situation.message} label={situation.label}>
           {#snippet children(descriptionId)}
-            <a class="primary-link" aria-describedby={descriptionId} href={situation.action === 'checks' ? `https://github.com/${request.repository}/commit/${preparation?.head_sha ?? request.head_sha}/checks` : situation.action === 'receipt' ? request.latest_round?.receipt?.url ?? pullUrl : pullUrl} target="_blank" rel="noopener noreferrer">{situation.label}</a>
+            <a class="primary-link" aria-describedby={descriptionId} href={situation.action === 'checks' ? checksUrl : situation.action === 'receipt' ? request.latest_round?.receipt?.url ?? pullUrl : pullUrl} target="_blank" rel="noopener noreferrer">{situation.label}</a>
           {/snippet}
         </ButtonHelp>
       {:else if situation.action === 'progress' || situation.action && signedIn}
@@ -254,11 +262,12 @@
       {:else if situation.action && !checkingSession}
         <a href="#sign-in-heading">Sign in to continue</a>
       {/if}
+      </div>
     </section>
     <footer class="request-footer">
       <p class="github-observation">
         {#if request.context}
-          {#if request.context.checks}CI {{ green: 'passed', pending: 'pending', failing: 'failing', unknown: 'unknown', no_results: 'not reported' }[request.context.checks]} · {/if}GitHub checked <TimeAgo value={request.context.checked_at} />
+          {#if showObservedChecks}CI {{ green: 'passed', pending: 'pending', failing: 'failing', unknown: 'unknown', no_results: 'not reported' }[request.context.checks]} · {/if}GitHub checked <TimeAgo value={request.context.checked_at} />
         {:else}
           GitHub not checked for these inputs
         {/if}
