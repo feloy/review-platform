@@ -41,8 +41,10 @@ describe('review next steps', () => {
     expect(reviewSituation({ ...request, validated_model: { model: 'beta', agent: 'runner' } }, preparation).action).toBe('prepare');
   });
 
-  it.each(['checks_pending', 'checks_failing', 'checks_unknown', 'no_checks'])('offers inspection instead of starting for %s', (readiness) => {
-    expect(reviewSituation(request, { ...preparation, readiness }).action).toBe('checks');
+  it.each(['checks_pending', 'checks_failing', 'checks_unknown', 'no_checks'])('offers rechecking or inspection instead of starting for %s', (readiness) => {
+    const situation = reviewSituation(request, { ...preparation, readiness });
+    expect(situation.action).toBe(readiness === 'checks_pending' ? 'prepare' : 'checks');
+    expect(situation.secondaryAction).toBe(readiness === 'checks_pending' ? 'checks' : null);
   });
 
   it('does not mistake an earlier publication for a review of newer discussion', () => {

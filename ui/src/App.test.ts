@@ -1228,6 +1228,53 @@ describe('review requests page', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('rechecks pending CI directly from the row after closing preparation', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('luthiai-session', 'saved-token');
+    const head = 'b'.repeat(40);
+    let finishRefresh: FinishFetch;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation({ head_sha: head, readiness: 'checks_pending', checks: 'pending' }) })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const snapshot = preparedRequest({ head_sha: head, context: context({ head_sha: head, revision: 2, checks: 'pending' }) });
+    await showSnapshot(source, [snapshot]);
+    const observation = container.querySelector('.github-observation');
+    expect(observation.textContent).toContain('CI pending');
+    await screen.findByText('Choose model');
+    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findByRole('heading', { name: 'CI pending' });
+    expect(observation.textContent).not.toContain('CI pending');
+    expect(observation.textContent).toContain('GitHub checked');
+    await clickMaterialButton(user, container, 'Close preparation');
+
+    const nextStep = container.querySelector<HTMLElement>('.next-step');
+    const checks = within(nextStep).getByRole('link', { name: 'View checks on GitHub' }) as HTMLAnchorElement;
+    expect(checks.href).toBe(`https://github.com/owner/repo/commit/${head}/checks`);
+    expect(checks.classList.contains('primary-link')).toBe(false);
+    expect(container.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
+    await showSnapshot(source, [{ ...snapshot, context: context({ head_sha: head, revision: 2, checks: 'green' }) }]);
+    expect(observation.textContent).toContain('CI passed');
+    const recheck = await clickMaterialButton(user, nextStep, 'Recheck CI');
+    expect(recheck.disabled).toBe(true);
+    expect(recheck.textContent.trim()).toBe('Checking…');
+    expect(screen.queryByText('GitHub checks and review preparation updated.')).toBeNull();
+    recheck.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/prepare');
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
+
+    await act(() => finishRefresh({ ok: true, json: async () => preparation({ head_sha: head }) }));
+    expect(await within(nextStep).findByRole('heading', { name: 'Needs model' })).toBeTruthy();
+    expect(nextStep.querySelector('md-filled-button').textContent.trim()).toBe('Choose model');
+    expect(within(nextStep).queryByRole('link', { name: 'View checks on GitHub' })).toBeNull();
+    expect((screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
+    expect((screen.getByText('Run review') as MaterialControl).disabled).toBe(true);
+  });
+
   it.each([
     ['checks_pending', 'pending'], ['checks_failing', 'failing'],
     ['checks_unknown', 'unknown'], ['no_checks', 'no_results'],
