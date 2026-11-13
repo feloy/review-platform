@@ -82,6 +82,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Closing a panel dismisses its UI without canceling jobs or changing saved decisions.
 - Clear completed GUI operation messages when the next operation starts.
   Preserve active job and batch progress while nested operations run.
+- Show queued and active refresh states on disabled PR action buttons.
+  Clear queue markers when work starts, is skipped, or the batch stops.
 - Distinguish live local progress from GitHub observation freshness in the GUI.
   Bind cached display context to observed inputs and discard it when inputs change or the PR is removed.
   Display-cache failures must not turn a completed refresh or preparation into an action failure.

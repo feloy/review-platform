@@ -312,6 +312,15 @@ describe('refresh open PRs', () => {
     const button = await clickMaterialButton(user, container, 'Refresh open PRs');
     expect(button.disabled).toBe(true);
     expect(screen.getByText('Refreshing 0 of 2 PRs…').getAttribute('role')).toBe('status');
+    const [first, second, closed] = [...container.querySelectorAll('.request-item')] as HTMLElement[];
+    expect(within(first).queryByText('Queued for refresh')).toBeNull();
+    expect(first.querySelector('.next-step md-filled-button').textContent.trim()).toBe('Refreshing…');
+    const queued = second.querySelector('.next-step md-filled-button') as MaterialControl;
+    expect(queued.textContent.trim()).toBe('Queued for refresh');
+    expect(queued.disabled).toBe(true);
+    expect(document.getElementById(queued.getAttribute('aria-describedby')).textContent).toBe('Waiting for earlier PRs to refresh.');
+    queued.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(within(closed).queryByText('Queued for refresh')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/refresh');
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
@@ -319,12 +328,18 @@ describe('refresh open PRs', () => {
     button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await showSnapshot(source, [request({ revision: 2 }), ...initial.slice(1), request({ number: 18 })]);
+    const added = container.querySelectorAll('.request-item')[3] as HTMLElement;
+    expect(within(added).queryByText('Queued for refresh')).toBeNull();
+    expect(container.querySelectorAll('.next-step md-filled-button').item(1).textContent.trim()).toBe('Queued for refresh');
     await act(() => finishFirst({ ok: true, json: async () => ({ changed: true, authorization_cleared: true }) }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(screen.getByText('Refreshing 1 of 2 PRs…').getAttribute('role')).toBe('status');
+    expect(screen.queryByText('Queued for refresh')).toBeNull();
+    expect(second.querySelector('.next-step md-filled-button').textContent.trim()).toBe('Refreshing…');
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ repository: 'owner/repo', number: 16 });
     await act(() => finishSecond({ ok: true, json: async () => ({ changed: false }) }));
     expect(await screen.findByText('Refreshed 2 of 2 PRs.')).toBeTruthy();
+    expect(screen.queryByText('Queued for refresh')).toBeNull();
     const firstRow = container.querySelector<HTMLElement>('.request-item');
     await clickMaterialButton(user, firstRow, 'Details');
     const inputs = within(firstRow).getByRole('heading', { name: 'Recorded inputs' }).parentElement;
@@ -343,6 +358,45 @@ describe('refresh open PRs', () => {
     expect(container.querySelector('.bulk-refresh-status')).toBeNull();
   });
 
+  it.each([
+    { label: 'View review', latest_round: round({ status: 'published', cleanup_pending: false, cleanup_status: 'complete' }) },
+    { label: 'Show progress', latest_round: round() },
+  ])('replaces $label with disabled queue and refresh buttons until the batch moves on', async ({ label, latest_round }) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('luthiai-session', 'saved-token');
+    let finishFirst: FinishFetch;
+    let finishSecond: FinishFetch;
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    await showSnapshot(FakeEventSource.instances[0], [request(), request({ number: 16, latest_round })]);
+    await screen.findAllByText('Refresh from GitHub');
+    const row = container.querySelectorAll('.request-item')[1] as HTMLElement;
+    const nextStep = row.querySelector<HTMLElement>('.next-step');
+    expect(within(nextStep).getByText(label)).toBeTruthy();
+    await clickMaterialButton(user, container, 'Refresh open PRs');
+    const queued = await clickMaterialButton(user, nextStep, 'Queued for refresh');
+    expect(queued.disabled).toBe(true);
+    queued.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(nextStep.querySelector('.primary-link')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review progress for owner/repo #16' })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(() => finishFirst({ ok: true, json: async () => ({ changed: false }) }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await within(nextStep).findByText('Refreshing…');
+    const refreshing = await clickMaterialButton(user, nextStep, 'Refreshing…');
+    expect(refreshing.disabled).toBe(true);
+    refreshing.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(screen.queryByRole('region', { name: 'Review progress for owner/repo #16' })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await act(() => finishSecond({ ok: true, json: async () => ({ changed: false }) }));
+    expect(await within(nextStep).findByText(label)).toBeTruthy();
+    expect(within(nextStep).queryByText('Queued for refresh')).toBeNull();
+    expect(within(nextStep).queryByText('Refreshing…')).toBeNull();
+  });
+
   it.each(['github', 'offline'])('continues after a %s failure and shows both the summary and individual error', async (failure) => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
@@ -359,20 +413,26 @@ describe('refresh open PRs', () => {
     const [first, second] = [...container.querySelectorAll('.request-item')] as HTMLElement[];
     expect(within(first).getByText(failure === 'github' ? 'GitHub is unavailable. Try again later.' : 'Could not connect to the local API. Try again.')).toBeTruthy();
     expect(within(second).getByText('No code or author discussion changes found.')).toBeTruthy();
+    expect(screen.queryByText('Queued for refresh')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('stops when the session expires and clears the old refresh error when signing in again', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
+    let finishRefresh: FinishFetch;
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
-      .mockResolvedValueOnce({ ok: false, status: 401 });
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [request(), request({ number: 16 })]);
     await screen.findAllByText('Refresh from GitHub');
     const button = await clickMaterialButton(user, container, 'Refresh open PRs');
+    expect((container.querySelectorAll('.next-step md-filled-button').item(1) as MaterialControl).disabled).toBe(true);
+    expect(container.querySelectorAll('.next-step md-filled-button').item(1).textContent.trim()).toBe('Queued for refresh');
+    await act(() => finishRefresh({ ok: false, status: 401 }));
     expect(await screen.findByText(/Refresh stopped because your session ended/)).toBeTruthy();
+    expect(screen.queryByText('Queued for refresh')).toBeNull();
     expect(await screen.findByLabelText('One-time code')).toBeTruthy();
     expect(sessionStorage.getItem('luthiai-session')).toBeNull();
     expect(button.disabled).toBe(true);
@@ -409,7 +469,10 @@ describe('refresh open PRs', () => {
     await act(() => finishRowRefresh({ ok: true, json: async () => ({ changed: false }) }));
     await waitFor(() => expect(button.disabled).toBe(false));
     await clickMaterialButton(user, container, 'Refresh open PRs');
+    expect([...container.querySelectorAll('.next-step md-filled-button')].filter((button) => button.textContent.trim() === 'Queued for refresh')).toHaveLength(2);
+    expect(screen.queryByText('No code or author discussion changes found.')).toBeNull();
     await showSnapshot(source, [request(), request({ number: 17, context: context({ state: 'closed' }) })]);
+    expect(screen.queryByText('Queued for refresh')).toBeNull();
     await act(() => finishBatchRefresh({ ok: true, json: async () => ({ changed: false }) }));
     expect(await screen.findByText('Refreshed 1 of 3 PRs. Skipped 2 busy, removed, or closed PRs.')).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(3);

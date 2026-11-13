@@ -20,6 +20,7 @@
   let signInError = $state('');
   let requestActions = $state({});
   let bulkRefresh = $state({ pending: false, message: '', error: false });
+  let refreshQueue = $state([]);
   const refreshableRequests = $derived(requests.filter((request) => request.context?.state !== 'closed'));
   const requestActionPending = $derived(Object.values(requestActions).some((action) => action.pending));
   const refreshDisabled = $derived(!sessionToken || !hasSnapshot || bulkRefresh.pending || requestActionPending || !refreshableRequests.length);
@@ -155,10 +156,13 @@
     let failed = 0;
     let skipped = 0;
     bulkRefresh = { pending: true, message: `Refreshing 0 of ${queued.length} PRs…`, error: false };
+    refreshQueue = queued.map((key) => key.repository + '#' + key.number);
+    for (const requestId of refreshQueue) delete requestActions[requestId];
     try {
       for (const key of queued) {
         if (!sessionToken) break;
         const requestId = key.repository + '#' + key.number;
+        refreshQueue = refreshQueue.filter((id) => id !== requestId);
         const current = requests.find((request) => request.repository === key.repository && request.number === key.number);
         if (!current || current.context?.state === 'closed' || requestActions[requestId]?.pending) skipped += 1;
         else if (await refreshFromGithub(current, requestId)) refreshed += 1;
@@ -172,6 +176,7 @@
         + (!sessionToken ? ' Refresh stopped because your session ended. Sign in to continue.' : '');
       bulkRefresh.error = failed > 0 || !sessionToken;
     } finally {
+      refreshQueue = [];
       bulkRefresh.pending = false;
     }
   }
@@ -379,6 +384,7 @@
         {#each requests as request (request.repository + '#' + request.number)}
           {@const requestId = request.repository + '#' + request.number}
           <RequestItem {request} {checkingSession} signedIn={Boolean(sessionToken)} action={requestActions[requestId]}
+            refreshQueued={refreshQueue.includes(requestId) && request.context?.state !== 'closed'}
             onRefresh={() => refreshFromGithub(request, requestId)}
             onAuthorize={(inspected, scope) => authorize(inspected, requestId, scope)}
             onRevoke={() => revoke(request, requestId)}
