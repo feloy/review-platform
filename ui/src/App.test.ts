@@ -652,7 +652,7 @@ describe('review requests page', () => {
     await user.keyboard('{ArrowDown}');
     await user.keyboard(key);
     await waitFor(() => expect(menu.open).toBe(false));
-    expect(screen.getByRole('region', { name: 'Authorize owner/repo #15' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeTruthy();
     await openActionsMenu(user, row);
     await user.click(screen.getByRole('heading', { name: 'LuthiAI', level: 1 }));
     await waitFor(() => expect(menu.open).toBe(false));
@@ -764,7 +764,7 @@ describe('review requests page', () => {
     await clickMaterialButton(user, row, 'Details');
     expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
     await clickMaterialButton(user, row, 'Review permissions');
-    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    const panel = screen.getByRole('region', { name: 'Review permissions for owner/repo #15' });
     expect(within(panel).getByRole('link', { name: observed.head_sha.slice(0, 7) }).getAttribute('href'))
       .toBe(`https://github.com/owner/repo/commit/${observed.head_sha}`);
     expect(within(panel).getByText('Allow one review')).toBeTruthy();
@@ -808,9 +808,9 @@ describe('review requests page', () => {
     await screen.findByRole('region', { name: 'Review preparation for owner/repo #15' });
     await clickMaterialButton(user, container, 'Review permissions');
     expect(screen.queryByRole('region', { name: 'Review preparation for owner/repo #15' })).toBeNull();
-    expect(screen.getByRole('region', { name: 'Authorize owner/repo #15' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeTruthy();
     await clickMaterialButton(user, container, 'Choose model');
-    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
     expect(screen.getByRole('region', { name: 'Review preparation for owner/repo #15' })).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await showSnapshot(source, [preparedRequest({ latest_round: round() })]);
@@ -825,7 +825,7 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Review permissions');
     expect(screen.queryByText(draft().lead_advice)).toBeNull();
     await clickMaterialButton(user, container, 'Stop managing PR');
-    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
     expect(screen.getByRole('region', { name: 'Stop managing owner/repo #15' })).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -1013,8 +1013,8 @@ describe('review requests page', () => {
   });
 
   it.each([
-    ['one_round', 'Allow one review', 'Authorized for one round.', 'One round'],
-    ['pr_cycle', 'Allow all reviews for this PR', 'Authorized for the PR cycle.', 'PR cycle'],
+    ['one_round', 'Allow one review', 'Permission granted for one review.', 'One review'],
+    ['pr_cycle', 'Allow all reviews for this PR', 'Permission granted for all reviews of this PR.', 'All reviews for this PR'],
   ])('authorizes %s for the displayed inputs and waits for the saved snapshot', async (scope, label, message, badge) => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
@@ -1028,7 +1028,7 @@ describe('review requests page', () => {
     await showSnapshot(source, [observed]);
     await screen.findByText('Review permissions');
     await clickMaterialButton(user, container, 'Review permissions');
-    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    const panel = screen.getByRole('region', { name: 'Review permissions for owner/repo #15' });
     const commit = within(panel).getByRole('link', { name: 'a'.repeat(7) }) as HTMLAnchorElement;
     expect(commit.href).toBe(`https://github.com/owner/repo/commit/${observed.head_sha}`);
     expect(commit.title).toBe(observed.head_sha);
@@ -1055,8 +1055,8 @@ describe('review requests page', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await act(() => finishAuthorization({ ok: true, json: async () => ({ changed: true }) }));
     expect(await screen.findByText(message)).toBeTruthy();
-    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
-    expect(screen.getByText('Awaiting lead')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
+    expect(screen.getByText('Not granted')).toBeTruthy();
     await showSnapshot(source, [{ ...observed, authorization: scope }]);
     expect(screen.getByText(badge)).toBeTruthy();
   });
@@ -1079,12 +1079,12 @@ describe('review requests page', () => {
     expect(current.closest('.button-help').getAttribute('aria-disabled')).toBe('true');
     expect(document.getElementById(current.getAttribute('aria-describedby')).textContent).toBe('This permission is already set.');
     expect(fetchMock).toHaveBeenCalledOnce();
-    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    const panel = screen.getByRole('region', { name: 'Review permissions for owner/repo #15' });
     expect(within(panel).getByRole('group', { name: 'Revoke permission' }).hasAttribute('aria-disabled')).toBe(false);
     expect(within(panel).getByRole('group', { name: nextLabel }).hasAttribute('aria-disabled')).toBe(false);
     await clickMaterialButton(user, panel, nextLabel);
     expect(JSON.parse(fetchMock.mock.calls[1][1].body).scope).toBe(nextScope);
-    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
   });
 
   it.each([
@@ -1104,7 +1104,7 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Review permissions');
     const updated = { ...observed, ...change };
     await showSnapshot(source, [updated]);
-    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    const panel = screen.getByRole('region', { name: 'Review permissions for owner/repo #15' });
     const commit = within(panel).getByRole('link', { name: 'a'.repeat(7) }) as HTMLAnchorElement;
     expect(commit.href).toBe(`https://github.com/owner/repo/commit/${observed.head_sha}`);
     expect(commit.title).toBe(observed.head_sha);
@@ -1134,19 +1134,19 @@ describe('review requests page', () => {
     await screen.findByText('Review permissions');
     await clickMaterialButton(user, container, 'Review permissions');
     expect(screen.getByText('Refresh from GitHub before allowing a review.')).toBeTruthy();
-    expect(screen.getByRole('region', { name: 'Authorize owner/repo #15' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeTruthy();
     expect((await clickMaterialButton(user, container, 'Allow one review')).disabled).toBe(true);
     expect((await clickMaterialButton(user, container, 'Allow all reviews for this PR')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
     const revoke = await clickMaterialButton(user, container, 'Revoke permission');
     expect(revoke.disabled).toBe(true);
-    expect(screen.getByRole('region', { name: 'Authorize owner/repo #15' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeTruthy();
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/revoke');
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
     await act(() => finishRevocation({ ok: true, json: async () => ({ changed: true }) }));
-    expect(await screen.findByText('Authorization revoked.')).toBeTruthy();
-    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    expect(await screen.findByText('Permission revoked.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
   });
 
   it('keeps the permissions panel open when revocation fails', async () => {
@@ -1161,10 +1161,10 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Review permissions');
     await clickMaterialButton(user, container, 'Revoke permission');
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not revoke permission.');
-    const panel = screen.getByRole('region', { name: 'Authorize owner/repo #15' });
+    const panel = screen.getByRole('region', { name: 'Review permissions for owner/repo #15' });
     expect(within(panel).getByText('Current permission: All reviews for this PR.')).toBeTruthy();
     expect((await clickMaterialButton(user, container, 'Close permissions')).disabled).toBe(false);
-    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
   });
 
   it.each(['open', 'closed'])('stops managing a %s PR and removes it when the live snapshot updates', async (state) => {
@@ -1264,14 +1264,14 @@ describe('review requests page', () => {
     await clickMaterialButton(user, container, 'Review permissions');
     await clickMaterialButton(user, container, 'Allow one review');
     expect(await screen.findByText(/Review inputs changed/)).toBeTruthy();
-    expect(screen.getByText('Awaiting lead')).toBeTruthy();
+    expect(screen.getByText('Not granted')).toBeTruthy();
     await clickMaterialButton(user, container, 'Allow one review');
     expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
     await clickMaterialButton(user, container, 'Allow one review');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
     expect(sessionStorage.getItem('luthiai-session')).toBeNull();
     expect(screen.queryByText('Review permissions')).toBeNull();
-    expect(screen.queryByRole('region', { name: 'Authorize owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
   });
 
   it('prepares a review and validates a different model for the inspected inputs and rules', async () => {
@@ -1908,7 +1908,7 @@ describe('review requests page', () => {
     await showSnapshot(source, [request({ authorization: 'pr_cycle', head_sha: 'b'.repeat(40), revision: 2,
       latest_round: { ...readyRound, status: 'rejected' } })]);
     expect(screen.getAllByText('Rejected').length).toBeGreaterThan(0);
-    expect(screen.getByText('PR cycle')).toBeTruthy();
+    expect(screen.getByText('All reviews for this PR')).toBeTruthy();
     expect(screen.queryByText('Draft ready')).toBeNull();
   });
 
@@ -2193,7 +2193,7 @@ describe('review requests page', () => {
 
     expect(screen.getByText('owner/repo')).toBeTruthy();
     expect(screen.getByText('#15')).toBeTruthy();
-    expect(screen.getByText('Awaiting lead')).toBeTruthy();
+    expect(screen.getByText('Not granted')).toBeTruthy();
     expect(container.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
     expect(screen.getAllByText('No rounds yet').every((element) => element.closest('[hidden]'))).toBe(true);
     expect(screen.queryByRole('heading', { name: 'Author discussion' })).toBeNull();
@@ -2213,7 +2213,7 @@ describe('review requests page', () => {
 
     const inputs = screen.getByRole('heading', { name: 'Recorded inputs' }).parentElement;
     expect(within(inputs).getByText('Input revision').nextElementSibling.textContent).toBe('2');
-    expect(screen.getByText('One round')).toBeTruthy();
+    expect(screen.getByText('One review')).toBeTruthy();
     expect(screen.getAllByText('Running').length).toBeGreaterThan(0);
     expect(screen.getByRole('heading', { name: 'Author discussion' })).toBeTruthy();
     const discussion = screen.getByRole('heading', { name: 'Author discussion' }).parentElement;
