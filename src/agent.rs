@@ -112,6 +112,8 @@ pub enum AgentRunError {
     TooManyTurns,
     #[error("the agent output stream was invalid or incomplete")]
     InvalidEvent,
+    #[error("the review agent did not return the required structured JSON output")]
+    InvalidStructuredOutput,
     #[error("reading the review log failed")]
     ReadLog,
 }

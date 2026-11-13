@@ -147,6 +147,7 @@ fn local_vm_mounts_draft_retrieval_and_cleanup() {
             "--no-session-persistence",
             "--permission-mode",
             "--allowedTools",
+            "--json-schema",
             "--include-partial-messages",
         ],
         AgentKind::Codex => {
