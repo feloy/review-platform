@@ -3,11 +3,14 @@
   import ReviewProgress from './ReviewProgress.svelte';
   import DraftPanel from './DraftPanel.svelte';
   import TimeAgo from './TimeAgo.svelte';
+  import ButtonHelp from './ButtonHelp.svelte';
   import { reviewSituation } from './request-status.js';
   import { tick } from 'svelte';
 
   let { request, signedIn, checkingSession, action, onRefresh, onAuthorize, onRevoke, onUnmanage, onPrepare, onValidate, onRun, onViewDraft, onRejectDraft, onPublishDraft } = $props();
   let expanded = $state(false);
+  let panel = $state(null);
+  const detailsId = $props.id();
   let menuButton = $state();
   let actionsMenu = $state();
   let menuOpen = $state(false);
@@ -45,11 +48,12 @@
     if (!signedIn || action?.pending) return;
     switch (situation.action) {
       case 'refresh': await onRefresh(); break;
-      case 'authorize': inspected = { ...request }; break;
+      case 'authorize': openPermissions(); break;
       case 'prepare': await prepareReview(); break;
       case 'draft': await viewDraft(); break;
       case 'run': await runReview(selectedModel); break;
       case 'model':
+        openPanel('preparation');
         await tick();
         itemElement?.querySelector('.preparation-panel')?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
         itemElement?.querySelector('.model-choice select')?.focus();
@@ -57,7 +61,21 @@
     }
   }
   let draft = $state(null);
-  let confirmingRemoval = $state(false);
+  function openPanel(next) {
+    panel = next;
+    if (next !== 'permissions') inspected = null;
+    if (next !== 'draft') draft = null;
+  }
+
+  function openPermissions() {
+    if (action?.pending || !signedIn || panel === 'permissions') return;
+    openPanel('permissions');
+    inspected = { ...request };
+  }
+
+  const primaryLabel = $derived(action?.pending && situation.action !== 'progress'
+    ? ({ refresh: 'Refreshing…', prepare: 'Checking…', 'view-draft': 'Loading draft…', run: 'Starting review…' }[action.operation] ?? situation.label)
+    : situation.label);
   const hasDraft = $derived(['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']
     .includes(request.latest_round?.status));
   const managementBlocked = $derived(
@@ -68,25 +86,31 @@
     request.context?.state === 'closed' &&
     request.latest_round?.status !== 'awaiting_decision' &&
     !managementBlocked);
-  $effect(() => { if (!signedIn) { draft = null; confirmingRemoval = false; } });
+  $effect(() => { if (!signedIn) { openPanel(null); preparation = null; } });
   const inputsChanged = $derived(inspected &&
     (inspected.head_sha !== request.head_sha || inspected.revision !== request.revision));
+  const permissionDisabled = $derived(action?.pending || inputsChanged || !inspected?.discussion);
+  const permissionHelp = $derived(inputsChanged ? 'Close this panel and inspect the current PR inputs before allowing a review.'
+    : !inspected?.discussion ? 'Refresh from GitHub to observe the author discussion first.'
+    : 'Changed inputs can clear permission for one round and model validation.');
 
   async function authorize(scope) {
-    if (!inspected || inputsChanged || action?.pending) return;
-    if (await onAuthorize(inspected, scope)) inspected = null;
+    if (!inspected?.discussion || inputsChanged || action?.pending) return;
+    if (await onAuthorize(inspected, scope)) openPanel(null);
   }
 
   async function removeRequest() {
     if (action?.pending || managementBlocked) return;
-    if (await onUnmanage()) confirmingRemoval = false;
+    if (await onUnmanage()) openPanel(null);
   }
 
   async function prepareReview() {
     if (action?.pending) return;
+    openPanel('preparation');
     const result = await onPrepare();
     if (result) {
       preparation = result;
+      selectedModel = result.resolved_model;
       preparationInvalid = false;
     } else if (preparation) preparationInvalid = true;
   }
@@ -94,23 +118,29 @@
   async function validateModel(model) {
     if (!preparation || preparationInvalid || action?.pending) return;
     const result = await onValidate(preparation, model);
-    if (result) preparation = result;
-    else preparationInvalid = true;
+    if (result) {
+      preparation = result;
+      selectedModel = result.resolved_model;
+    } else preparationInvalid = true;
   }
 
   async function runReview(model) {
     if (!preparation || preparationInvalid || action?.pending) return;
     const result = await onRun(preparation, model, reviewMode);
     preparationInvalid = true;
-    if (result) preparation = null;
+    if (result) {
+      preparation = null;
+      openPanel(null);
+    }
   }
 
   async function viewDraft() {
     if (!signedIn || !hasDraft || action?.pending) return;
     const roundId = request.latest_round.id;
+    openPanel('draft');
     draft = null;
     const result = await onViewDraft(roundId);
-    if (result && signedIn) draft = result;
+    if (result && signedIn && panel === 'draft') draft = result;
   }
 
   const authorizationLabels = {
@@ -144,7 +174,7 @@
         <p class="secondary pr-meta">{request.repository} #{request.number} · @{request.context.author} · {request.context.state === 'closed' ? 'Closed' : request.context.draft ? 'Draft' : 'Open'}</p>
       {/if}
     </div>
-    {#if !compactClosed || signedIn}
+    {#if signedIn}
       <div class="request-actions">
       <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -160,45 +190,18 @@
         positioning="popover" anchor-corner="end-end" menu-corner="start-end"
         aria-label={`Actions for ${request.repository} #${request.number}`}
         onopening={() => menuOpen = true} onclosing={() => menuOpen = false}>
-        {#if !compactClosed}
-          <md-menu-item type="button" aria-expanded={expanded}
-            aria-label={`${expanded ? 'Hide' : 'Show'} details for ${request.repository} #${request.number}`}
-            onclose-menu={(event) => selectMenuAction(event, () => expanded = !expanded)}>
-            <div slot="headline">{expanded ? 'Hide details' : 'Show details'}</div>
-          </md-menu-item>
-        {/if}
-        {#if signedIn}
-          {#if !compactClosed && hasDraft}
-            <md-menu-item type="button" disabled={action?.pending}
-              aria-label={`Read private draft for ${request.repository} #${request.number}`}
-              onclose-menu={(event) => selectMenuAction(event, viewDraft)}>
-              <div slot="headline">{action?.pending && action.operation === 'view-draft' ? 'Loading draft…' : 'Read private draft'}</div>
-            </md-menu-item>
-          {/if}
           <md-menu-item type="button" disabled={action?.pending}
             aria-label={`Refresh ${request.repository} #${request.number} from GitHub`}
             onclose-menu={(event) => selectMenuAction(event, onRefresh)}>
             <div slot="headline">{action?.pending && action.operation === 'refresh' ? 'Refreshing…' : 'Refresh from GitHub'}</div>
           </md-menu-item>
           {#if !compactClosed}
-            <md-menu-item type="button" disabled={action?.pending || !request.discussion}
-              aria-expanded={Boolean(inspected)}
-              aria-label={`Manage authorization for ${request.repository} #${request.number}`}
-              onclose-menu={(event) => selectMenuAction(event, () => inspected = { ...request })}>
-              <div slot="headline">Manage authorization</div>
-            </md-menu-item>
             <md-menu-item type="button" disabled={action?.pending}
-              aria-label={`Check review readiness for ${request.repository} #${request.number}`}
-              onclose-menu={(event) => selectMenuAction(event, prepareReview)}>
-              <div slot="headline">{action?.pending && action.operation === 'prepare' ? 'Preparing…' : 'Check review readiness'}</div>
+              aria-expanded={panel === 'permissions'}
+              aria-label={`Review permissions for ${request.repository} #${request.number}`}
+              onclose-menu={(event) => selectMenuAction(event, openPermissions)}>
+              <div slot="headline">Review permissions</div>
             </md-menu-item>
-            {#if request.authorization !== 'awaiting_lead' || request.validated_model}
-              <md-menu-item type="button" disabled={action?.pending}
-                aria-label={`Revoke authorization for ${request.repository} #${request.number}`}
-                onclose-menu={(event) => selectMenuAction(event, onRevoke)}>
-                <div slot="headline">{action?.pending && action.operation === 'revoke' ? 'Revoking…' : 'Revoke authorization'}</div>
-              </md-menu-item>
-            {/if}
           {/if}
           {#if !compactClosed}<md-divider></md-divider>{/if}
           <md-menu-item type="button" disabled={action?.pending || managementBlocked}
@@ -206,101 +209,83 @@
             title={managementBlocked
               ? 'Finish or recover the active review, cleanup, or publication before stopping management.'
               : 'Permanently delete this PR and its local drafts, logs, and review history.'}
-            onclose-menu={(event) => selectMenuAction(event, () => confirmingRemoval = true)}>
+            onclose-menu={(event) => selectMenuAction(event, () => openPanel('remove'))}>
             <div slot="headline">{action?.pending && action.operation === 'unmanage' ? 'Stopping management…' : 'Stop managing PR'}</div>
           </md-menu-item>
-        {/if}
       </md-menu>
       </div>
     {/if}
   </header>
-  {#if signedIn && confirmingRemoval}
+  {#if signedIn && panel === 'remove'}
     <section class="authorization-panel" aria-label={`Stop managing ${request.repository} #${request.number}`}>
-      <h3>Stop managing PR</h3>
+      <header class="panel-heading">
+        <h3>Stop managing PR</h3>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-text-button disabled={action?.pending} onclick={() => openPanel(null)}>Close removal</md-text-button>
+      </header>
       <p>Permanently remove {request.repository} #{request.number} and all its local drafts, logs, and review history.</p>
       <p>This cannot be undone. Published reviews remain on GitHub.</p>
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <md-filled-button disabled={action?.pending || managementBlocked} onclick={removeRequest}>
         Confirm removal
       </md-filled-button>
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-text-button disabled={action?.pending} onclick={() => confirmingRemoval = false}>Cancel removal</md-text-button>
     </section>
   {/if}
   {#if !compactClosed}
     <section class="next-step" data-tone={situation.tone} aria-label={`Next step for ${request.repository} #${request.number}`}>
-    <div>
-      <h3>{situation.title}</h3>
-      <p>{situation.message}</p>
+      <h3 class="workflow-status" aria-live="polite">{situation.title}</h3>
+      {#if situation.action === 'github' || situation.action === 'checks' || situation.action === 'receipt'}
+        <ButtonHelp text={situation.message} label={situation.label}>
+          {#snippet children(descriptionId)}
+            <a class="primary-link" aria-describedby={descriptionId} href={situation.action === 'checks' ? `https://github.com/${request.repository}/commit/${preparation?.head_sha ?? request.head_sha}/checks` : situation.action === 'receipt' ? request.latest_round?.receipt?.url ?? pullUrl : pullUrl} target="_blank" rel="noopener noreferrer">{situation.label}</a>
+          {/snippet}
+        </ButtonHelp>
+      {:else if situation.action === 'progress' || situation.action && signedIn}
+        <ButtonHelp text={situation.message} label={situation.label} disabled={situation.action !== 'progress' && action?.pending}>
+          {#snippet children(descriptionId)}
+            <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <md-filled-button disabled={situation.action !== 'progress' && action?.pending} aria-describedby={descriptionId}
+              aria-expanded={situation.action === 'progress' ? panel === 'progress' : undefined}
+              aria-controls={situation.action === 'progress' ? `${detailsId}-progress` : undefined}
+              onclick={() => situation.action === 'progress' ? openPanel('progress') : nextAction()}>{primaryLabel}</md-filled-button>
+          {/snippet}
+        </ButtonHelp>
+      {:else if situation.action && !checkingSession}
+        <a href="#sign-in-heading">Sign in to continue</a>
+      {/if}
+    </section>
+    <footer class="request-footer">
       <p class="github-observation">
         {#if request.context}
-          GitHub last checked <TimeAgo value={request.context.checked_at} />
-          · <a href={`https://github.com/${request.repository}/commit/${request.context.head_sha}`} target="_blank" rel="noopener noreferrer">commit {request.context.head_sha.slice(0, 7)}</a>
-          {#if request.context.checks} · Checks: {{ green: 'passed', pending: 'pending', failing: 'failing', unknown: 'unknown', no_results: 'none reported' }[request.context.checks]}{/if}
+          {#if request.context.checks}CI {{ green: 'passed', pending: 'pending', failing: 'failing', unknown: 'unknown', no_results: 'not reported' }[request.context.checks]} · {/if}GitHub checked <TimeAgo value={request.context.checked_at} />
         {:else}
-          No GitHub check details are available for these inputs in this server session.
+          GitHub not checked for these inputs
         {/if}
       </p>
-      {#if request.context?.head_changed || request.context?.discussion_changed}
-        <p class="observed-change">Last GitHub check: {request.context.head_changed && request.context.discussion_changed ? 'the PR commit and author discussion changed' : request.context.head_changed ? 'the PR commit changed' : 'the author discussion changed'}.</p>
-      {/if}
-    </div>
-    {#if situation.action === 'github' || situation.action === 'checks' || situation.action === 'receipt'}
-      <a class="primary-link" href={situation.action === 'checks' ? `https://github.com/${request.repository}/commit/${preparation?.head_sha ?? request.head_sha}/checks` : situation.action === 'receipt' ? request.latest_round?.receipt?.url ?? pullUrl : pullUrl} target="_blank" rel="noopener noreferrer">{situation.label}</a>
-    {:else if situation.action && signedIn}
-      <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <md-filled-button disabled={action?.pending} onclick={nextAction}>{situation.label}</md-filled-button>
-    {:else if situation.action && !checkingSession}
-      <a href="#sign-in-heading">Sign in to continue</a>
+      <md-text-button aria-label={`Details for ${request.repository} #${request.number}`}
+        aria-expanded={expanded} aria-controls={detailsId} onclick={() => expanded = true}>Details</md-text-button>
+    </footer>
+    {#if panel === 'progress'}
+      <section class="progress-panel" id={`${detailsId}-progress`} aria-label={`Review progress for ${request.repository} #${request.number}`}>
+        <header class="panel-heading">
+          <h3>Review progress</h3>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-text-button onclick={() => openPanel(null)}>Close progress</md-text-button>
+        </header>
+        <p>{situation.message}</p>
+        <ReviewProgress {request} />
+      </section>
     {/if}
-    </section>
-    <div class="request-row">
-    <div class="field">
-      <p class="field-label">Recorded inputs</p>
-      <code class="head-sha">{request.head_sha}</code>
-      <p class="secondary">Revision {request.revision}</p>
-    </div>
-    <div class="field">
-      <p class="field-label">Authorization</p>
-      <span class="badge" data-state={request.authorization}>
-        {authorizationLabels[request.authorization] ?? 'Unknown'}
-      </span>
-    </div>
-    <div class="field">
-      <p class="field-label">Latest round</p>
-      {#if request.latest_round}
-        <p class="round-status">{roundLabels[request.latest_round.status] ?? 'Unknown'}</p>
-        <p class="secondary">{request.latest_round.id}</p>
-        {#if request.latest_round.task}
-          <p class="secondary">{request.latest_round.task.scope.mode === 'full'
-            ? 'Full PR review' : `Incremental since ${request.latest_round.task.scope.since.slice(0, 7)}`}</p>
-        {/if}
-        {#if request.latest_round.cleanup_status === 'needs_attention'}
-          <p class="warning">
-            {request.latest_round.status === 'starting' || request.latest_round.status === 'running'
-              ? 'Review stopped; cleanup may be required'
-              : 'Cleanup pending'}
-          </p>
-        {:else if request.latest_round.cleanup_status === 'unknown'}
-          <p class="secondary">Cleanup status unavailable</p>
-        {:else if request.latest_round.cleanup_status === 'in_progress' &&
-          request.latest_round.status !== 'starting' && request.latest_round.status !== 'running'}
-          <p class="secondary">Finishing cleanup…</p>
-        {/if}
-      {:else}
-        <p class="secondary">No rounds yet</p>
-      {/if}
-    </div>
-    </div>
     {#if signedIn}
-    <p class="action-note">Changed inputs can clear one-round authorization and model validation.</p>
-    {#if !request.discussion}
-      <p class="action-note">Refresh from GitHub before authorizing this request.</p>
-    {/if}
-    {#if inspected}
+    {#if panel === 'permissions' && inspected}
       <section class="authorization-panel" aria-label={`Authorize ${request.repository} #${request.number}`}>
-        <h3>Authorize review</h3>
+        <header class="panel-heading">
+          <h3>Review permissions</h3>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-text-button disabled={action?.pending} onclick={() => openPanel(null)}>Close permissions</md-text-button>
+        </header>
         <p>Inspect the <a href={`https://github.com/${request.repository}/pull/${request.number}`}
           target="_blank" rel="noopener noreferrer">PR on GitHub</a> before authorizing these inputs.</p>
         <dl class="detail-list">
@@ -308,33 +293,44 @@
           <div><dt>Input revision</dt><dd>{inspected.revision}</dd></div>
         </dl>
         <p>One round permits a single review of these inputs. PR cycle keeps authorization active for later commits and author replies.</p>
-        <p>A review also requires green checks and a validated model.</p>
+        <p>Current permission: {authorizationLabels[request.authorization] ?? 'Unknown'}.</p>
+        {#if !inspected.discussion}<p class="warning">Refresh from GitHub before allowing a review.</p>{/if}
         {#if inputsChanged}
           <p class="action-error" role="alert">Inputs changed. Close this panel and inspect the current head and revision before authorizing.</p>
         {/if}
         <div class="authorization-buttons">
+          <ButtonHelp text={permissionHelp} label="Authorize one round" disabled={permissionDisabled}>
+          {#snippet children(descriptionId)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <md-filled-button disabled={action?.pending || inputsChanged} onclick={() => authorize('one_round')}>
+          <md-filled-button disabled={permissionDisabled} aria-describedby={descriptionId} onclick={() => authorize('one_round')}>
             Authorize one round
           </md-filled-button>
+          {/snippet}
+          </ButtonHelp>
+          <ButtonHelp text={permissionHelp} label="Authorize PR cycle" disabled={permissionDisabled}>
+          {#snippet children(descriptionId)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <md-text-button disabled={action?.pending || inputsChanged} onclick={() => authorize('pr_cycle')}>
+          <md-text-button disabled={permissionDisabled} aria-describedby={descriptionId} onclick={() => authorize('pr_cycle')}>
             Authorize PR cycle
           </md-text-button>
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <md-text-button disabled={action?.pending} onclick={() => inspected = null}>Close</md-text-button>
+          {/snippet}
+          </ButtonHelp>
+          {#if request.authorization !== 'awaiting_lead' || request.validated_model}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <md-text-button disabled={action?.pending} onclick={onRevoke}>Revoke authorization</md-text-button>
+          {/if}
         </div>
         {#if action?.pending && action.operation === 'authorize'}
           <p role="status">Saving authorization…</p>
         {/if}
       </section>
     {/if}
-    {#if preparation}
+    {#if panel === 'preparation' && preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
-        bind:reviewMode onRefresh={prepareReview} onSelect={(model) => selectedModel = model} onValidate={validateModel} onRun={runReview} onClose={() => preparation = null} />
+        bind:reviewMode bind:selectedModel onRefresh={prepareReview} onValidate={validateModel} onRun={runReview} onClose={() => openPanel(null)} />
     {/if}
-    {#if draft}
-      <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => draft = null} />
+    {#if panel === 'draft' && draft}
+      <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => openPanel(null)} />
     {/if}
     {/if}
   {/if}
@@ -344,8 +340,37 @@
     </p>
   {/if}
   {#if !compactClosed}
-    <ReviewProgress {request} {signedIn} />
-    <div class="request-details" hidden={!expanded}>
+    <section class="request-details" id={detailsId} hidden={!expanded} aria-label={`PR details for ${request.repository} #${request.number}`}>
+    <header class="panel-heading">
+      <h3>PR details</h3>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <md-text-button onclick={() => expanded = false}>Close details</md-text-button>
+    </header>
+    <div class="detail-group detail-actions authorization-buttons">
+      {#if request.latest_round || request.run || request.publication}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-text-button onclick={() => openPanel('progress')}>Review activity</md-text-button>
+      {/if}
+      {#if signedIn}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-text-button disabled={action?.pending || managementBlocked || request.latest_round?.status === 'awaiting_decision'} onclick={prepareReview}>Check review readiness</md-text-button>
+        {#if hasDraft}
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <md-text-button disabled={action?.pending} onclick={viewDraft}>Read saved draft</md-text-button>
+        {/if}
+      {/if}
+    </div>
+    <div class="detail-group">
+      <h3>Recorded inputs</h3>
+      <dl class="detail-list">
+        <div><dt>Head</dt><dd><a href={`https://github.com/${request.repository}/commit/${request.head_sha}`} target="_blank" rel="noopener noreferrer"><code>{request.head_sha}</code></a></dd></div>
+        <div><dt>Input revision</dt><dd>{request.revision}</dd></div>
+        <div><dt>Permission</dt><dd>{authorizationLabels[request.authorization] ?? 'Unknown'}</dd></div>
+      </dl>
+      {#if request.context?.head_changed || request.context?.discussion_changed}
+        <p class="observed-change">Last GitHub check: {request.context.head_changed && request.context.discussion_changed ? 'the PR commit and author discussion changed' : request.context.head_changed ? 'the PR commit changed' : 'the author discussion changed'}.</p>
+      {/if}
+    </div>
     <div class="detail-group">
       <h3>Author discussion</h3>
       {#if request.discussion}
@@ -379,12 +404,16 @@
           <div><dt>Input revision</dt><dd>{request.latest_round.revision}</dd></div>
           <div><dt>Model</dt><dd>{request.latest_round.model}</dd></div>
           <div><dt>Agent</dt><dd>{request.latest_round.agent}</dd></div>
+          {#if request.latest_round.task}
+            <div><dt>Scope</dt><dd>{request.latest_round.task.scope.mode === 'full' ? 'Full PR review' : `Incremental since ${request.latest_round.task.scope.since.slice(0, 7)}`}</dd></div>
+          {/if}
+          <div><dt>Cleanup</dt><dd>{request.latest_round.cleanup_status === 'complete' ? 'Complete' : request.latest_round.cleanup_status === 'needs_attention' ? 'Cleanup pending' : request.latest_round.cleanup_status === 'in_progress' ? 'Finishing cleanup…' : 'Cleanup status unavailable'}</dd></div>
         </dl>
       {:else}
         <p class="detail-empty">No rounds yet</p>
       {/if}
     </div>
-    </div>
+    </section>
   {/if}
   <md-divider></md-divider>
 </li>

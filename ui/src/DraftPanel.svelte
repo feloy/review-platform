@@ -53,11 +53,11 @@
 </script>
 
 <section class="draft-panel" aria-label={`Private draft for ${request.repository} #${request.number}`}>
-  <div class="draft-heading">
+  <header class="panel-heading">
     <h3>Private draft</h3>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <md-text-button disabled={action?.pending} onclick={onClose}>Close draft</md-text-button>
-  </div>
+  </header>
   <div class="publication-destination">
     <h4>Publication destination</h4>
     <p>Review destination: <a href={`https://github.com/${draft.key.repository}/pull/${draft.key.number}`} target="_blank" rel="noopener noreferrer">{draft.key.repository} #{draft.key.number}</a>
@@ -121,7 +121,11 @@
   {#if confirmation}
     {@const publish = confirmation.kind === 'publish'}
     <section class="authorization-panel" aria-label={publish ? 'Confirm draft publication' : 'Confirm draft rejection'}>
-      <h4>{publish ? 'Publish this draft?' : 'Reject this draft?'}</h4>
+      <header class="panel-heading">
+        <h4>{publish ? 'Publish this draft?' : 'Reject this draft?'}</h4>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <md-text-button disabled={action?.pending} onclick={() => confirmation = null}>Close confirmation</md-text-button>
+      </header>
       {#if publish}
         <p>Post to {draft.key.repository} #{draft.key.number} as <strong>@{confirmation.publisher_login}</strong>.</p>
         <p>The exact review comments shown above, including the round footer, will be posted to GitHub as a comment review on the reviewed commit.
@@ -138,8 +142,6 @@
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <md-filled-button disabled={action?.pending || confirmationInvalid || !awaitingDecision || !cleanupComplete || publishing || (publish && (!fresh || !draft.publisher_login))}
           onclick={decide}>{action?.pending ? (publish ? 'Starting publication…' : 'Rejecting…') : (publish ? 'Confirm publication' : 'Confirm rejection')}</md-filled-button>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-text-button disabled={action?.pending} onclick={() => confirmation = null}>{publish ? 'Cancel publication' : 'Cancel rejection'}</md-text-button>
       </div>
     </section>
   {/if}

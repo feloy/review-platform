@@ -21,32 +21,33 @@ export function reviewBlocker(request) {
 export function reviewSituation(request, preparation, invalid = false, selectedModel = preparation?.resolved_model) {
   const round = request.latest_round;
   const result = (title, message, action, label, tone = 'neutral') => ({ title, message, action, label, tone });
-  if (request.publication?.status === 'active') return result('Publishing review', 'You can close this tab. Return here to see whether GitHub received the review.');
-  if (round?.status === 'publication_unknown' || round?.status === 'publishing') return result('Confirm whether GitHub received the review', 'Check GitHub before deciding again. Recovery instructions are below.', null, null, 'warning');
-  if (round?.cleanup_status === 'needs_attention') return result('Review environment needs recovery', round.status === 'awaiting_decision' ? 'Your draft is saved and can be read. Recover the environment before publishing or rejecting it.' : 'Recovery instructions are below. Finish recovery before continuing.', round.status === 'awaiting_decision' ? 'draft' : null, 'Read private draft', 'warning');
-  if (round?.status === 'awaiting_decision') return result('Draft ready for your decision', round.cleanup_pending ? 'Read the draft now. Publishing and rejection become available when cleanup finishes.' : round.freshness === 'stale' ? 'The PR changed or closed. Read the outdated draft; you can reject it and prepare another review.' : 'Read the private draft, then publish it unchanged or reject it. This draft stays private until you publish it.', 'draft', 'Read private draft', round.freshness === 'stale' ? 'warning' : 'attention');
-  if (['starting', 'running'].includes(request.run?.status) || ['starting', 'running'].includes(round?.status)) return result('Review in progress', 'The review runs on the server. You can close this tab and return later.');
+  if (request.publication?.status === 'active') return result('Publishing…', 'Publication continues if you close this tab.', 'progress', 'Show progress');
+  if (round?.status === 'publication_unknown' || round?.status === 'publishing') return result('Publication uncertain', 'Check GitHub before deciding again. Inspect recovery instructions before continuing.', 'progress', 'View issue', 'warning');
+  if (round?.cleanup_status === 'needs_attention') return result('Cleanup required', round.status === 'awaiting_decision' ? 'Your draft is saved. Recover the environment before publishing or rejecting it.' : 'Inspect recovery instructions before continuing.', round.status === 'awaiting_decision' ? 'draft' : 'progress', round.status === 'awaiting_decision' ? 'Read draft' : 'View issue', 'warning');
+  if (round?.status === 'awaiting_decision') return result(round.freshness === 'stale' ? 'Draft outdated' : 'Draft ready', round.cleanup_pending ? 'Publishing and rejection become available when cleanup finishes.' : round.freshness === 'stale' ? 'The PR changed or closed. You can read and reject the saved draft.' : 'Inspect the private draft before publishing it unchanged or rejecting it.', 'draft', 'Read draft', round.freshness === 'stale' ? 'warning' : 'attention');
+  if (['starting', 'running'].includes(request.run?.status) || ['starting', 'running'].includes(round?.status)) return result(request.run?.status === 'starting' || round?.status === 'starting' ? 'Starting…' : 'Reviewing…', 'The review continues if you close this tab.', 'progress', 'Show progress');
   if (request.context?.state === 'closed') return result('Pull request closed', 'New reviews cannot start for a closed pull request.', 'github', 'Open pull request');
-  if (round?.status === 'published' && round.head_sha === request.head_sha && round.revision === request.revision) return result('Review published', 'The review is on GitHub. Refresh from GitHub to look for later code or discussion changes.', 'receipt', 'Read published review', 'success');
-  if (round?.cleanup_pending) return result('Finishing review cleanup', 'Wait for the review environment to be removed before continuing.');
-  if (!request.discussion) return result('Check the pull request first', 'Fetch the current code and author discussion before giving review permission.', 'refresh', 'Fetch pull request details', 'attention');
-  if (request.authorization === 'awaiting_lead') return result('Waiting for your permission', 'Inspect the pull request, then allow one review or keep permission for later reviews.', 'authorize', 'Review permissions', 'attention');
+  if (round?.status === 'published' && round.head_sha === request.head_sha && round.revision === request.revision) return result('Published', 'The review is on GitHub. Refresh to check for later changes.', 'receipt', 'View review', 'success');
+  if (round?.cleanup_pending) return result('Cleaning up…', 'Wait for the review environment to be removed.', 'progress', 'Show progress');
+  const retry = ['failed', 'interrupted'].includes(round?.status) || request.run?.status === 'failed';
+  if (retry && !preparation) return result('Failed', 'Inspect the failure before preparing another review.', 'progress', 'View issue', 'warning');
+  if (!request.discussion) return result('Needs refresh', 'Fetch the current code and author discussion before allowing a review.', 'refresh', 'Refresh PR', 'attention');
+  if (request.authorization === 'awaiting_lead') return result('Needs permission', 'Inspect the PR, then allow one review or keep permission for later reviews.', 'authorize', 'Allow review', 'attention');
   if (preparation) {
-    if (preparationOutdated(request, preparation, invalid)) return result('Review details changed', 'Check readiness again before choosing a model or starting the review.', 'prepare', 'Check review readiness', 'attention');
+    if (preparationOutdated(request, preparation, invalid)) return result('Needs refresh', 'Check readiness again before choosing a model or starting the review.', 'prepare', 'Refresh readiness', 'attention');
     const checks = {
-      checks_pending: ['Waiting for GitHub checks', 'Checks have not finished. Check readiness again after they complete.'],
-      checks_failing: ['GitHub checks need attention', 'Resolve the failing checks for this commit, then check readiness again.'],
-      checks_unknown: ['Could not determine check results', 'Inspect the checks on GitHub, then check readiness again.'],
-      no_checks: ['No checks reported', 'A review requires passing checks for this commit. Inspect CI on GitHub, then check readiness again.'],
+      checks_pending: ['CI pending', 'Checks have not finished. Check readiness again after they complete.'],
+      checks_failing: ['CI failing', 'Resolve the failing checks for this commit, then check readiness again.'],
+      checks_unknown: ['CI unknown', 'Inspect the checks on GitHub, then check readiness again.'],
+      no_checks: ['No CI results', 'A review requires passing checks for this commit. Inspect CI on GitHub, then check readiness again.'],
     };
     if (checks[preparation.readiness]) return result(...checks[preparation.readiness], 'checks', 'View checks on GitHub', 'warning');
     if (preparation.readiness === 'pull_closed') return result('Pull request closed', 'New reviews cannot start for a closed pull request.', 'github', 'Open pull request');
-    if (preparation.readiness === 'awaiting_authorization') return result('Waiting for your permission', 'The preparation refreshed GitHub inputs. Inspect them and allow the review again.', 'authorize', 'Review permissions', 'attention');
-    if (preparation.readiness === 'discussion_not_observed') return result('Author discussion needs checking', 'Refresh from GitHub before continuing.', 'refresh', 'Fetch pull request details');
-    if (preparation.readiness === 'ready' && !request.validated_model) return result('Waiting for the saved model choice', 'Local updates will confirm the saved choice. Check readiness again if the choice was cleared.', 'prepare', 'Check review readiness');
-    if (preparation.readiness === 'ready' && preparation.validated_model === selectedModel && request.validated_model?.model === preparation.validated_model && request.validated_model?.agent === preparation.models.find((choice) => choice.model === selectedModel)?.agent) return result('Ready to start your review', 'The model is confirmed. Starting will recheck GitHub, permission, and the review environment.', 'run', 'Start this review', 'success');
-    return result('Choose your review model', 'Choose a model in the preparation panel and confirm it before starting.', 'model', 'Choose review model', 'attention');
+    if (preparation.readiness === 'awaiting_authorization') return result('Needs permission', 'The preparation refreshed GitHub inputs. Inspect them and allow the review again.', 'authorize', 'Allow review', 'attention');
+    if (preparation.readiness === 'discussion_not_observed') return result('Needs refresh', 'Refresh from GitHub before continuing.', 'refresh', 'Refresh PR');
+    if (preparation.readiness === 'ready' && !request.validated_model) return result('Model unconfirmed', 'Local updates will confirm the saved choice. Check readiness again if the choice was cleared.', 'prepare', 'Check review readiness');
+    if (preparation.readiness === 'ready' && preparation.validated_model === selectedModel && request.validated_model?.model === preparation.validated_model && request.validated_model?.agent === preparation.models.find((choice) => choice.model === selectedModel)?.agent) return result('Ready', 'Starting rechecks GitHub, permission, and the review environment.', 'run', 'Start review', 'success');
+    return result('Needs model', 'Choose and confirm a model for the inspected inputs.', 'model', 'Choose model', 'attention');
   }
-  const retry = ['failed', 'interrupted'].includes(round?.status) || request.run?.status === 'failed';
-  return result(retry ? 'Review needs attention' : round?.status === 'rejected' ? 'Draft rejected; nothing posted' : 'Permission granted', retry ? 'Read the failure details below, resolve the cause, then check readiness again.' : 'Check GitHub checks and choose a review model before starting.', 'prepare', 'Check review readiness', retry ? 'warning' : 'neutral');
+  return result('Needs model', 'Check readiness and choose a review model for the current inputs.', 'prepare', 'Choose model', 'attention');
 }

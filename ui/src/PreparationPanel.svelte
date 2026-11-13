@@ -2,10 +2,7 @@
   import { preparationOutdated, reviewBlocker } from './request-status.js';
   import TimeAgo from './TimeAgo.svelte';
   import ButtonHelp from './ButtonHelp.svelte';
-  let { request, preparation, invalid, action, onRefresh, onValidate, onRun, onClose, onSelect = () => {}, reviewMode = $bindable('auto') } = $props();
-  let selectedModel = $state('');
-  $effect(() => { selectedModel = preparation.resolved_model; });
-  $effect(() => { onSelect(selectedModel); });
+  let { request, preparation, invalid, action, onRefresh, onValidate, onRun, onClose, selectedModel = $bindable(''), reviewMode = $bindable('auto') } = $props();
 
   const stale = $derived(preparationOutdated(request, preparation, invalid));
   const workflowBlocker = $derived(reviewBlocker(request));
@@ -41,7 +38,11 @@
 </script>
 
 <section class="preparation-panel" aria-label={`Review preparation for ${request.repository} #${request.number}`}>
-  <h3>Review preparation</h3>
+  <header class="panel-heading">
+    <h3>Review preparation</h3>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <md-text-button disabled={action?.pending} onclick={onClose}>Close preparation</md-text-button>
+  </header>
   <ul class="readiness-checklist" aria-label="Requirements for this review">
     <li>Permission: {preparation.authorization === 'awaiting_lead' ? 'required' : preparation.authorization === 'one_round' ? 'one review allowed' : 'kept for later reviews'}</li>
     <li>GitHub checks: {checkLabels[preparation.checks] ?? 'Unknown'} for commit {preparation.head_sha.slice(0, 7)}</li>
@@ -111,8 +112,6 @@
     <md-text-button disabled={action?.pending} onclick={onRefresh}>
       {action?.pending && action.operation === 'prepare' ? 'Refreshing readiness…' : 'Refresh readiness'}
     </md-text-button>
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <md-text-button disabled={action?.pending} onclick={onClose}>Close preparation</md-text-button>
   </div>
   <p>Running rechecks GitHub inputs, checks, authorization, configuration, and gateway readiness.</p>
   {#if modelValidated && !currentModelValidated}

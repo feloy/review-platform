@@ -75,6 +75,9 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   and cover those signed-in flows in UI tests.
 - Show button explanations in tooltips available on hover and keyboard focus,
   including for disabled buttons; keep them within the viewport and outside clipping containers.
+- Give each dismissible GUI panel, including confirmations, a title and a `Close <panel>` text button at the top right.
+  Keep opening-button labels stable; opening an already visible panel must not dismiss it.
+  Closing a panel dismisses its UI without canceling jobs or changing saved decisions.
 - Clear completed GUI operation messages when the next operation starts.
   Preserve active job and batch progress while nested operations run.
 - Distinguish live local progress from GitHub observation freshness in the GUI.
