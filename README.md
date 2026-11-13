@@ -112,25 +112,6 @@ Open the one-time sign-in link printed in the terminal and keep it private.
 The GUI runs at `http://localhost:8080` and guides you through reviews and draft decisions.
 Ask your assistant to register the PRs you want to review.
 
-Use **Refresh open PRs** in the header to check open and unchecked PRs for GitHub changes.
-Waiting PRs show a disabled **Queued for refresh** button, which changes to **Refreshing…** when their turn starts.
-The connection indicator reports local live updates;
-hover over it or focus it with the keyboard for details.
-
-Each PR row shows its title, one review status, and the next action.
-The footer shows whether and when GitHub was checked.
-When CI is pending, use **Recheck CI** to fetch current results or **View checks on GitHub** to inspect them there.
-Use **Details** for recorded inputs, permission, model, discussion counts, and round metadata.
-**Show progress** and **View issue** open a separate panel for review activity and recovery instructions.
-Publication failures and saved drafts with runner errors show a warning status with **View issue**.
-The activity panel provides **Read draft** when a draft is saved;
-its failure warning also appears when you open the draft directly.
-Past activity remains available through **Review activity** in Details.
-The **⋮** menu contains refresh, review permissions, and stop managing.
-Only one decision panel opens at a time; it keeps the inputs you inspected fixed across live updates.
-Use the **Close …** button at the top right of each panel to dismiss it.
-Closed PRs without outstanding work use a compact identity row.
-
 The GUI has no persistent state of its own:
 requests, review history, and drafts are stored in local files.
 Restarting `luthiai gui` preserves saved work and provides a new sign-in link.
