@@ -56,7 +56,7 @@ fn sandbox_name(id: &RoundId) -> String {
     const PREFIX: &str = "luthiai-";
     const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     // The fixed r- prefix adds no identity. Base32 preserves case-sensitive
-    // suffixes and fits six generated characters within OpenShell's 19-byte limit.
+    // suffixes and fits six generated characters within OpenShell's 19-character limit.
     let suffix = &id.as_str().as_bytes()[2..];
     let mut name = String::with_capacity(PREFIX.len() + (suffix.len() * 8).div_ceil(5));
     name.push_str(PREFIX);
@@ -861,6 +861,7 @@ pub fn read_saved_draft(path: &Path) -> Result<DraftOutput, ArtifactError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox_layout::OPENSHELL_SANDBOX_NAME_LIMIT;
 
     #[test]
     fn sandbox_names_fit_openshell_and_preserve_case_sensitive_round_ids() {
@@ -877,7 +878,7 @@ mod tests {
         for suffix in ["VgdQi9", "000000", "zzzzzz", "ZZZZZZ", "------"] {
             let name = sandbox_name(&RoundId::new(format!("r-{suffix}")).unwrap());
             assert!(name.starts_with("luthiai-"));
-            assert!(name.len() <= 19);
+            assert!(name.len() <= OPENSHELL_SANDBOX_NAME_LIMIT);
             assert!(!name.contains("--"));
         }
     }

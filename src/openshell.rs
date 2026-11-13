@@ -4,7 +4,7 @@ use crate::agent::{self, AgentPreparationError};
 use crate::archive::StagedArchive;
 use crate::config::{AgentRunnerConfig, Driver, ExecutionConfig};
 use crate::review::RoundRecord;
-use crate::sandbox_layout;
+use crate::sandbox_layout::{self, OPENSHELL_SANDBOX_NAME_LIMIT};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -32,7 +32,7 @@ pub enum OpenShellError {
     },
     #[error("OpenShell {0} failed; check gateway authentication, connectivity, and operator logs")]
     Failed(&'static str),
-    #[error("OpenShell sandbox name exceeds the 19-character limit")]
+    #[error("OpenShell sandbox name exceeds the {OPENSHELL_SANDBOX_NAME_LIMIT}-character limit")]
     SandboxNameTooLong,
     #[error("gateway does not report vm driver support")]
     VmUnavailable,
@@ -348,7 +348,7 @@ impl<'a> OpenShell<'a> {
         if self.config.driver() != Driver::Vm {
             return Err(OpenShellError::PodmanUnsupported);
         }
-        if round.sandbox().len() > 19 {
+        if round.sandbox().len() > OPENSHELL_SANDBOX_NAME_LIMIT {
             return Err(OpenShellError::SandboxNameTooLong);
         }
         let driver = serde_json::json!({"vm":{"mounts":[
@@ -719,9 +719,10 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert!(args.windows(2).any(|items| {
-            items[0] == "--name" && items[1] == "luthiai-kztwiuljhe" && items[1].len() <= 19
-        }));
+        assert!(
+            args.windows(2)
+                .any(|items| { items[0] == "--name" && items[1] == "luthiai-kztwiuljhe" })
+        );
         assert!(args.contains(&"--no-auto-providers".to_owned()));
         assert!(!args.contains(&"--auto-providers".to_owned()));
         assert_eq!(

@@ -863,6 +863,8 @@ fn new_round_dir(state_path: &Path) -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
     }
+    // Base32 expands six random characters to ten; the luthiai- prefix adds eight,
+    // keeping the sandbox name within OpenShell's 19-character limit.
     let directory = Builder::new()
         .prefix("r-")
         .rand_bytes(6)

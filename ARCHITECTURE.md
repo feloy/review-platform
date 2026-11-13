@@ -214,6 +214,7 @@ The daemon may use separate read-only GitHub credentials to inspect PRs.
 Credentials used to post reviews to GitHub remain under the daemon's control
 and never enter an OpenShell provider, sandbox, or agent process.
 Publishing, rejecting, or recovering an existing draft does not require the gateway.
+Publication seals use the LuthiAI footer.
 
 ## Security requirements
 
@@ -231,8 +232,6 @@ The source code is public, but an accidentally committed secret could still
 reach a model provider during review.
 
 ## Review authority
-
-Publication seals use the LuthiAI footer.
 
 The agent can recommend approval in its review text,
 but that recommendation does not grant formal GitHub approval.
