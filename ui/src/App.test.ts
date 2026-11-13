@@ -1561,6 +1561,7 @@ describe('review requests page', () => {
     const progress = screen.getByRole('region', { name: 'Review progress for owner/repo #15' });
     expect(screen.queryByRole('heading', { name: 'Recorded inputs' })).toBeNull();
     expect(within(progress).queryByRole('heading', { name: 'Author discussion' })).toBeNull();
+    expect(within(progress).queryByText('Read draft')).toBeNull();
     expect(container.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
     await clickMaterialButton(user, container, 'Details');
     expect(screen.getByRole('heading', { name: 'Recorded inputs' })).toBeTruthy();
@@ -1595,7 +1596,7 @@ describe('review requests page', () => {
     expect(screen.getByText(/luthiai recover-review owner\/repo 15/)).toBeTruthy();
     await clickMaterialButton(user, container, 'Close progress');
     await showSnapshot(source, [request({ run: { status: 'failed', round_id: null, failure: 'stale_preparation' } })]);
-    expect(screen.getByRole('heading', { name: 'Failed' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Review failed' })).toBeTruthy();
     await clickMaterialButton(user, container, 'View issue');
     expect(screen.getByRole('alert').textContent).toContain('Prepare and inspect the review again');
     await showSnapshot(source, [request({ latest_round: round({ status: 'failed', failure: 'timeout', cleanup_pending: false, cleanup_status: 'complete' }),
@@ -1604,6 +1605,54 @@ describe('review requests page', () => {
     expect(screen.getByText(/Agent timed out/)).toBeTruthy();
     unmount();
     expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { title: 'Publication failed', error: 'Safe publication failure.',
+      publication: { round_id: 'r-example', status: 'failed', error: 'Safe publication failure.' } },
+    { title: 'Draft saved with warning', error: 'The private draft was saved, but the runner reported an error. Check sandbox cleanup before continuing.',
+      run: { round_id: 'r-example', status: 'failed', failure: 'execution' } },
+  ])('exposes $title on the compact row and in both ways of opening a draft', async ({ title, error, ...failure }) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('luthiai-session', 'saved-token');
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValue({ ok: true, json: async () => draft() });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    const ready = request({ latest_round: round({ status: 'awaiting_decision', freshness: 'fresh',
+      cleanup_pending: false, cleanup_status: 'complete' }) });
+    await showSnapshot(source, [ready]);
+    await screen.findAllByText('Read draft');
+    const failed = { ...ready, ...failure };
+    await showSnapshot(source, [failed]);
+    expect(screen.getByRole('heading', { name: title })).toBeTruthy();
+    expect(container.querySelector('.next-step').getAttribute('data-tone')).toBe('warning');
+    expect(screen.queryByRole('heading', { name: 'Draft ready' })).toBeNull();
+    expect(container.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
+    expect(screen.queryByRole('region', { name: 'Review progress for owner/repo #15' })).toBeNull();
+    await clickMaterialButton(user, container, 'View issue');
+    const progress = screen.getByRole('region', { name: 'Review progress for owner/repo #15' });
+    expect(within(progress).getByRole('alert').textContent).toContain(error);
+    expect(container.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
+    await clickMaterialButton(user, progress, 'Read draft');
+    await screen.findByText(draft().lead_advice);
+    expect(screen.queryByRole('region', { name: 'Review progress for owner/repo #15' })).toBeNull();
+    let panel = screen.getByRole('region', { name: 'Private draft for owner/repo #15' });
+    expect(within(panel).getByRole('alert').textContent).toContain(error);
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/drafts/r-example?repository=owner%2Frepo&number=15');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
+    await clickMaterialButton(user, panel, 'Close draft');
+    await clickMaterialButton(user, container, 'Details');
+    await clickMaterialButton(user, container, 'Read saved draft');
+    await screen.findByText(draft().lead_advice);
+    panel = screen.getByRole('region', { name: 'Private draft for owner/repo #15' });
+    expect(within(panel).getByRole('alert').textContent).toContain(error);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // A later decision resolves the failure even if the server still retains its job summary.
+    await showSnapshot(source, [{ ...failed, latest_round: { ...ready.latest_round, status: 'rejected' } }]);
+    expect(screen.queryByRole('heading', { name: title })).toBeNull();
+    expect(within(panel).queryByText(error)).toBeNull();
   });
 
   it('loads a private draft only on request and renders its exact contents as text', async () => {

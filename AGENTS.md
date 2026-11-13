@@ -66,6 +66,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   Show startup failures without exposing raw adapter output.
   Report job failure causes locally with PR and round context.
   Omit private JSON values and panic payloads from those diagnostics.
+- Surface current review and publication failures on compact PR rows and saved-draft views.
+  Bind warnings to their round and clear them when superseded or resolved.
 - Require the lead session for private draft contents and keep them out of public
   request snapshots.
   Render agent-authored draft content as plain text.

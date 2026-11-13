@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reviewBlocker, reviewSituation } from './request-status.js';
+import { reviewBlocker, reviewFailure, reviewSituation } from './request-status.js';
 
 const request = {
   head_sha: 'a'.repeat(40), revision: 2, authorization: 'one_round', discussion: {},
@@ -28,6 +28,54 @@ describe('review next steps', () => {
     const situation = reviewSituation({ ...request, latest_round: { status } });
     expect(situation.message).toContain('Check GitHub');
     expect(situation.action).toBe('progress');
+  });
+
+  it.each([
+    { publication: { round_id: 'r-current', status: 'failed', error: 'Safe publication failure.' }, title: 'Publication failed' },
+    { run: { round_id: 'r-current', status: 'failed', failure: 'execution' }, title: 'Draft saved with warning' },
+  ])('puts $title ahead of a saved draft and cached preparation', ({ title, ...failure }) => {
+    const failed = { ...request, ...failure, latest_round: { id: 'r-current', status: 'awaiting_decision' } };
+    for (const cached of [undefined, preparation]) {
+      const situation = reviewSituation(failed, cached);
+      expect(situation.title).toBe(title);
+      expect(situation.action).toBe('progress');
+      expect(situation.label).toBe('View issue');
+      expect(situation.tone).toBe('warning');
+    }
+  });
+
+  it('keeps review failures visible until a fresh preparation replaces the failed attempt', () => {
+    const failed = { ...request, run: { status: 'failed', failure: 'stale_preparation' } };
+    expect(reviewSituation(failed, preparation, true).title).toBe('Review failed');
+    expect(reviewSituation(failed, preparation).title).toBe('Ready');
+  });
+
+  it.each(['failed', 'interrupted'])('exposes a persisted %s round without a GUI job', (status) => {
+    const failed = { ...request, latest_round: { id: 'r-current', status, failure: 'timeout' } };
+    expect(reviewSituation(failed).title).toBe('Review failed');
+    expect(reviewSituation(failed).label).toBe('View issue');
+    expect(reviewFailure(failed).messages).toEqual([expect.stringContaining('Agent timed out')]);
+  });
+
+  it.each(['awaiting_decision', 'running', 'published', 'rejected'])('ignores failures from an older round while the current round is %s', (status) => {
+    const current = { ...request, latest_round: { id: 'r-current', status },
+      publication: { round_id: 'r-old', status: 'failed', error: 'Old publication error' },
+      run: { round_id: 'r-old', status: 'failed', failure: 'execution' } };
+    expect(reviewFailure(current)).toBeNull();
+    expect(reviewSituation(current).label).not.toBe('View issue');
+  });
+
+  it.each(['published', 'rejected'])('clears warnings when a failed draft operation is resolved as %s', (status) => {
+    expect(reviewFailure({ ...request, latest_round: { id: 'r-current', status },
+      publication: { round_id: 'r-current', status: 'failed', error: 'Old publication error' },
+      run: { round_id: 'r-current', status: 'failed', failure: 'execution' } })).toBeNull();
+  });
+
+  it('still exposes a later startup failure after an older draft was rejected', () => {
+    const failed = { ...request, latest_round: { id: 'r-old', status: 'rejected' },
+      run: { status: 'failed', failure: 'stale_preparation' } };
+    expect(reviewSituation(failed).title).toBe('Review failed');
+    expect(reviewFailure(failed).messages).toEqual([expect.stringContaining('Prepare and inspect the review again')]);
   });
 
   it('does not propose starting until fresh preparation and the selected model match saved validation', () => {
