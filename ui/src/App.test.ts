@@ -600,6 +600,8 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [request()]);
     const identity = container.querySelector<HTMLElement>('.request-identity');
+    const observation = container.querySelector('.github-observation');
+    expect(observation.textContent.trim()).toBe('GitHub not checked');
     const fallback = within(identity).getByRole('link', { name: 'owner/repo #15' }) as HTMLAnchorElement;
     expect(fallback.href).toBe('https://github.com/owner/repo/pull/15');
     expect(fallback.closest('.pr-title')).toBeTruthy();
@@ -614,6 +616,7 @@ describe('review requests page', () => {
     expect(screen.getByText('owner/repo #15 · @alice · Open')).toBeTruthy();
     expect(identity.querySelector('.pr-meta a')).toBeNull();
     expect(screen.getByText('2 minutes ago')).toBeTruthy();
+    expect(observation.textContent.trim()).toBe('GitHub checked 2 minutes ago');
     expect(screen.getByRole('group', { name: 'Local updates' })).toBeTruthy();
     expect(screen.getByText(/the author discussion changed/)).toBeTruthy();
     expect(container.querySelector('img')).toBeNull();
@@ -1242,12 +1245,11 @@ describe('review requests page', () => {
     const snapshot = preparedRequest({ head_sha: head, context: context({ head_sha: head, revision: 2, checks: 'pending' }) });
     await showSnapshot(source, [snapshot]);
     const observation = container.querySelector('.github-observation');
-    expect(observation.textContent).toContain('CI pending');
+    expect(observation.textContent.trim()).toBe('GitHub checked just now');
     await screen.findByText('Choose model');
     await clickMaterialButton(user, container, 'Choose model');
     await screen.findByRole('heading', { name: 'CI pending' });
-    expect(observation.textContent).not.toContain('CI pending');
-    expect(observation.textContent).toContain('GitHub checked');
+    expect(observation.textContent.trim()).toBe('GitHub checked just now');
     await clickMaterialButton(user, container, 'Close preparation');
 
     const nextStep = container.querySelector<HTMLElement>('.next-step');
@@ -1256,7 +1258,7 @@ describe('review requests page', () => {
     expect(checks.classList.contains('primary-link')).toBe(false);
     expect(container.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
     await showSnapshot(source, [{ ...snapshot, context: context({ head_sha: head, revision: 2, checks: 'green' }) }]);
-    expect(observation.textContent).toContain('CI passed');
+    expect(observation.textContent.trim()).toBe('GitHub checked just now');
     const recheck = await clickMaterialButton(user, nextStep, 'Recheck CI');
     expect(recheck.disabled).toBe(true);
     expect(recheck.textContent.trim()).toBe('Checking…');

@@ -117,7 +117,7 @@ The connection indicator reports local live updates;
 hover over it or focus it with the keyboard for details.
 
 Each PR row shows its title, one review status, and the next action.
-The footer shows GitHub freshness and, when needed, the CI result.
+The footer shows whether and when GitHub was checked.
 When CI is pending, use **Recheck CI** to fetch current results or **View checks on GitHub** to inspect them there.
 Use **Details** for recorded inputs, permission, model, discussion counts, and round metadata.
 **Show progress** and **View issue** open a separate panel for review activity and recovery instructions.
