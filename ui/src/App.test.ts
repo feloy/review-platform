@@ -210,7 +210,8 @@ async function showSnapshot(source: FakeEventSource, requests: RequestSnapshot[]
 }
 
 async function clickMaterialButton(user: UserEvent, container: Element, label: string): Promise<MaterialControl> {
-  const control = [...container.querySelectorAll('md-text-button, md-filled-button, md-menu-item')]
+  const control = [...container.querySelectorAll('md-text-button, md-filled-button'),
+    ...container.querySelectorAll('md-menu-item')]
     .find((button) => button.textContent.trim() === label) as HTMLElement;
   expect(control).toBeTruthy();
   expect(control.closest('[hidden]')).toBeNull();
@@ -555,7 +556,7 @@ describe('review requests page', () => {
     expect(row.querySelectorAll('.next-step md-filled-button')).toHaveLength(1);
     const menu = row.querySelector('md-menu');
     expect([...menu.querySelectorAll('md-menu-item')].map((item) => item.textContent.trim()))
-      .toEqual(['Refresh from GitHub', 'Review permissions', 'Change model', 'Stop managing PR']);
+      .toEqual(['Refresh from GitHub', 'Review permissions', 'Choose model', 'Stop managing PR']);
     expect(row.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
     expect(screen.queryByRole('heading', { name: 'Recorded inputs' })).toBeNull();
   });
@@ -803,7 +804,7 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findByText('Choose model');
+    await screen.findAllByText('Choose model');
     await clickMaterialButton(user, container, 'Choose model');
     await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
     await clickMaterialButton(user, container, 'Review permissions');
@@ -838,7 +839,7 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findByText('Choose model');
+    await screen.findAllByText('Choose model');
     await clickMaterialButton(user, container, 'Choose model');
     await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
     await user.selectOptions(screen.getByLabelText('Review model for owner/repo #15'), 'model-beta');
@@ -858,7 +859,7 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findByText('Change model');
+    await screen.findAllByText('Choose model');
     const row = container.querySelector('.request-item');
     const menu = await openActionsMenu(user, row);
     await user.keyboard('{ArrowDown}{ArrowDown}');
@@ -870,7 +871,7 @@ describe('review requests page', () => {
     await user.selectOptions(model, 'model-beta');
     await user.selectOptions(scope, 'full');
     expect(document.getElementById(scope.getAttribute('aria-describedby')).textContent).toBe('Review all changes in this PR.');
-    await clickMaterialButton(user, row, 'Change model');
+    await clickMaterialButton(user, menu, 'Choose model');
     expect(screen.getByRole('region', { name: 'Choose model for owner/repo #15' })).toBe(panel);
     expect(model.value).toBe('model-beta');
     expect(scope.value).toBe('full');
@@ -1327,7 +1328,7 @@ describe('review requests page', () => {
     expect(within(panel).getByRole('heading', { name: 'Choose model' })).toBeTruthy();
     expect(within(panel).getByText('Passing')).toBeTruthy();
     expect(within(panel).queryByText('Input revision')).toBeNull();
-    expect(within(panel).getByRole('note').textContent).toBe('Note: Confirming a model does not start a review.');
+    expect(within(panel).getByRole('note').textContent).toContain('Scope changes take effect when you start the review, without confirming the model again.');
     const model = within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     expect(model.value).toBe('model-alpha');
     await user.selectOptions(model, 'model-beta');
@@ -1337,7 +1338,7 @@ describe('review requests page', () => {
     expect(model.disabled).toBe(true);
     expect((await clickMaterialButton(user, panel, 'Close model choice')).disabled).toBe(true);
     const changeModel = [...container.querySelectorAll('md-menu-item')]
-      .find((item) => item.textContent.trim() === 'Change model') as MaterialControl;
+      .find((item) => item.textContent.trim() === 'Choose model') as MaterialControl;
     expect(changeModel.disabled).toBe(true);
     changeModel.dispatchEvent(new CustomEvent('close-menu', { detail: { reason: { key: 'Enter' } } }));
     validate.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -1358,7 +1359,7 @@ describe('review requests page', () => {
     await showSnapshot(source, [preparedRequest({ validated_model: { model: 'model-beta', agent: 'claude-alt' } })]);
     expect(screen.queryByText('No validated model for current inputs')).toBeNull();
     expect(screen.getByText('Start review')).toBeTruthy();
-    await clickMaterialButton(user, container, 'Change model');
+    await clickMaterialButton(user, container, 'Choose model');
     const reopened = screen.getByRole('region', { name: 'Choose model for owner/repo #15' });
     expect((within(reopened).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).value).toBe('model-beta');
     expect((await clickMaterialButton(user, reopened, 'Confirm model')).disabled).toBe(true);
@@ -1373,6 +1374,7 @@ describe('review requests page', () => {
     ['awaiting_authorization', 'green', 'Give permission for this review before confirming a model.'],
     ['discussion_not_observed', 'green', 'Refresh the author discussion from GitHub before confirming a model.'],
     ['pull_closed', 'green', 'A model cannot be confirmed for a closed pull request.'],
+    ['new_requirement', 'green', 'A new review requirement must be met before confirming a model.'],
   ])('shows %s as a blocker and disables model and scope selection', async (readiness, checks, readiness_message) => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
@@ -1411,7 +1413,7 @@ describe('review requests page', () => {
     await showSnapshot(source, [snapshot]);
     const observation = container.querySelector('.github-observation');
     expect(observation.textContent.trim()).toBe('GitHub checked just now');
-    await screen.findByText('Choose model');
+    await screen.findAllByText('Choose model');
     await clickMaterialButton(user, container, 'Choose model');
     await screen.findByRole('heading', { name: 'CI pending' });
     expect(observation.textContent.trim()).toBe('GitHub checked just now');
@@ -1573,7 +1575,7 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findByText('Choose model');
+    await screen.findAllByText('Choose model');
     await clickMaterialButton(user, container, 'Choose model');
     const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
     await user.selectOptions(within(panel).getByLabelText('Review model for owner/repo #15'), 'model-beta');
@@ -1647,7 +1649,7 @@ describe('review requests page', () => {
     expect(sessionStorage.getItem('luthiai-session')).toBeNull();
   });
 
-  it.each(['auto', 'full'])('runs the validated selection with %s scope for frozen inputs and prevents duplicate clicks', async (reviewMode) => {
+  it.each(['auto', 'full'])('shows and runs %s scope after closing model choice and prevents duplicate clicks', async (reviewMode) => {
     const user = userEvent.setup();
     sessionStorage.setItem('luthiai-session', 'saved-token');
     let acceptRun: FinishFetch;
@@ -1670,10 +1672,19 @@ describe('review requests page', () => {
     const scope = screen.getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement;
     expect(scope.value).toBe('auto');
     await user.selectOptions(scope, reviewMode);
+    expect((await clickMaterialButton(user, container, 'Confirm model')).disabled).toBe(true);
+    await clickMaterialButton(user, container, 'Close model choice');
+    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    const start = screen.getByText('Start review');
+    expect(document.getElementById(start.getAttribute('aria-describedby')).textContent)
+      .toContain(reviewMode === 'full' ? 'Start a full PR review.'
+        : 'Automatic scope reviews changes since the last published review, or the full PR when needed.');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     const run = await clickMaterialButton(user, container, 'Start review');
     expect(run.disabled).toBe(true);
-    expect(model.disabled).toBe(true);
-    expect(scope.disabled).toBe(true);
+    const menuChoice = [...container.querySelectorAll('md-menu-item')]
+      .find((item) => item.textContent.trim() === 'Choose model') as MaterialControl;
+    expect(menuChoice.disabled).toBe(true);
     expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/run');
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({

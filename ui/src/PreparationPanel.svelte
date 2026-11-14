@@ -20,7 +20,8 @@
     checks_unknown: 'Check the unknown CI results on GitHub, then use Refresh readiness.',
     no_checks: 'Wait for GitHub to report passing checks for this commit, then use Refresh readiness.',
   };
-  const readinessReason = $derived(readinessReasons[preparation.readiness] ?? 'Check review readiness before confirming a model.');
+  const readinessReason = $derived(readinessReasons[preparation.readiness] ??
+    (preparation.readiness_message?.trim() || 'Check review readiness before confirming a model.'));
   const validationReason = $derived(action?.pending ? 'Wait for the current action to finish.'
     : stale ? 'Refresh readiness and inspect the current PR, permission, and model configuration before confirming.'
     : !permitsValidation ? readinessReason
@@ -73,7 +74,8 @@
   {#if modelValidated}
     <p>This model is confirmed for this commit and author discussion.</p>
   {/if}
-  <p class="note" role="note">Note: Confirming a model does not start a review.</p>
+  <p class="note" role="note">Note: Confirming a model does not start a review.
+    Scope changes take effect when you start the review, without confirming the model again.</p>
   {#snippet actions()}
     <ButtonHelp text="Fetch the current PR, permission, model configuration, and GitHub checks."
       label="Refresh readiness" disabled={action?.pending}>
