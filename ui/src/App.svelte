@@ -220,7 +220,9 @@
         authorization: preparation.authorization,
         configuration_sha256: preparation.configuration_sha256,
       },
-    }, () => 'Review model validated.', 'Could not validate the review model.');
+    }, (result) => result.readiness === 'ready' && result.validated_model === model
+      ? 'Review model confirmed.' : 'Readiness changed. Check the review requirements before confirming the model.',
+    'Could not confirm the review model.');
   }
 
   function runReview(request, requestId, preparation, model, reviewMode) {
