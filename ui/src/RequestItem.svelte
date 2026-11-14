@@ -81,6 +81,11 @@
   const primaryLabel = $derived(refreshLabel ?? (action?.pending && situation.action !== 'progress'
     ? ({ prepare: 'Checking…', 'view-draft': 'Loading draft…', run: 'Starting review…' }[action.operation] ?? situation.label)
     : situation.label));
+  const primaryHelp = $derived(refreshQueued ? 'Waiting for earlier PRs to refresh.'
+    : refreshLabel ? 'Fetching the latest PR inputs from GitHub.'
+    : situation.action === 'run' ? `${reviewMode === 'full' ? 'Start a full PR review.'
+      : 'Automatic scope reviews changes since the last published review, or the full PR when needed.'} ${situation.message}`
+    : situation.message);
   const hasDraft = $derived(['awaiting_decision', 'publishing', 'publication_unknown', 'published', 'rejected']
     .includes(request.latest_round?.status));
   const managementBlocked = $derived(
@@ -228,9 +233,9 @@
             </md-menu-item>
             <md-menu-item type="button" disabled={modelChoiceDisabled}
               aria-expanded={panel === 'preparation'}
-              aria-label={`Change model for ${request.repository} #${request.number}`}
+              aria-label={`Choose model for ${request.repository} #${request.number}`}
               onclose-menu={(event) => selectMenuAction(event, chooseModel)}>
-              <div slot="headline">Change model</div>
+              <div slot="headline">Choose model</div>
             </md-menu-item>
           {/if}
           {#if !compactClosed}<md-divider></md-divider>{/if}
@@ -275,7 +280,7 @@
           {/snippet}
         </ButtonHelp>
       {:else if refreshLabel || situation.action === 'progress' || situation.action && signedIn}
-        <ButtonHelp text={refreshQueued ? 'Waiting for earlier PRs to refresh.' : refreshLabel ? 'Fetching the latest PR inputs from GitHub.' : situation.message}
+        <ButtonHelp text={primaryHelp}
           label={refreshLabel ?? situation.label} disabled={primaryDisabled}>
           {#snippet children(descriptionId)}
             <!-- Material Web supplies keyboard activation inside its shadow DOM. -->
