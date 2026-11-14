@@ -221,8 +221,8 @@
         configuration_sha256: preparation.configuration_sha256,
       },
     }, (result) => result.readiness === 'ready' && result.validated_model === model
-      ? 'Review model confirmed.' : 'Readiness changed. Check the review requirements before confirming the model.',
-    'Could not confirm the review model.');
+      ? 'Review options confirmed.' : 'Readiness changed. Check the review requirements before confirming your choices.',
+    'Could not confirm the review options.');
   }
 
   function runReview(request, requestId, preparation, model, reviewMode) {

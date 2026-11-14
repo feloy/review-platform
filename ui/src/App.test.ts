@@ -543,7 +543,7 @@ describe('sign-in link', () => {
 
 describe('review requests page', () => {
   it.each([
-    [preparedRequest(), 'Choose model'],
+    [preparedRequest(), 'Review options'],
     [request({ latest_round: round({ status: 'awaiting_decision' }) }), 'Read draft'],
   ])('shows one primary action and only secondary menu actions for %o', async (snapshot, label) => {
     sessionStorage.setItem('luthiai-session', 'saved-token');
@@ -556,7 +556,7 @@ describe('review requests page', () => {
     expect(row.querySelectorAll('.next-step md-filled-button')).toHaveLength(1);
     const menu = row.querySelector('md-menu');
     expect([...menu.querySelectorAll('md-menu-item')].map((item) => item.textContent.trim()))
-      .toEqual(['Refresh from GitHub', 'Review permissions', 'Choose model', 'Stop managing PR']);
+      .toEqual(['Refresh from GitHub', 'Review permissions', 'Review options', 'Stop managing PR']);
     expect(row.querySelector('.request-details').hasAttribute('hidden')).toBe(true);
     expect(screen.queryByRole('heading', { name: 'Recorded inputs' })).toBeNull();
   });
@@ -781,8 +781,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container.querySelector('.next-step'), 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Review options');
     await screen.findByText('Start review');
     await user.selectOptions(screen.getByLabelText('Review model for owner/repo #15'), 'model-beta');
     expect(screen.queryByText('Start review')).toBeNull();
@@ -804,25 +804,25 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
-    await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
+    await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     await clickMaterialButton(user, container, 'Review permissions');
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
     expect(screen.getByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeTruthy();
-    await clickMaterialButton(user, container, 'Choose model');
+    await clickMaterialButton(user, container, 'Review options');
     expect(screen.queryByRole('region', { name: 'Review permissions for owner/repo #15' })).toBeNull();
-    expect(screen.getByRole('region', { name: 'Choose model for owner/repo #15' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Review options for owner/repo #15' })).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await showSnapshot(source, [preparedRequest({ latest_round: round() })]);
     await clickMaterialButton(user, container, 'Show progress');
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
     expect(screen.getByRole('region', { name: 'Review progress for owner/repo #15' })).toBeTruthy();
     await showSnapshot(source, [preparedRequest({ latest_round: round({ status: 'awaiting_decision', cleanup_pending: false, cleanup_status: 'complete' }) })]);
     await clickMaterialButton(user, container, 'Read draft');
     await screen.findByText(draft().lead_advice);
     expect(screen.queryByRole('region', { name: 'Review progress for owner/repo #15' })).toBeNull();
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
     await clickMaterialButton(user, container, 'Review permissions');
     expect(screen.queryByText(draft().lead_advice)).toBeNull();
     await clickMaterialButton(user, container, 'Stop managing PR');
@@ -839,16 +839,78 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
-    await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
+    await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     await user.selectOptions(screen.getByLabelText('Review model for owner/repo #15'), 'model-beta');
     await user.selectOptions(screen.getByLabelText('Review scope for owner/repo #15'), 'full');
-    await clickMaterialButton(user, container, 'Close model choice');
-    await clickMaterialButton(user, container, 'Choose model');
+    await clickMaterialButton(user, container, 'Close review options');
+    await clickMaterialButton(user, container, 'Review options');
     expect((screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).value).toBe('model-beta');
     expect((screen.getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement).value).toBe('full');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['auto', 'full'])('confirms a scope change after reopening a model confirmed with %s scope', async (initialScope) => {
+    const user = userEvent.setup();
+    sessionStorage.setItem('luthiai-session', 'saved-token');
+    let finishConfirmation: FinishFetch;
+    const ready = preparation({ readiness: 'ready', validated_model: 'model-alpha' });
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => preparation() })
+      .mockResolvedValueOnce({ ok: true, json: async () => ready })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishConfirmation = resolve; }))
+      .mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ accepted: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(App);
+    const source = FakeEventSource.instances[0];
+    await showSnapshot(source, [preparedRequest()]);
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
+    await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
+    await user.selectOptions(screen.getByLabelText('Review scope for owner/repo #15'), initialScope);
+    await clickMaterialButton(user, container, 'Confirm choices');
+    expect(await screen.findByText('Review options confirmed.')).toBeTruthy();
+    await showSnapshot(source, [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
+
+    await clickMaterialButton(user, container, 'Review options');
+    const panel = screen.getByRole('region', { name: 'Review options for owner/repo #15' });
+    const scope = within(panel).getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement;
+    const confirm = within(panel).getByText('Confirm choices') as MaterialControl;
+    expect(scope.value).toBe(initialScope);
+    expect(confirm.disabled).toBe(true);
+    const nextScope = initialScope === 'auto' ? 'full' : 'auto';
+    await user.selectOptions(scope, nextScope);
+    expect(confirm.disabled).toBe(false);
+    expect(document.getElementById(confirm.getAttribute('aria-describedby')).textContent)
+      .toBe('Confirm this review scope with the current model. GitHub inputs and readiness are checked again.');
+    await user.selectOptions(scope, initialScope);
+    expect(confirm.disabled).toBe(true);
+    await user.selectOptions(scope, nextScope);
+    await clickMaterialButton(user, panel, 'Confirm choices');
+    expect(confirm.disabled).toBe(true);
+    expect(scope.disabled).toBe(true);
+    expect(screen.getByRole('region', { name: 'Review options for owner/repo #15' })).toBe(panel);
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls[3][0]).toBe('/api/requests/validate-model');
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({
+      key: { repository: 'owner/repo', number: 15 }, model: 'model-alpha',
+      head_sha: 'a'.repeat(40), revision: 2,
+      rules: { authorization: 'one_round', configuration_sha256: 'c'.repeat(64) },
+    });
+    await act(() => finishConfirmation({ ok: true, json: async () => ready }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    await clickMaterialButton(user, container, 'Review options');
+    expect((screen.getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement).value).toBe(nextScope);
+    expect((screen.getByText('Confirm choices') as MaterialControl).disabled).toBe(true);
+    await clickMaterialButton(user, container, 'Close review options');
+    await clickMaterialButton(user, container, 'Start review');
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock.mock.calls[4][0]).toBe('/api/requests/run');
+    expect(JSON.parse(fetchMock.mock.calls[4][1].body)).toMatchObject({ model: 'model-alpha', review_mode: nextScope });
   });
 
   it.each(['{Enter}', ' '])('opens model choice from the menu with %s and keeps an open choice fixed', async (key) => {
@@ -859,20 +921,20 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
+    await screen.findAllByText('Review options');
     const row = container.querySelector('.request-item');
     const menu = await openActionsMenu(user, row);
     await user.keyboard('{ArrowDown}{ArrowDown}');
     await user.keyboard(key);
-    const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    const panel = await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     await waitFor(() => expect(menu.open).toBe(false));
     const model = within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     const scope = within(panel).getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement;
     await user.selectOptions(model, 'model-beta');
     await user.selectOptions(scope, 'full');
     expect(document.getElementById(scope.getAttribute('aria-describedby')).textContent).toBe('Review all changes in this PR.');
-    await clickMaterialButton(user, menu, 'Choose model');
-    expect(screen.getByRole('region', { name: 'Choose model for owner/repo #15' })).toBe(panel);
+    await clickMaterialButton(user, menu, 'Review options');
+    expect(screen.getByRole('region', { name: 'Review options for owner/repo #15' })).toBe(panel);
     expect(model.value).toBe('model-beta');
     expect(scope.value).toBe('full');
     expect(document.activeElement).toBe(model);
@@ -887,14 +949,14 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container.querySelector('.next-step'), 'Choose model');
-    const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
-    const button = within(panel).getByText('Confirm model') as MaterialControl;
-    const trigger = within(panel).getByRole('group', { name: 'Confirm model' });
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Review options');
+    const panel = await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
+    const button = within(panel).getByText('Confirm choices') as MaterialControl;
+    const trigger = within(panel).getByRole('group', { name: 'Confirm choices' });
     const tooltip = document.getElementById(trigger.getAttribute('aria-describedby'));
     expect(tooltip.getAttribute('role')).toBe('tooltip');
-    expect(tooltip.textContent).toBe('This model is already confirmed for this commit and author discussion.');
+    expect(tooltip.textContent).toBe('These review options are already confirmed for this commit and author discussion.');
     expect(panel.querySelector('.control-reason')).toBeNull();
     expect(trigger.tabIndex).toBe(0);
     expect(trigger.getAttribute('aria-disabled')).toBe('true');
@@ -1315,30 +1377,30 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    const prepare = await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    const prepare = await clickMaterialButton(user, container, 'Review options');
     expect(prepare.disabled).toBe(true);
     expect(screen.getByText('Checking…')).toBeTruthy();
     expect(fetchMock.mock.calls[1][0]).toBe('/api/requests/prepare');
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer saved-token');
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
     await act(() => finishPreparation({ ok: true, json: async () => preparation() }));
-    const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    const panel = await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     expect(within(panel).getByRole('link', { name: 'a'.repeat(7) }).getAttribute('title')).toBe('a'.repeat(40));
-    expect(within(panel).getByRole('heading', { name: 'Choose model' })).toBeTruthy();
+    expect(within(panel).getByRole('heading', { name: 'Review options' })).toBeTruthy();
     expect(within(panel).getByText('Passing')).toBeTruthy();
     expect(within(panel).queryByText('Input revision')).toBeNull();
-    expect(within(panel).getByRole('note').textContent).toContain('Scope changes take effect when you start the review, without confirming the model again.');
+    expect(within(panel).getByRole('note').textContent).toBe('Note: Confirming your choices does not start a review.');
     const model = within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     expect(model.value).toBe('model-alpha');
     await user.selectOptions(model, 'model-beta');
     expect(within(panel).getByText('claude-alt')).toBeTruthy();
-    const validate = await clickMaterialButton(user, container, 'Confirm model');
+    const validate = await clickMaterialButton(user, container, 'Confirm choices');
     expect(validate.disabled).toBe(true);
     expect(model.disabled).toBe(true);
-    expect((await clickMaterialButton(user, panel, 'Close model choice')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, panel, 'Close review options')).disabled).toBe(true);
     const changeModel = [...container.querySelectorAll('md-menu-item')]
-      .find((item) => item.textContent.trim() === 'Choose model') as MaterialControl;
+      .find((item) => item.textContent.trim() === 'Review options') as MaterialControl;
     expect(changeModel.disabled).toBe(true);
     changeModel.dispatchEvent(new CustomEvent('close-menu', { detail: { reason: { key: 'Enter' } } }));
     validate.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -1351,18 +1413,18 @@ describe('review requests page', () => {
     await act(() => finishValidation({ ok: true, json: async () => preparation({
       readiness: 'ready', readiness_message: 'ready to run', validated_model: 'model-beta', resolved_model: 'model-beta',
     }) }));
-    expect(await screen.findByText('Review model confirmed.')).toBeTruthy();
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    expect(await screen.findByText('Review options confirmed.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
     expect(screen.queryByText('Start review')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(screen.getByText('No validated model for current inputs')).toBeTruthy();
     await showSnapshot(source, [preparedRequest({ validated_model: { model: 'model-beta', agent: 'claude-alt' } })]);
     expect(screen.queryByText('No validated model for current inputs')).toBeNull();
     expect(screen.getByText('Start review')).toBeTruthy();
-    await clickMaterialButton(user, container, 'Choose model');
-    const reopened = screen.getByRole('region', { name: 'Choose model for owner/repo #15' });
+    await clickMaterialButton(user, container, 'Review options');
+    const reopened = screen.getByRole('region', { name: 'Review options for owner/repo #15' });
     expect((within(reopened).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).value).toBe('model-beta');
-    expect((await clickMaterialButton(user, reopened, 'Confirm model')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, reopened, 'Confirm choices')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -1383,16 +1445,16 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
-    const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
+    const panel = await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     expect(within(panel).getByText(readiness_message, { selector: 'p' })).toBeTruthy();
     expect((screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(true);
     const scope = screen.getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement;
     expect(scope.disabled).toBe(true);
     await user.selectOptions(scope, 'full');
     expect(scope.value).toBe('auto');
-    const button = await clickMaterialButton(user, container, 'Confirm model');
+    const button = await clickMaterialButton(user, container, 'Confirm choices');
     expect(button.disabled).toBe(true);
     expect(screen.queryByText('Start review')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -1413,11 +1475,11 @@ describe('review requests page', () => {
     await showSnapshot(source, [snapshot]);
     const observation = container.querySelector('.github-observation');
     expect(observation.textContent.trim()).toBe('GitHub checked just now');
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     await screen.findByRole('heading', { name: 'CI pending' });
     expect(observation.textContent.trim()).toBe('GitHub checked just now');
-    await clickMaterialButton(user, container, 'Close model choice');
+    await clickMaterialButton(user, container, 'Close review options');
 
     const nextStep = container.querySelector<HTMLElement>('.next-step');
     const checks = within(nextStep).getByRole('link', { name: 'View checks on GitHub' }) as HTMLAnchorElement;
@@ -1438,7 +1500,7 @@ describe('review requests page', () => {
 
     await act(() => finishRefresh({ ok: true, json: async () => preparation({ head_sha: head }) }));
     expect(await within(nextStep).findByRole('heading', { name: 'Needs model' })).toBeTruthy();
-    expect(nextStep.querySelector('md-filled-button').textContent.trim()).toBe('Choose model');
+    expect(nextStep.querySelector('md-filled-button').textContent.trim()).toBe('Review options');
     expect(within(nextStep).queryByRole('link', { name: 'View checks on GitHub' })).toBeNull();
     expect((screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
     expect(screen.queryByText('Start review')).toBeNull();
@@ -1457,9 +1519,9 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container.querySelector('.next-step'), 'Choose model');
-    const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Review options');
+    const panel = await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     const originalChecks = within(panel).getByText('GitHub checks:', { exact: false }).textContent;
     expect((screen.getByRole('link', { name: 'View checks on GitHub' }) as HTMLAnchorElement).href).toBe(`https://github.com/owner/repo/commit/${'a'.repeat(40)}/checks`);
     expect(container.querySelector('md-menu').open).toBe(false);
@@ -1477,10 +1539,10 @@ describe('review requests page', () => {
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ repository: 'owner/repo', number: 15 });
     await act(() => finishRefresh({ ok: true, json: async () => preparation() }));
     await waitFor(() => expect(within(panel).getByText('GitHub checks:', { exact: false }).textContent).toBe('GitHub checks: Passing.'));
-    expect(screen.getByRole('region', { name: 'Choose model for owner/repo #15' })).toBe(panel);
+    expect(screen.getByRole('region', { name: 'Review options for owner/repo #15' })).toBe(panel);
     expect((within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
     expect((within(panel).getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement).disabled).toBe(false);
-    expect((within(panel).getByText('Confirm model') as MaterialControl).disabled).toBe(false);
+    expect((within(panel).getByText('Confirm choices') as MaterialControl).disabled).toBe(false);
     expect(screen.queryByText('Start review')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -1497,16 +1559,16 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container.querySelector('.next-step'), 'Choose model');
-    const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container.querySelector('.next-step'), 'Review options');
+    const panel = await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     expect(screen.getByText('Start review')).toBeTruthy();
     await clickMaterialButton(user, panel, 'Refresh readiness');
     await screen.findByText(failure === 'github' ? 'GitHub is unavailable. Try again later.' : 'Could not connect to the local API. Try again.');
     expect(within(panel).getByRole('link', { name: 'a'.repeat(7) }).getAttribute('title')).toBe('a'.repeat(40));
     expect(within(panel).getByText(/Review readiness is outdated/, { selector: 'p' })).toBeTruthy();
     expect(screen.queryByText('Start review')).toBeNull();
-    expect((await clickMaterialButton(user, panel, 'Confirm model')).disabled).toBe(true);
+    expect((await clickMaterialButton(user, panel, 'Confirm choices')).disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     await clickMaterialButton(user, panel, 'Refresh readiness');
     await waitFor(() => expect(within(panel).queryByText(/Review readiness is outdated/, { selector: 'p' })).toBeNull());
@@ -1528,14 +1590,14 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     await screen.findByText('GitHub checks and review preparation updated.');
     await showSnapshot(source, [preparedRequest(change)]);
-    const panel = screen.getByRole('region', { name: 'Choose model for owner/repo #15' });
+    const panel = screen.getByRole('region', { name: 'Review options for owner/repo #15' });
     expect(within(panel).getByRole('link', { name: 'a'.repeat(7) }).getAttribute('title')).toBe('a'.repeat(40));
     expect(screen.getByRole('alert').textContent).toContain('Review readiness is outdated');
-    const validate = await clickMaterialButton(user, container, 'Confirm model');
+    const validate = await clickMaterialButton(user, container, 'Confirm choices');
     expect(validate.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await clickMaterialButton(user, panel, 'Refresh readiness');
@@ -1553,13 +1615,13 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     await screen.findByText('GitHub checks and review preparation updated.');
-    await clickMaterialButton(user, container, 'Confirm model');
+    await clickMaterialButton(user, container, 'Confirm choices');
     expect(await screen.findByText('Configuration changed. Prepare again.')).toBeTruthy();
     expect(screen.getByText(/Review readiness is outdated/, { selector: 'p' })).toBeTruthy();
-    const validate = await clickMaterialButton(user, container, 'Confirm model');
+    const validate = await clickMaterialButton(user, container, 'Confirm choices');
     expect(validate.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -1575,27 +1637,27 @@ describe('review requests page', () => {
     const { container } = render(App);
     const source = FakeEventSource.instances[0];
     await showSnapshot(source, [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
-    const panel = await screen.findByRole('region', { name: 'Choose model for owner/repo #15' });
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
+    const panel = await screen.findByRole('region', { name: 'Review options for owner/repo #15' });
     await user.selectOptions(within(panel).getByLabelText('Review model for owner/repo #15'), 'model-beta');
-    await clickMaterialButton(user, panel, 'Confirm model');
+    await clickMaterialButton(user, panel, 'Confirm choices');
     await showSnapshot(source, [preparedRequest({ head_sha: 'b'.repeat(40), revision: 3 })]);
     await act(() => finishValidation({ ok: false, status: 409,
       json: async () => ({ error: 'Review inputs changed. Inspect the PR again.' }) }));
     expect(await screen.findByText('Review inputs changed. Inspect the PR again.')).toBeTruthy();
-    expect(screen.getByRole('region', { name: 'Choose model for owner/repo #15' })).toBe(panel);
+    expect(screen.getByRole('region', { name: 'Review options for owner/repo #15' })).toBe(panel);
     expect(within(panel).getByRole('link', { name: 'a'.repeat(7) }).getAttribute('href'))
       .toBe(`https://github.com/owner/repo/commit/${'a'.repeat(40)}`);
     const model = within(panel).getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     expect(model.value).toBe('model-beta');
     expect(model.disabled).toBe(true);
-    expect((await clickMaterialButton(user, panel, 'Confirm model')).disabled).toBe(true);
-    expect(screen.queryByText('Review model confirmed.')).toBeNull();
+    expect((await clickMaterialButton(user, panel, 'Confirm choices')).disabled).toBe(true);
+    expect(screen.queryByText('Review options confirmed.')).toBeNull();
     expect(screen.queryByText('Start review')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    await clickMaterialButton(user, panel, 'Close model choice');
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    await clickMaterialButton(user, panel, 'Close review options');
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -1610,21 +1672,21 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     expect(await screen.findByText(/The suggested model matches a PR co-author hint/)).toBeTruthy();
     const model = screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     expect(model.value).toBe('model-beta');
-    const validated = await clickMaterialButton(user, container, 'Confirm model');
+    const validated = await clickMaterialButton(user, container, 'Confirm choices');
     expect(validated.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await user.selectOptions(model, 'model-alpha');
-    expect((screen.getByText('Confirm model') as MaterialControl).disabled).toBe(false);
+    expect((screen.getByText('Confirm choices') as MaterialControl).disabled).toBe(false);
     expect(screen.queryByText(/This model is confirmed for this commit and author discussion/)).toBeNull();
     await user.selectOptions(model, 'model-beta');
-    expect((screen.getByText('Confirm model') as MaterialControl).disabled).toBe(true);
+    expect((screen.getByText('Confirm choices') as MaterialControl).disabled).toBe(true);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ revision: 3 })]);
-    expect((screen.getByText('Confirm model') as MaterialControl).disabled).toBe(true);
+    expect((screen.getByText('Confirm choices') as MaterialControl).disabled).toBe(true);
     expect(screen.getByRole('alert').textContent).toContain('Review readiness is outdated');
   });
 
@@ -1637,15 +1699,15 @@ describe('review requests page', () => {
       .mockResolvedValueOnce({ ok: false, status: 401 }));
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest()]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     expect(await screen.findByText('Check review configuration.')).toBeTruthy();
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
-    await clickMaterialButton(user, container, 'Choose model');
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
+    await clickMaterialButton(user, container, 'Review options');
     expect(await screen.findByText('Could not connect to the local API. Try again.')).toBeTruthy();
-    await clickMaterialButton(user, container, 'Choose model');
+    await clickMaterialButton(user, container, 'Review options');
     expect(await screen.findByText(/Your session ended/)).toBeTruthy();
-    expect(screen.queryByText('Choose model')).toBeNull();
+    expect(screen.queryByText('Review options')).toBeNull();
     expect(sessionStorage.getItem('luthiai-session')).toBeNull();
   });
 
@@ -1661,8 +1723,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-beta', agent: 'claude-alt' } })]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     await screen.findByText('This model is confirmed for this commit and author discussion.');
     const model = screen.getByLabelText('Review model for owner/repo #15') as HTMLSelectElement;
     await user.selectOptions(model, 'model-alpha');
@@ -1672,9 +1734,9 @@ describe('review requests page', () => {
     const scope = screen.getByLabelText('Review scope for owner/repo #15') as HTMLSelectElement;
     expect(scope.value).toBe('auto');
     await user.selectOptions(scope, reviewMode);
-    expect((await clickMaterialButton(user, container, 'Confirm model')).disabled).toBe(true);
-    await clickMaterialButton(user, container, 'Close model choice');
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    expect((screen.getByText('Confirm choices') as MaterialControl).disabled).toBe(reviewMode === 'auto');
+    await clickMaterialButton(user, container, 'Close review options');
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
     const start = screen.getByText('Start review');
     expect(document.getElementById(start.getAttribute('aria-describedby')).textContent)
       .toContain(reviewMode === 'full' ? 'Start a full PR review.'
@@ -1683,7 +1745,7 @@ describe('review requests page', () => {
     const run = await clickMaterialButton(user, container, 'Start review');
     expect(run.disabled).toBe(true);
     const menuChoice = [...container.querySelectorAll('md-menu-item')]
-      .find((item) => item.textContent.trim() === 'Choose model') as MaterialControl;
+      .find((item) => item.textContent.trim() === 'Review options') as MaterialControl;
     expect(menuChoice.disabled).toBe(true);
     expect(fetchMock.mock.calls[2][0]).toBe('/api/requests/run');
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer saved-token');
@@ -1696,7 +1758,7 @@ describe('review requests page', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     await act(() => acceptRun({ ok: true, status: 202, json: async () => ({ accepted: true }) }));
     expect(await screen.findByText('Review accepted. Starting checks on the server.')).toBeTruthy();
-    expect(screen.queryByRole('region', { name: 'Choose model for owner/repo #15' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Review options for owner/repo #15' })).toBeNull();
     expect(screen.getByText('No rounds yet').closest('[hidden]')).toBeTruthy();
   });
 
@@ -1721,8 +1783,8 @@ describe('review requests page', () => {
     const source = FakeEventSource.instances[0];
     const original = preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } });
     await showSnapshot(source, [original]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     await screen.findByText('This model is confirmed for this commit and author discussion.');
     expect(screen.getByText('Start review')).toBeTruthy();
     await showSnapshot(source, [{ ...original, ...change }]);
@@ -1744,8 +1806,8 @@ describe('review requests page', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(App);
     await showSnapshot(FakeEventSource.instances[0], [preparedRequest({ validated_model: { model: 'model-alpha', agent: 'claude' } })]);
-    await screen.findAllByText('Choose model');
-    await clickMaterialButton(user, container, 'Choose model');
+    await screen.findAllByText('Review options');
+    await clickMaterialButton(user, container, 'Review options');
     await screen.findByText('This model is confirmed for this commit and author discussion.');
     await clickMaterialButton(user, container, 'Start review');
     expect(await screen.findByText('A review is already starting or running for this PR.')).toBeTruthy();

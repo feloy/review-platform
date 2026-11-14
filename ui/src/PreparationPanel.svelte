@@ -2,7 +2,7 @@
   import { preparationOutdated } from './request-status.js';
   import ButtonHelp from './ButtonHelp.svelte';
   import Panel from './Panel.svelte';
-  let { request, preparation, invalid, action, onRefresh, onValidate, onClose, selectedModel = $bindable(''), reviewMode = $bindable('auto') } = $props();
+  let { request, preparation, invalid, action, onRefresh, onValidate, onClose, confirmedReviewMode, selectedModel = $bindable(''), reviewMode = $bindable('auto') } = $props();
   const scopeHelpId = $props.id();
 
   const stale = $derived(preparationOutdated(request, preparation, invalid));
@@ -11,6 +11,7 @@
   const selected = $derived(preparation.models.find((choice) => choice.model === selectedModel));
   const modelValidated = $derived(!stale && preparation.readiness === 'ready' &&
     preparation.validated_model === selectedModel);
+  const scopeChanged = $derived(reviewMode !== confirmedReviewMode);
   const readinessReasons = {
     awaiting_authorization: 'Give permission for this review before confirming a model.',
     discussion_not_observed: 'Refresh the author discussion from GitHub before confirming a model.',
@@ -26,22 +27,23 @@
     : stale ? 'Refresh readiness and inspect the current PR, permission, and model configuration before confirming.'
     : !permitsValidation ? readinessReason
     : !selected ? 'Choose an available review model first.'
-    : modelValidated ? 'This model is already confirmed for this commit and author discussion.'
-    : 'Save this model choice after rechecking the PR, permission, configuration, and GitHub checks.');
+    : modelValidated && !scopeChanged ? 'These review options are already confirmed for this commit and author discussion.'
+    : modelValidated ? 'Confirm this review scope with the current model. GitHub inputs and readiness are checked again.'
+    : 'Confirm these review options after rechecking the PR, permission, configuration, and GitHub checks.');
   const selectionDisabled = $derived(action?.pending || stale || !permitsValidation);
-  const validationDisabled = $derived(selectionDisabled || !selected || modelValidated);
+  const validationDisabled = $derived(selectionDisabled || !selected || (modelValidated && !scopeChanged));
   const checkLabels = {
     green: 'Passing', pending: 'Pending', failing: 'Failing', unknown: 'Unknown', no_results: 'No checks reported',
   };
 </script>
 
-<Panel title="Choose model" label={`Choose model for ${request.repository} #${request.number}`}
-  closeLabel="Close model choice" closeDisabled={action?.pending} {onClose}>
+<Panel title="Review options" label={`Review options for ${request.repository} #${request.number}`}
+  closeLabel="Close review options" closeDisabled={action?.pending} {onClose}>
   <p>Inspect the <a href={`https://github.com/${request.repository}/pull/${request.number}`}
     target="_blank" rel="noopener noreferrer">PR on GitHub</a> at commit <a
     href={`https://github.com/${request.repository}/commit/${preparation.head_sha}`}
     title={preparation.head_sha} target="_blank" rel="noopener noreferrer"><code>{preparation.head_sha.slice(0, 7)}</code></a>
-    before confirming the model.</p>
+    before confirming your choices.</p>
   <p>GitHub checks: <strong>{checkLabels[preparation.checks] ?? 'Unknown'}</strong>.</p>
   {#if stale}
     <p class="action-error" role="alert">Review readiness is outdated. Use Refresh readiness, then inspect the PR again.</p>
@@ -74,8 +76,7 @@
   {#if modelValidated}
     <p>This model is confirmed for this commit and author discussion.</p>
   {/if}
-  <p class="note" role="note">Note: Confirming a model does not start a review.
-    Scope changes take effect when you start the review, without confirming the model again.</p>
+  <p class="note" role="note">Note: Confirming your choices does not start a review.</p>
   {#snippet actions()}
     <ButtonHelp text="Fetch the current PR, permission, model configuration, and GitHub checks."
       label="Refresh readiness" disabled={action?.pending}>
@@ -87,12 +88,12 @@
     </md-text-button>
     {/snippet}
     </ButtonHelp>
-    <ButtonHelp text={validationReason} label="Confirm model" disabled={validationDisabled}>
+    <ButtonHelp text={validationReason} label="Confirm choices" disabled={validationDisabled}>
     {#snippet children(descriptionId)}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <md-filled-button disabled={validationDisabled} aria-describedby={descriptionId}
       onclick={() => { if (!validationDisabled) onValidate(selectedModel); }}>
-      {action?.pending && action.operation === 'validate-model' ? 'Confirming model…' : 'Confirm model'}
+      {action?.pending && action.operation === 'validate-model' ? 'Confirming choices…' : 'Confirm choices'}
     </md-filled-button>
     {/snippet}
     </ButtonHelp>

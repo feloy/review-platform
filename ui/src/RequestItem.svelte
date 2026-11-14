@@ -18,6 +18,7 @@
   let itemElement;
   let selectedModel = $state('');
   let reviewMode = $state('auto');
+  let confirmedReviewMode = $state('auto');
   let inspected = $state(null);
   let preparation = $state(null);
   let preparationInvalid = $state(false);
@@ -139,7 +140,10 @@
     if (result) {
       preparation = result;
       selectedModel = result.resolved_model;
-      if (result.readiness === 'ready' && result.validated_model === model) openPanel(null);
+      if (result.readiness === 'ready' && result.validated_model === model) {
+        confirmedReviewMode = reviewMode;
+        openPanel(null);
+      }
     } else preparationInvalid = true;
   }
 
@@ -233,9 +237,9 @@
             </md-menu-item>
             <md-menu-item type="button" disabled={modelChoiceDisabled}
               aria-expanded={panel === 'preparation'}
-              aria-label={`Choose model for ${request.repository} #${request.number}`}
+              aria-label={`Review options for ${request.repository} #${request.number}`}
               onclose-menu={(event) => selectMenuAction(event, chooseModel)}>
-              <div slot="headline">Choose model</div>
+              <div slot="headline">Review options</div>
             </md-menu-item>
           {/if}
           {#if !compactClosed}<md-divider></md-divider>{/if}
@@ -375,7 +379,7 @@
     {/if}
     {#if panel === 'preparation' && preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
-        bind:reviewMode bind:selectedModel onRefresh={prepareReview} onValidate={validateModel} onClose={() => openPanel(null)} />
+        {confirmedReviewMode} bind:reviewMode bind:selectedModel onRefresh={prepareReview} onValidate={validateModel} onClose={() => openPanel(null)} />
     {/if}
     {#if panel === 'draft' && draft}
       <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => openPanel(null)} />
