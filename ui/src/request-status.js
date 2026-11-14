@@ -82,7 +82,7 @@ export function reviewSituation(request, preparation, invalid = false, selectedM
     if (preparation.readiness === 'discussion_not_observed') return result('Needs refresh', 'Refresh from GitHub before continuing.', 'refresh', 'Refresh PR');
     if (preparation.readiness === 'ready' && !request.validated_model) return result('Model unconfirmed', 'Local updates will confirm the saved choice. Check readiness again if the choice was cleared.', 'prepare', 'Check review readiness');
     if (preparation.readiness === 'ready' && preparation.validated_model === selectedModel && request.validated_model?.model === preparation.validated_model && request.validated_model?.agent === preparation.models.find((choice) => choice.model === selectedModel)?.agent) return result('Ready', 'Starting rechecks GitHub, permission, and the review environment.', 'run', 'Start review', 'success');
-    return result('Needs model', 'Choose and confirm a model for the inspected inputs.', 'model', 'Choose model', 'attention');
+    return result('Needs model', 'Choose and confirm a model for the inspected inputs.', 'model', 'Review options', 'attention');
   }
-  return result('Needs model', 'Check readiness and choose a review model for the current inputs.', 'prepare', 'Choose model', 'attention');
+  return result('Needs model', 'Check readiness and choose a review model for the current inputs.', 'prepare', 'Review options', 'attention');
 }

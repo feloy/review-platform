@@ -95,7 +95,8 @@ If the proposed approach is an anti-pattern, explain why and offer an idiomatic 
   resolve its agent from configured capabilities and repository runner order.
 - Disable GUI model and scope selectors together when readiness is blocked,
   an action is pending, or preparation is outdated.
-  Keep the selected review scope in the start-action help when the model panel is closed.
+  Keep the selected review scope in the start-action help when the review options panel is closed.
+  Allow changed scope to be confirmed even when the model is already validated.
 - Require each lead authorization to name the PR head the lead inspected.
   Reject it if the recorded head has changed; revocation needs no head match.
   Keep inspected inputs fixed in GUI decision forms;
