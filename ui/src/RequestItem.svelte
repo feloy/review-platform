@@ -59,12 +59,7 @@
       case 'prepare': await prepareReview(); break;
       case 'draft': await viewDraft(); break;
       case 'run': await runReview(selectedModel); break;
-      case 'model':
-        openPanel('preparation');
-        await tick();
-        itemElement?.querySelector('.preparation-panel')?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
-        itemElement?.querySelector('.model-choice select')?.focus();
-        break;
+      case 'model': await chooseModel(); break;
     }
   }
   let draft = $state(null);
@@ -92,6 +87,7 @@
     ['starting', 'running'].includes(request.run?.status) || request.publication?.status === 'active' ||
     request.latest_round?.cleanup_pending ||
     ['starting', 'running', 'publishing', 'publication_unknown'].includes(request.latest_round?.status));
+  const modelChoiceDisabled = $derived(action?.pending || managementBlocked || request.latest_round?.status === 'awaiting_decision');
   const compactClosed = $derived(
     request.context?.state === 'closed' &&
     request.latest_round?.status !== 'awaiting_decision' &&
@@ -138,7 +134,18 @@
     if (result) {
       preparation = result;
       selectedModel = result.resolved_model;
+      if (result.readiness === 'ready' && result.validated_model === model) openPanel(null);
     } else preparationInvalid = true;
+  }
+
+  async function chooseModel() {
+    if (!signedIn || modelChoiceDisabled) return;
+    if (!preparation) return prepareReview();
+    openPanel('preparation');
+    await tick();
+    const choice = itemElement?.querySelector('.model-choice select');
+    choice?.closest('.panel')?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+    choice?.focus();
   }
 
   async function runReview(model) {
@@ -218,6 +225,12 @@
               aria-label={`Review permissions for ${request.repository} #${request.number}`}
               onclose-menu={(event) => selectMenuAction(event, openPermissions)}>
               <div slot="headline">Review permissions</div>
+            </md-menu-item>
+            <md-menu-item type="button" disabled={modelChoiceDisabled}
+              aria-expanded={panel === 'preparation'}
+              aria-label={`Change model for ${request.repository} #${request.number}`}
+              onclose-menu={(event) => selectMenuAction(event, chooseModel)}>
+              <div slot="headline">Change model</div>
             </md-menu-item>
           {/if}
           {#if !compactClosed}<md-divider></md-divider>{/if}
@@ -357,7 +370,7 @@
     {/if}
     {#if panel === 'preparation' && preparation}
       <PreparationPanel {request} {preparation} invalid={preparationInvalid} {action}
-        bind:reviewMode bind:selectedModel onRefresh={prepareReview} onValidate={validateModel} onRun={runReview} onClose={() => openPanel(null)} />
+        bind:reviewMode bind:selectedModel onRefresh={prepareReview} onValidate={validateModel} onClose={() => openPanel(null)} />
     {/if}
     {#if panel === 'draft' && draft}
       <DraftPanel {request} {draft} {action} onReject={onRejectDraft} onPublish={onPublishDraft} onClose={() => openPanel(null)} />
@@ -383,7 +396,7 @@
       {/if}
       {#if signedIn}
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <md-text-button disabled={action?.pending || managementBlocked || request.latest_round?.status === 'awaiting_decision'} onclick={prepareReview}>Check review readiness</md-text-button>
+        <md-text-button disabled={modelChoiceDisabled} onclick={prepareReview}>Check review readiness</md-text-button>
         {#if hasDraft}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <md-text-button disabled={action?.pending} onclick={viewDraft}>Read saved draft</md-text-button>

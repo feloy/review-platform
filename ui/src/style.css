@@ -328,14 +328,6 @@ h2 {
   text-decoration: none;
 }
 
-.readiness-checklist {
-  display: grid;
-  gap: 8px;
-  padding-left: 20px;
-  font-size: 0.9rem;
-  line-height: 1.5;
-}
-
 .publication-destination {
   margin-bottom: 20px;
   padding: 0 16px 8px;
@@ -373,7 +365,6 @@ h2 {
 
 .panel,
 .authorization-panel,
-.preparation-panel,
 .progress-panel,
 .draft-panel {
   margin: 0 28px 20px;
@@ -389,7 +380,6 @@ h2 {
 
 .panel p,
 .authorization-panel p,
-.preparation-panel p,
 .progress-panel p,
 .draft-panel p {
   margin: 12px 0;
@@ -563,7 +553,6 @@ h3 {
 
   .panel,
   .authorization-panel,
-  .preparation-panel,
   .progress-panel,
   .draft-panel {
     margin-right: 12px;
